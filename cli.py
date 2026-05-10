@@ -329,15 +329,17 @@ def main(argv: list[str] | None = None) -> int:
 
     p_d = sub.add_parser("daemon", help="run scheduling loop (foreground; use install-daemon for autostart)")
     p_d.add_argument("--once", action="store_true", help="single cycle then exit")
-    p_d.add_argument("--interval", type=int, default=1800)
+    p_d.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
     p_d.add_argument("--curator-age", type=int, default=86400)
+    p_d.add_argument("--curator-hours", default="2,14", help="local-time hours when full curator runs (default '2,14' = 2am + 2pm)")
+    p_d.add_argument("--full-curator-min-age", type=int, default=28800, help="min seconds between full curator runs per project (default 8h)")
     p_d.add_argument("--model", default=DEFAULT_MODEL)
     p_d.add_argument("--log-file", default=str(Path.home() / "Library" / "Logs" / "watchmen.log"))
     p_d.set_defaults(func=cmd_daemon)
 
     p_id = sub.add_parser("install-daemon", help="install launchd agent for watchmen daemon (autostart on login)")
     p_id.add_argument("--model", default=DEFAULT_MODEL)
-    p_id.add_argument("--interval", type=int, default=1800)
+    p_id.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
     p_id.add_argument("--dry-run", action="store_true", help="print plist without installing")
     p_id.set_defaults(func=cmd_install_daemon)
 

@@ -33,8 +33,10 @@ from pathlib import Path
 import state
 
 ROOT = Path(__file__).parent
-DEFAULT_INTERVAL = 1800       # 30 min
-DEFAULT_CURATOR_AGE = 86400   # 24 h — regen CLAUDE.md if last one is older than this
+DEFAULT_INTERVAL = 7200       # 2 hours between analyst checks
+DEFAULT_CURATOR_AGE = 86400   # 24 h — minimum age before stage 3 regen is allowed
+DEFAULT_FULL_CURATOR_HOURS = "2,14"  # full curator runs at 02:00 and 14:00 daily
+DEFAULT_FULL_CURATOR_MIN_AGE = 28800  # min 8 h between full curator runs per project
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_LOG = Path.home() / "Library" / "Logs" / "watchmen.log"
 
@@ -120,6 +122,37 @@ def _regen_claude_md(project_key: str, model: str, log: logging.Logger) -> bool:
     return True
 
 
+def _run_full_curator(project_key: str, model: str, log: logging.Logger) -> bool:
+    """Full curator: stages 1+2+3 — finds candidates, builds skill bundles, regens CLAUDE.md."""
+    proj = state.get_project(project_key)
+    if not proj:
+        return False
+    log.info("full-curator[%s] starting (stages 1+2+3)", project_key)
+    cmd = [sys.executable, str(ROOT / "curate.py"),
+           "--project", project_key, "--repo", proj["source_repo"], "--model", model]
+    run_id = state.start_run(project_key, "curator-full", notes="daemon-scheduled")
+    r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=21600)  # 6 hour ceiling
+    if r.returncode != 0:
+        log.error("full-curator[%s] failed: %s", project_key, (r.stderr or r.stdout)[:500])
+        state.finish_run(run_id, "failed", notes=f"exit {r.returncode}")
+        return False
+    skills_dir = ROOT / "kai_claude" / project_key / "skills"
+    skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
+    state.update_project(project_key, last_curator_run=state.now_iso(), last_curator_skill_count=skill_count)
+    state.finish_run(run_id, "ok", notes=f"{skill_count} skills")
+    log.info("full-curator[%s] done — %d skills", project_key, skill_count)
+    return True
+
+
+def _should_run_full_curator(now: datetime, last_run: datetime | None, scheduled_hours: list[int], min_age_seconds: int) -> bool:
+    """Run full curator iff: current hour is in scheduled_hours AND last run was > min_age_seconds ago."""
+    if now.hour not in scheduled_hours:
+        return False
+    if last_run is None:
+        return True
+    return (now - last_run).total_seconds() >= min_age_seconds
+
+
 def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
         return None
@@ -129,15 +162,24 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
-def cycle_once(log: logging.Logger, model: str, curator_age_seconds: int) -> None:
+def cycle_once(
+    log: logging.Logger,
+    model: str,
+    curator_age_seconds: int,
+    scheduled_curator_hours: list[int],
+    full_curator_min_age: int,
+) -> None:
     state.init_db()
-    log.info("─── cycle start ───")
+    now = datetime.now(timezone.utc)
+    log.info("─── cycle start (utc=%s, local_hour=%d) ───", now.isoformat(timespec="seconds"), datetime.now().hour)
     _ingest_corpus(log)
 
     projects = [p for p in state.list_projects() if p.get("enabled", 1)]
     if not projects:
         log.info("no enabled tracked projects, nothing to do")
         return
+
+    local_now = datetime.now()  # for scheduled-hours check, use local time
 
     for p in projects:
         key = p["project_key"]
@@ -156,19 +198,27 @@ def cycle_once(log: logging.Logger, model: str, curator_age_seconds: int) -> Non
         else:
             log.info("[%s] below threshold — skipping analyst", key)
 
-        # Regen CLAUDE.md if analyst ran successfully OR if last regen is older than threshold
         last_curator = _parse_iso(p.get("last_curator_run"))
-        too_old = (
-            last_curator is None
-            or (datetime.now(timezone.utc) - last_curator).total_seconds() > curator_age_seconds
-        )
-        # Only regen if there's already a skills/ directory (otherwise it'll fail in stage 3)
         skills_dir = ROOT / "kai_claude" / key / "skills"
         has_bundles = skills_dir.exists() and any(d.is_dir() for d in skills_dir.iterdir())
-        if (analyst_ran or too_old) and has_bundles:
+
+        # Scheduled full curator (twice a day by default) — full pipeline incl. skill bundles
+        if _should_run_full_curator(local_now, _parse_iso(p.get("last_curator_run")) and
+                                    _parse_iso(p.get("last_curator_run")).replace(tzinfo=None),
+                                    scheduled_curator_hours, full_curator_min_age):
+            log.info("[%s] scheduled full curator window (hour=%d, last=%s)", key, local_now.hour, p.get("last_curator_run"))
+            _run_full_curator(key, model, log)
+            continue  # full curator covers stage 3 too; skip regen below
+
+        # Otherwise: light stage-3-only regen if analyst added new content AND last regen is stale
+        too_old = (
+            last_curator is None
+            or (now - last_curator).total_seconds() > curator_age_seconds
+        )
+        if analyst_ran and has_bundles and too_old:
             _regen_claude_md(key, model, log)
-        elif (analyst_ran or too_old) and not has_bundles:
-            log.info("[%s] no skill bundles yet — skip regen-claude (run `watchmen curate %s` first)", key, key)
+        elif analyst_ran and not has_bundles:
+            log.info("[%s] no skill bundles yet — wait for next scheduled full curator window", key)
 
     log.info("─── cycle end ───\n")
 
@@ -178,13 +228,18 @@ def run(args) -> int:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    log.info("watchmen daemon starting (interval=%ss, model=%s, curator_age=%ss, log=%s)",
-             args.interval, args.model, args.curator_age, args.log_file)
+    scheduled_hours = [int(h.strip()) for h in args.curator_hours.split(",") if h.strip()]
+    log.info(
+        "watchmen daemon starting (interval=%ss, model=%s, curator_age=%ss, "
+        "full_curator_hours=%s, full_curator_min_age=%ss, log=%s)",
+        args.interval, args.model, args.curator_age, scheduled_hours,
+        args.full_curator_min_age, args.log_file,
+    )
     log.info("pid=%d cwd=%s", os.getpid(), os.getcwd())
 
     if args.once:
         try:
-            cycle_once(log, args.model, args.curator_age)
+            cycle_once(log, args.model, args.curator_age, scheduled_hours, args.full_curator_min_age)
         except Exception as e:
             log.exception("cycle failed: %s", e)
             return 1
@@ -192,7 +247,7 @@ def run(args) -> int:
 
     while not _shutdown:
         try:
-            cycle_once(log, args.model, args.curator_age)
+            cycle_once(log, args.model, args.curator_age, scheduled_hours, args.full_curator_min_age)
         except Exception as e:
             log.exception("cycle failed: %s", e)
 
@@ -209,8 +264,10 @@ def run(args) -> int:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="run one cycle and exit (testing)")
-    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help=f"seconds between cycles (default {DEFAULT_INTERVAL})")
-    parser.add_argument("--curator-age", type=int, default=DEFAULT_CURATOR_AGE, help="regen CLAUDE.md if last one older than this many seconds")
+    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help=f"seconds between cycles (default {DEFAULT_INTERVAL} = {DEFAULT_INTERVAL//3600}h)")
+    parser.add_argument("--curator-age", type=int, default=DEFAULT_CURATOR_AGE, help="stage-3 regen allowed only if last CLAUDE.md is older than this (default 24h)")
+    parser.add_argument("--curator-hours", default=DEFAULT_FULL_CURATOR_HOURS, help=f"local-time hours when full curator runs (default '{DEFAULT_FULL_CURATOR_HOURS}')")
+    parser.add_argument("--full-curator-min-age", type=int, default=DEFAULT_FULL_CURATOR_MIN_AGE, help=f"minimum seconds between full curator runs per project (default {DEFAULT_FULL_CURATOR_MIN_AGE} = {DEFAULT_FULL_CURATOR_MIN_AGE//3600}h)")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--log-file", default=str(DEFAULT_LOG))
     args = parser.parse_args()

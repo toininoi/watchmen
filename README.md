@@ -101,9 +101,15 @@ watchmen install-viewer                      # also autostart the viewer at :888
 watchmen launchd-status                      # verify
 ```
 
-Once installed, the daemon wakes every 30 min, re-ingests new transcripts from `~/.claude/projects/`, runs the incremental analyst on any project with new prompts above its threshold (default 30 new prompts), and re-generates the `CLAUDE.md` for that project.
+Default cadence:
 
-Full curator runs (which generate skill bundles, more expensive) are **not** automatic — invoke `watchmen curate <project>` manually when you want fresh skills.
+| What | When |
+|---|---|
+| Re-ingest `~/.claude/projects/` + incremental analyst | Every **2 hours** |
+| `CLAUDE.md` regen (stage 3 only, light) | After an analyst run if last regen >24h ago |
+| **Full curator** (skill bundles + CLAUDE.md, expensive) | **02:00 and 14:00 local time**, min 8h between runs per project |
+
+The analyst check is cheap — usually a no-op when there's nothing new. The full curator runs twice a day at 2am and 2pm to refresh skill bundles + the full CLAUDE.md. You can override these defaults via flags on `watchmen daemon` (see `--curator-hours`, `--interval`, `--full-curator-min-age`).
 
 Logs:
 
@@ -214,6 +220,19 @@ Per project, a full curator run (analyst + 6-8 skill bundles + CLAUDE.md) is typ
 Everything lives locally. Your session transcripts live in `~/.claude/projects/` already (Anthropic puts them there). watchmen reads them, builds a SQLite corpus, and ships only the chunks needed for analysis to OpenRouter (your chosen LLM provider). The artifacts it generates (`kai_claude/`, `analyses/`) stay on your disk.
 
 If you don't want certain repos analyzed, just don't track them — auto-detect only suggests, `watchmen track` is opt-in.
+
+## Roadmap (coming soon)
+
+| Source | Status | Notes |
+|---|---|---|
+| Claude Code **CLI** | ✅ shipped | Hooks + transcript ingest both work |
+| Claude Code **desktop app** (Mac/Windows) | ✅ shipped | Same runtime as the CLI — no changes needed; same `~/.claude/projects/` + `~/.claude/settings.json` |
+| **Codex** (OpenAI CLI / desktop) | 🔜 planned | Needs `corpus.py` adapter for `~/.codex/sessions/` + a `hooks/codex_observe.sh` + `install-hooks --codex` to patch `~/.codex/config.toml`. Schema is close enough that the analyst + curator stages will work unchanged. |
+| **Cursor** | 🤔 considering | Stores sessions in SQLite (`state.vscdb`) with **no hook system** — only post-session polling is possible. Adapter is doable but realtime observation is impossible. |
+| **OpenCode** | 🤔 considering | File-based sessions with a clean `opencode export` CLI. Straightforward adapter. |
+| **Codex Cloud / Claude.ai web** | ❌ out of scope | No local files, no hooks. Would need an authenticated API that doesn't currently exist. |
+
+Other roadmap items: diff view in the web UI (generated CLAUDE.md vs the repo's existing AGENTS.md), cross-project search, "promote artifact" button to copy a generated SKILL.md into the actual repo, live progress streaming during runs (SSE).
 
 ## Limitations + caveats
 
