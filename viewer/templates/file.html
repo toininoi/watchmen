@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ file_rel }} — {{ skill_slug }} — watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-4">
+  <div class="text-xs text-gray-500 mb-1">
+    <a href="/" class="hover:text-gray-700">dashboard</a> /
+    <a href="/p/{{ project_key }}" class="hover:text-gray-700">{{ project_key }}</a> /
+    <a href="/p/{{ project_key }}/skills/{{ skill_slug }}" class="hover:text-gray-700">{{ skill_slug }}</a> /
+  </div>
+  <h1 class="text-xl font-mono">{{ file_rel }} <span class="text-xs text-gray-500 ml-2">{{ "%.1f"|format(byte_size/1024) }} KB</span></h1>
+</div>
+
+<div class="bg-white border border-gray-200 rounded-lg markdown-body">
+  {{ file_html|safe }}
+</div>
+
+{% endblock %}

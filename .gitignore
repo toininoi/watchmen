@@ -1,0 +1,36 @@
+# Runtime data — populated by the user's own runs, not source
+corpus.db
+events.db
+events.jsonl
+state.db
+analyses/
+kai_claude/
+output/
+
+# Logs
+*.log
+*.out.log
+*.err.log
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Local config
+.env
+.env.local
+*.bak.*

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ day }} — thesis — {{ project_key }} — watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-4">
+  <div class="text-xs text-gray-500 mb-1">
+    <a href="/" class="hover:text-gray-700">dashboard</a> /
+    <a href="/p/{{ project_key }}" class="hover:text-gray-700">{{ project_key }}</a> /
+    <a href="/p/{{ project_key }}/thesis" class="hover:text-gray-700">thesis</a> /
+  </div>
+  <h1 class="text-xl font-semibold font-mono">{{ day }}</h1>
+</div>
+
+<article class="bg-white border border-gray-200 rounded-lg markdown-body">
+  {{ html|safe }}
+</article>
+
+{% endblock %}

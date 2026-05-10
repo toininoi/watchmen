@@ -1,0 +1,312 @@
+"""state.db — per-project run tracking for watchmen.
+
+Tables:
+  projects: tracked projects (project_key, source_repo, last-run timestamps)
+  runs:     run history (project, kind, status, timing, cost estimate)
+
+Most operations idempotent. Schema is migrate-on-open: adding columns is fine, drop/rename requires manual migration.
+"""
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).parent
+STATE_DB = ROOT / "state.db"
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+    project_key TEXT PRIMARY KEY,
+    source_repo TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    threshold_new_prompts INTEGER NOT NULL DEFAULT 30,
+    last_analyst_run TEXT,
+    last_analyst_day TEXT,
+    last_curator_run TEXT,
+    last_curator_skill_count INTEGER,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    cost_estimate_usd REAL,
+    notes TEXT,
+    FOREIGN KEY (project_key) REFERENCES projects(project_key)
+);
+CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_key);
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
+"""
+
+
+@contextmanager
+def conn():
+    c = sqlite3.connect(STATE_DB)
+    c.row_factory = sqlite3.Row
+    try:
+        yield c
+    finally:
+        c.close()
+
+
+def init_db() -> None:
+    with conn() as c:
+        c.executescript(SCHEMA)
+        c.commit()
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# ─── Projects ───────────────────────────────────────────────────────────────
+
+
+def track_project(project_key: str, source_repo: str, threshold: int = 30) -> None:
+    with conn() as c:
+        c.execute(
+            """INSERT INTO projects (project_key, source_repo, threshold_new_prompts)
+               VALUES (?, ?, ?)
+               ON CONFLICT(project_key) DO UPDATE SET
+                   source_repo = excluded.source_repo,
+                   threshold_new_prompts = excluded.threshold_new_prompts,
+                   updated_at = datetime('now')""",
+            (project_key, source_repo, threshold),
+        )
+        c.commit()
+
+
+def list_projects() -> list[dict]:
+    with conn() as c:
+        rows = c.execute("SELECT * FROM projects ORDER BY project_key").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_project(project_key: str) -> dict | None:
+    with conn() as c:
+        row = c.execute("SELECT * FROM projects WHERE project_key = ?", (project_key,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_project(project_key: str, **fields) -> None:
+    if not fields:
+        return
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    with conn() as c:
+        c.execute(
+            f"UPDATE projects SET {sets}, updated_at = datetime('now') WHERE project_key = ?",
+            (*fields.values(), project_key),
+        )
+        c.commit()
+
+
+def set_enabled(project_key: str, enabled: bool) -> None:
+    update_project(project_key, enabled=int(enabled))
+
+
+# ─── Runs ───────────────────────────────────────────────────────────────────
+
+
+def start_run(project_key: str, kind: str, notes: str | None = None) -> int:
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO runs (project_key, kind, started_at, notes) VALUES (?, ?, ?, ?)",
+            (project_key, kind, now_iso(), notes),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def finish_run(
+    run_id: int,
+    status: str = "ok",
+    notes: str | None = None,
+    cost_estimate_usd: float | None = None,
+) -> None:
+    with conn() as c:
+        c.execute(
+            """UPDATE runs SET ended_at = ?, status = ?,
+                                  notes = COALESCE(?, notes),
+                                  cost_estimate_usd = COALESCE(?, cost_estimate_usd)
+               WHERE id = ?""",
+            (now_iso(), status, notes, cost_estimate_usd, run_id),
+        )
+        c.commit()
+
+
+def recent_runs(limit: int = 20, project_key: str | None = None) -> list[dict]:
+    with conn() as c:
+        if project_key:
+            rows = c.execute(
+                "SELECT * FROM runs WHERE project_key = ? ORDER BY id DESC LIMIT ?",
+                (project_key, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ─── Derived state from corpus.db ───────────────────────────────────────────
+
+
+def get_project_progress(project_key: str) -> dict:
+    """Cross-reference state.db with corpus.db to derive: last day in corpus, last day in
+    thesis, count of new prompts since last_analyst_day. Caller decides whether to trigger a run."""
+    proj = get_project(project_key)
+    corpus_db = ROOT / "corpus.db"
+    if not corpus_db.exists():
+        return {"error": "corpus.db not found"}
+
+    cc = sqlite3.connect(corpus_db)
+    cc.row_factory = sqlite3.Row
+
+    last_corpus_day = cc.execute(
+        """SELECT MAX(substr(p.timestamp, 1, 10)) AS d
+           FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+           WHERE s.project_dir LIKE ? AND s.is_subagent = 0""",
+        (f"%{project_key}%",),
+    ).fetchone()["d"]
+
+    last_analyst_day = (proj or {}).get("last_analyst_day")
+    new_prompts = 0
+    if last_analyst_day:
+        new_prompts = cc.execute(
+            """SELECT COUNT(*) AS n
+               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+               WHERE s.project_dir LIKE ? AND s.is_subagent = 0
+                 AND substr(p.timestamp, 1, 10) > ?""",
+            (f"%{project_key}%", last_analyst_day),
+        ).fetchone()["n"]
+    else:
+        new_prompts = cc.execute(
+            """SELECT COUNT(*) AS n
+               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+               WHERE s.project_dir LIKE ? AND s.is_subagent = 0""",
+            (f"%{project_key}%",),
+        ).fetchone()["n"]
+    cc.close()
+    return {
+        "project_key": project_key,
+        "last_corpus_day": last_corpus_day,
+        "last_analyst_day": last_analyst_day,
+        "new_prompts_since_last_analysis": new_prompts,
+        "needs_analysis": (proj is None) or (new_prompts >= (proj.get("threshold_new_prompts", 30))),
+    }
+
+
+def sync_from_disk(project_key: str) -> dict:
+    """Look at analyses/<project>/*.md and kai_claude/<project>/skills to derive last-run state.
+    Updates state.db with what's on disk. Returns a summary of what was synced."""
+    summary = {"analyst": False, "curator": False}
+    analyses_dir = ROOT / "analyses" / project_key
+    if analyses_dir.exists():
+        day_files = sorted(p.stem for p in analyses_dir.glob("20*.md"))
+        if day_files:
+            latest = day_files[-1]
+            mtime_iso = datetime.fromtimestamp(
+                (analyses_dir / f"{latest}.md").stat().st_mtime, tz=timezone.utc
+            ).isoformat(timespec="seconds")
+            update_project(project_key, last_analyst_day=latest, last_analyst_run=mtime_iso)
+            summary["analyst"] = {"last_day": latest, "files": len(day_files)}
+
+    skills_dir = ROOT / "kai_claude" / project_key / "skills"
+    if skills_dir.exists():
+        skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir())
+        if skill_count:
+            claude_md = ROOT / "kai_claude" / project_key / "CLAUDE.md"
+            mtime_iso = (
+                datetime.fromtimestamp(claude_md.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+                if claude_md.exists()
+                else now_iso()
+            )
+            update_project(project_key, last_curator_run=mtime_iso, last_curator_skill_count=skill_count)
+            summary["curator"] = {"skill_count": skill_count}
+    return summary
+
+
+def auto_detect_projects() -> list[dict]:
+    """Scan corpus.db for projects that have main-session activity. Returns list with
+    project_key (encoded dir name shortened), source_repo (best-effort decoded), prompt count."""
+    corpus_db = ROOT / "corpus.db"
+    if not corpus_db.exists():
+        return []
+    cc = sqlite3.connect(corpus_db)
+    cc.row_factory = sqlite3.Row
+    rows = cc.execute(
+        """SELECT s.project_dir, COUNT(*) AS prompts, COUNT(DISTINCT s.session_id) AS sessions
+           FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+           WHERE s.is_subagent = 0
+           GROUP BY s.project_dir
+           HAVING prompts >= 30
+           ORDER BY prompts DESC"""
+    ).fetchall()
+    cc.close()
+
+    detected = []
+    for r in rows:
+        # Encoded dir like "-Users-batuhanaktas-Development-prod-kai-frontend"
+        # Best-effort decode: leading "-" → "/", remaining "-" → "/" (will be wrong for dashes
+        # in real dir names like "kai-frontend" — but we only use this as a hint)
+        encoded = r["project_dir"]
+        # Use shortened key (last segment without dashes)
+        last_seg = encoded.lstrip("-").split("-")[-1]
+        # Try to find best key by joining remaining trailing segments (e.g. "kai-frontend")
+        # Use a heuristic: if there's a dir on disk that matches when we replace "-" with "/" greedily
+        decoded = "/" + encoded.lstrip("-").replace("-", "/")
+        actual = _try_resolve_real_path(decoded)
+        if actual:
+            project_key = actual.name
+            source_repo = str(actual)
+        else:
+            project_key = last_seg
+            source_repo = decoded  # best-effort
+        detected.append({
+            "project_key": project_key,
+            "source_repo": source_repo,
+            "encoded_dir": encoded,
+            "prompts": r["prompts"],
+            "sessions": r["sessions"],
+        })
+    return detected
+
+
+def _try_resolve_real_path(decoded: str) -> Path | None:
+    """Heuristically map a decoded path back to a real existing dir.
+    e.g. /Users/batuhanaktas/Development/prod/kai/frontend → /Users/batuhanaktas/Development/prod/kai-frontend
+    by walking from root and gluing dash-separated tail segments back together."""
+    parts = Path(decoded).parts
+    if not parts or parts[0] != "/":
+        return None
+    cur = Path("/")
+    i = 1
+    while i < len(parts):
+        # Try to match the longest possible joined segment that exists as a child
+        children = [p for p in cur.iterdir() if p.is_dir()] if cur.exists() else []
+        best = None
+        best_j = i
+        # Try longest match first (handles "kai-frontend" — three encoded segments collapsing into one real dir)
+        for j in range(len(parts), i, -1):
+            candidate = "-".join(parts[i:j])
+            for ch in children:
+                if ch.name == candidate:
+                    best = ch
+                    best_j = j
+                    break
+            if best:
+                break
+        if not best:
+            return None
+        cur = best
+        i = best_j
+    return cur if cur.exists() else None

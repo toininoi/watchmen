@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ skill_slug }} — {{ project_key }} — watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-6">
+  <div class="text-xs text-gray-500 mb-1">
+    <a href="/" class="hover:text-gray-700">dashboard</a> /
+    <a href="/p/{{ project_key }}" class="hover:text-gray-700">{{ project_key }}</a> /
+  </div>
+  <h1 class="text-2xl font-semibold">{{ skill_slug }}</h1>
+</div>
+
+{% if files %}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Files in this bundle</div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+    {% for f in files %}
+    <a href="/p/{{ project_key }}/skills/{{ skill_slug }}/files/{{ f.rel }}" class="text-sm text-indigo-600 font-mono hover:underline flex justify-between">
+      <span>{{ f.rel }}</span>
+      <span class="text-xs text-gray-500">{{ "%.1f"|format(f.size/1024) }} KB</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if skill_md %}
+<article class="bg-white border border-gray-200 rounded-lg markdown-body">
+  {{ skill_md|safe }}
+</article>
+{% else %}
+<div class="text-sm text-gray-500">No SKILL.md found.</div>
+{% endif %}
+
+{% endblock %}

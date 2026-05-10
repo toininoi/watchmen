@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}watchmen{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.7.0/github-markdown-light.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/PrismJS/prism@v1.29/themes/prism.min.css" />
+  <style>
+    :root { --max: 1100px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif; }
+    .markdown-body { box-sizing: border-box; padding: 24px; max-width: var(--max); margin: 0 auto; }
+    .codehilite { background: #f6f8fa; border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 13px; }
+    .codehilite pre { margin: 0; }
+    nav a { color: #4f46e5; }
+    nav a:hover { text-decoration: underline; }
+    .skill-card { transition: background 0.1s; }
+    .skill-card:hover { background: #f3f4f6; }
+    table { font-size: 14px; }
+    code { font-size: 13px; }
+    pre code { font-size: 13px; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <nav class="bg-white border-b border-gray-200 px-6 py-3">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+      <div class="flex items-center space-x-6">
+        <a href="/" class="font-semibold text-gray-800 text-lg">watchmen</a>
+        <a href="/" class="text-sm text-gray-600 hover:text-gray-900">Dashboard</a>
+        <a href="/runs" class="text-sm text-gray-600 hover:text-gray-900">Runs</a>
+      </div>
+      <div class="text-xs text-gray-500">local • 127.0.0.1:8888</div>
+    </div>
+  </nav>
+  <main class="max-w-7xl mx-auto px-6 py-6">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

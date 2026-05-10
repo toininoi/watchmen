@@ -1,0 +1,35 @@
+[project]
+name = "watchmen"
+version = "0.1.0"
+description = "Local Claude Code session intelligence — observe, analyze, and generate skills + CLAUDE.md per project, autonomously"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "markdown>=3.7",
+    "pygments>=2.18",
+]
+
+[project.scripts]
+watchmen = "cli:main"
+
+[project.urls]
+Repository = "https://github.com/firstbatchxyz/watchmen"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = [
+    "cli.py", "state.py", "agent.py", "tools_lib.py",
+    "analyze.py", "curate.py", "corpus.py",
+    "view.py", "transcript.py", "server.py",
+    "daemon.py", "launchd_setup.py", "hooks_setup.py",
+    "viewer/**/*.py", "viewer/templates/*.html",
+    "hooks/*.sh",
+]

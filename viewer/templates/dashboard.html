@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}watchmen dashboard{% endblock %}
+{% block content %}
+
+<div class="mb-8">
+  <h1 class="text-2xl font-semibold mb-2">Tracked projects</h1>
+  <p class="text-sm text-gray-600">Run <code class="bg-gray-200 px-1 rounded">watchmen track &lt;key&gt; --repo &lt;path&gt;</code> from the terminal to add more.</p>
+</div>
+
+{% if projects %}
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-8">
+  <table class="w-full">
+    <thead class="bg-gray-50 border-b border-gray-200">
+      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
+        <th class="px-4 py-3">Project</th>
+        <th class="px-4 py-3">Skills</th>
+        <th class="px-4 py-3">Thesis days</th>
+        <th class="px-4 py-3">CLAUDE.md</th>
+        <th class="px-4 py-3">Last analyst</th>
+        <th class="px-4 py-3">Repo</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in projects %}
+      <tr class="border-b border-gray-100 hover:bg-gray-50">
+        <td class="px-4 py-3">
+          <a href="/p/{{ p.project_key }}" class="text-indigo-600 font-medium">{{ p.project_key }}</a>
+        </td>
+        <td class="px-4 py-3 text-sm">{{ p.skill_count }}</td>
+        <td class="px-4 py-3 text-sm">{{ p.thesis_day_count }}</td>
+        <td class="px-4 py-3 text-sm">
+          {% if p.claude_md_size %}
+            {{ "%.1f"|format(p.claude_md_size/1024) }} KB
+          {% else %}<span class="text-gray-400">—</span>{% endif %}
+        </td>
+        <td class="px-4 py-3 text-sm text-gray-600">{{ p.last_analyst_day or "—" }}</td>
+        <td class="px-4 py-3 text-xs text-gray-500 font-mono">{{ p.source_repo|replace("/Users/batuhanaktas", "~") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="bg-white rounded p-6 text-gray-600 text-sm border border-gray-200">
+  No tracked projects yet. Run <code>watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
+</div>
+{% endif %}
+
+<h2 class="text-lg font-semibold mb-3 mt-8">Recent runs</h2>
+{% if runs %}
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+  <table class="w-full">
+    <thead class="bg-gray-50 border-b border-gray-200">
+      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
+        <th class="px-4 py-2">Started</th>
+        <th class="px-4 py-2">Project</th>
+        <th class="px-4 py-2">Kind</th>
+        <th class="px-4 py-2">Status</th>
+        <th class="px-4 py-2">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr class="border-b border-gray-100">
+        <td class="px-4 py-2 text-xs text-gray-600 font-mono">{{ r.started_at[:19] }}</td>
+        <td class="px-4 py-2 text-sm"><a href="/p/{{ r.project_key }}" class="text-indigo-600">{{ r.project_key }}</a></td>
+        <td class="px-4 py-2 text-sm">{{ r.kind }}</td>
+        <td class="px-4 py-2 text-sm">
+          {% if r.status == 'ok' %}<span class="text-green-700">✓ ok</span>
+          {% elif r.status == 'running' %}<span class="text-yellow-700">● running</span>
+          {% else %}<span class="text-red-700">✗ {{ r.status }}</span>{% endif %}
+        </td>
+        <td class="px-4 py-2 text-xs text-gray-600">{{ r.notes or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="text-sm text-gray-500">No runs recorded yet.</div>
+{% endif %}
+
+{% endblock %}
