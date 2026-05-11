@@ -11,19 +11,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 HOOK_SCRIPT = (ROOT / "hooks" / "watchmen_observe.sh").resolve()
+BRIEF_SCRIPT = (ROOT / "hooks" / "watchmen_brief.sh").resolve()
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
-# Events watchmen wires up. Each entry can include a matcher (PreToolUse/PostToolUse have one).
-WATCHMEN_HOOK_ENTRIES = {
-    "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "SessionStart": [{"hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "Notification": [{"hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
-    "PreCompact": [{"hooks": [{"type": "command", "command": str(HOOK_SCRIPT)}]}],
+# All hook scripts watchmen installs. Keys used internally; values are absolute paths.
+WATCHMEN_SCRIPTS: dict[str, Path] = {
+    "observe": HOOK_SCRIPT,
+    "brief": BRIEF_SCRIPT,
+}
+
+# Per-event: list of (script_key, matcher_or_None). matcher=None omits the matcher key
+# entirely (Claude Code treats absent matcher as "all"); matcher="" means an explicit
+# empty matcher (kept for PreToolUse/PostToolUse, which canonically use the matcher field).
+WATCHMEN_HOOKS: dict[str, list[tuple[str, str | None]]] = {
+    "PreToolUse":       [("observe", "")],
+    "PostToolUse":      [("observe", "")],
+    "SessionStart":     [("observe", None), ("brief", None)],
+    "SessionEnd":       [("observe", None)],
+    "UserPromptSubmit": [("observe", None)],
+    "Stop":             [("observe", None)],
+    "SubagentStop":     [("observe", None)],
+    "Notification":     [("observe", None)],
+    "PreCompact":       [("observe", None)],
 }
 
 
@@ -46,10 +55,12 @@ def _backup() -> Path:
 
 
 def install() -> int:
-    if not HOOK_SCRIPT.exists():
-        print(f"ERROR: hook script not found at {HOOK_SCRIPT}")
+    missing = [str(p) for p in WATCHMEN_SCRIPTS.values() if not p.exists()]
+    if missing:
+        print(f"ERROR: hook script(s) not found: {', '.join(missing)}")
         return 1
-    HOOK_SCRIPT.chmod(0o755)
+    for p in WATCHMEN_SCRIPTS.values():
+        p.chmod(0o755)
 
     settings = _load_settings()
     hooks = settings.setdefault("hooks", {})
@@ -59,21 +70,26 @@ def install() -> int:
         print(f"backed up existing settings → {backup_path}")
 
     added = 0
-    for event, entries in WATCHMEN_HOOK_ENTRIES.items():
+    for event, scripts in WATCHMEN_HOOKS.items():
         existing = hooks.setdefault(event, [])
-        for entry in entries:
-            # check if our hook command is already present in any entry for this event
+        for script_key, matcher in scripts:
+            cmd_str = str(WATCHMEN_SCRIPTS[script_key])
             already = any(
-                any(h.get("command") == str(HOOK_SCRIPT) for h in e.get("hooks", []))
+                any(h.get("command") == cmd_str for h in e.get("hooks", []))
                 for e in existing
             )
-            if not already:
-                existing.append(entry)
-                added += 1
+            if already:
+                continue
+            entry: dict = {"hooks": [{"type": "command", "command": cmd_str}]}
+            if matcher is not None:
+                entry["matcher"] = matcher
+            existing.append(entry)
+            added += 1
 
     _save_settings(settings)
-    print(f"installed watchmen hooks: {added} new entries across {len(WATCHMEN_HOOK_ENTRIES)} events")
-    print(f"hook script: {HOOK_SCRIPT}")
+    print(f"installed watchmen hooks: {added} new entries across {len(WATCHMEN_HOOKS)} events")
+    for key, p in WATCHMEN_SCRIPTS.items():
+        print(f"  - {key}: {p}")
     print("Note: start the local hooks server with `uv run python server.py` in a terminal so events are captured.")
     return 0
 
@@ -92,11 +108,12 @@ def uninstall() -> int:
     backup_path = _backup()
     print(f"backed up existing settings → {backup_path}")
 
+    watchmen_cmds = {str(p) for p in WATCHMEN_SCRIPTS.values()}
     removed = 0
     for event, entries in list(hooks.items()):
         new_entries = []
         for e in entries:
-            inner = [h for h in e.get("hooks", []) if h.get("command") != str(HOOK_SCRIPT)]
+            inner = [h for h in e.get("hooks", []) if h.get("command") not in watchmen_cmds]
             if inner:
                 new_e = dict(e)
                 new_e["hooks"] = inner
@@ -123,15 +140,18 @@ def status() -> int:
         return 0
     settings = _load_settings()
     hooks = settings.get("hooks") or {}
-    print(f"watchmen hook script: {HOOK_SCRIPT}")
-    print(f"settings.json:        {SETTINGS_FILE}")
+    for key, p in WATCHMEN_SCRIPTS.items():
+        print(f"watchmen {key}: {p}")
+    print(f"settings.json:    {SETTINGS_FILE}")
     print()
-    for event in WATCHMEN_HOOK_ENTRIES.keys():
+    for event, scripts in WATCHMEN_HOOKS.items():
         entries = hooks.get(event) or []
-        present = any(
-            any(h.get("command") == str(HOOK_SCRIPT) for h in e.get("hooks", []))
-            for e in entries
-        )
-        marker = "✓" if present else "·"
-        print(f"  {marker} {event}")
+        for script_key, _matcher in scripts:
+            cmd_str = str(WATCHMEN_SCRIPTS[script_key])
+            present = any(
+                any(h.get("command") == cmd_str for h in e.get("hooks", []))
+                for e in entries
+            )
+            marker = "✓" if present else "·"
+            print(f"  {marker} {event:<18} ({script_key})")
     return 0

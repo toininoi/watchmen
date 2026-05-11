@@ -18,6 +18,7 @@ Usage:
 import argparse
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
 
@@ -449,6 +450,77 @@ def build_claude_md_author(client, model, project_key, source_repo, log_path, ru
     )
 
 
+# ─── Changelog generation ───────────────────────────────────────────────────
+
+
+def _changelog_label(rel_path: str) -> str:
+    if rel_path == "CLAUDE.md":
+        return "CLAUDE.md"
+    parts = rel_path.split("/")
+    if len(parts) >= 2 and parts[0] == "skills":
+        return f"skills/{parts[1]}"
+    return rel_path
+
+
+def write_changelog(out_dir: Path, run_kind: str) -> None:
+    """Manifest-diff approach. Compares CLAUDE.md + each skills/<slug>/SKILL.md mtime
+    against the prior _manifest.json snapshot and prepends a dated entry to _changelog.md
+    if anything was added/updated/removed. No-op if nothing changed."""
+    manifest_path = out_dir / "_manifest.json"
+    try:
+        prev = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        prev = {}
+
+    current: dict[str, float] = {}
+    claude_md = out_dir / "CLAUDE.md"
+    if claude_md.exists():
+        current["CLAUDE.md"] = claude_md.stat().st_mtime
+    skills_dir = out_dir / "skills"
+    if skills_dir.exists():
+        for p in skills_dir.glob("*/SKILL.md"):
+            current[str(p.relative_to(out_dir))] = p.stat().st_mtime
+
+    # 1s slack to avoid noise when prev mtime equals current within filesystem precision
+    added = sorted({_changelog_label(k) for k in current if k not in prev})
+    updated = sorted({_changelog_label(k) for k in current
+                      if k in prev and current[k] - prev[k] > 1.0})
+    removed = sorted({_changelog_label(k) for k in prev if k not in current})
+
+    if not (added or updated or removed):
+        manifest_path.write_text(json.dumps(current, indent=2, sort_keys=True))
+        return
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"## {ts} — {run_kind}", ""]
+    if added:
+        lines.append("**Added:**")
+        lines += [f"- {a}" for a in added]
+        lines.append("")
+    if updated:
+        lines.append("**Updated:**")
+        lines += [f"- {u}" for u in updated]
+        lines.append("")
+    if removed:
+        lines.append("**Removed:**")
+        lines += [f"- {r}" for r in removed]
+        lines.append("")
+    new_entry = "\n".join(lines) + "\n"
+
+    changelog_path = out_dir / "_changelog.md"
+    if changelog_path.exists():
+        existing = changelog_path.read_text()
+        if existing.startswith("# Changelog"):
+            header, rest = existing.split("\n", 1)
+            new_text = f"{header}\n\n{new_entry}{rest.lstrip(chr(10))}"
+        else:
+            new_text = f"# Changelog\n\n{new_entry}\n{existing}"
+    else:
+        new_text = f"# Changelog\n\n{new_entry}"
+    changelog_path.write_text(new_text)
+    manifest_path.write_text(json.dumps(current, indent=2, sort_keys=True))
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -558,6 +630,13 @@ def main():
                 rel = p.relative_to(out_dir)
                 index_lines.append(f"- `{rel}` ({p.stat().st_size:,} bytes)")
         (out_dir / "_index.md").write_text("\n".join(index_lines), encoding="utf-8")
+
+        run_kind = "claude-md regen" if (args.skip_finder and args.skip_skills) else "full curator"
+        try:
+            write_changelog(out_dir, run_kind)
+        except Exception as e:
+            print(f"      changelog write failed: {type(e).__name__}: {e}", flush=True)
+
         print(f"      done. final output: kai_claude/{args.project}/", flush=True)
 
 
