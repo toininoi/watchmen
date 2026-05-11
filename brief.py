@@ -112,9 +112,9 @@ def summarize(new_entries: list[tuple[datetime, str, str]]) -> str:
 
 
 def notify(title: str, body: str) -> None:
-    title_q = title.replace('"', '\\"').replace("\\", "\\\\")
-    body_q = body.replace('"', '\\"').replace("\\", "\\\\")
-    script = f'display notification "{body_q}" with title "{title_q}"'
+    title_q = title.replace("\\", "\\\\").replace('"', '\\"')
+    body_q = body.replace("\\", "\\\\").replace('"', '\\"')
+    script = f'display notification "{body_q}" with title "{title_q}" sound name "Pop"'
     try:
         subprocess.run(["osascript", "-e", script], check=False, timeout=3)
     except (subprocess.SubprocessError, FileNotFoundError):
