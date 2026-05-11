@@ -3,13 +3,19 @@
 # state for the CWD's project, then touches an acknowledgment file so the
 # statusLine indicator clears.
 #
+# Self-locates via $0 — Claude Code's ${CLAUDE_PLUGIN_ROOT} template variable
+# is substituted in SKILL.md before invocation but is NOT exported to the script
+# runtime env, so we can't rely on it from inside the script itself.
+#
 # Emits one of:
 #   - "(not a tracked project)"  if CWD doesn't map to any tracked project
-#   - "(no state)"               if no state file exists yet for the project
+#   - "(no state for X)"         if no state file exists yet for the project
 #   - the JSON contents of the state file
 set -u
 
-PROJECT_KEY=$(python3 "${CLAUDE_PLUGIN_ROOT}/bin/resolve_project_key.py" "$PWD" 2>/dev/null)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+PROJECT_KEY=$(python3 "${SCRIPT_DIR}/resolve_project_key.py" "$PWD" 2>/dev/null)
 if [ -z "${PROJECT_KEY}" ]; then
   echo "(not a tracked project)"
   exit 0
