@@ -1,0 +1,13 @@
+{
+  "name": "watchmen",
+  "owner": {
+    "name": "firstbatchxyz"
+  },
+  "plugins": [
+    {
+      "name": "watchmen",
+      "source": "./plugin",
+      "description": "Surface skill suggestions + workspace context from watchmen sessions intelligence into your Claude Code sessions"
+    }
+  ]
+}

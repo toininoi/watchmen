@@ -1,0 +1,10 @@
+{
+  "name": "watchmen",
+  "description": "Surface skill suggestions + workspace context from watchmen sessions intelligence into your Claude Code sessions",
+  "version": "0.1.0",
+  "author": {
+    "name": "firstbatchxyz",
+    "url": "https://github.com/firstbatchxyz/watchmen"
+  },
+  "homepage": "https://github.com/firstbatchxyz/watchmen"
+}

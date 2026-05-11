@@ -520,6 +520,77 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
     changelog_path.write_text(new_text)
     manifest_path.write_text(json.dumps(current, indent=2, sort_keys=True))
 
+    # Publish state for the Claude Code plugin to read at ~/.watchmen/.
+    # Decoupled from the engine's install location so the plugin doesn't need
+    # to know where the engine lives.
+    try:
+        _publish_watchmen_state(
+            project_key=out_dir.name,
+            run_kind=run_kind,
+            ts_str=ts,
+            added=added,
+            updated=updated,
+            removed=removed,
+        )
+    except Exception as e:
+        print(f"      _publish_watchmen_state failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+
+
+def _publish_watchmen_state(
+    project_key: str,
+    run_kind: str,
+    ts_str: str,
+    added: list[str],
+    updated: list[str],
+    removed: list[str],
+) -> None:
+    """Write ~/.watchmen/state/<project>.json + refresh ~/.watchmen/projects.json.
+
+    Plugin reads these to render the statusLine indicator and the /watchmen:brief
+    skill body. Format is stable; bump the schema version if changing fields."""
+    import state as _state  # local import to avoid pulling state into module imports
+
+    base = Path.home() / ".watchmen"
+    state_dir = base / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pick a suggested skill: prefer a freshly-added one (whole bundles), else fall back to nothing.
+    added_skills = [a for a in added if a.startswith("skills/")]
+    suggested = added_skills[0].split("/", 1)[1] if added_skills else None
+
+    parts = []
+    if added:
+        parts.append(f"+{len(added)} added")
+    if updated:
+        parts.append(f"~{len(updated)} updated")
+    if removed:
+        parts.append(f"-{len(removed)} removed")
+    summary = ", ".join(parts) or "no changes"
+
+    payload = {
+        "schema": 1,
+        "project_key": project_key,
+        "ts": ts_str,
+        "run_kind": run_kind,
+        "summary": summary,
+        "details": {"added": added, "updated": updated, "removed": removed},
+        "suggested_skill": suggested,
+        "viewer_url": f"http://127.0.0.1:8888/project/{project_key}",
+    }
+    (state_dir / f"{project_key}.json").write_text(json.dumps(payload, indent=2))
+
+    # Refresh projects.json index so the plugin can resolve cwd → project_key.
+    try:
+        projects = _state.list_projects()
+        index = [
+            {"project_key": p["project_key"], "source_repo": p["source_repo"]}
+            for p in projects
+            if p.get("source_repo")
+        ]
+        (base / "projects.json").write_text(json.dumps(index, indent=2))
+    except Exception:
+        pass  # index refresh is best-effort; state file already written
+
 
 # ─── Driver ─────────────────────────────────────────────────────────────────
 

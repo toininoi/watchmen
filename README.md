@@ -91,6 +91,32 @@ watchmen viewer                              # http://127.0.0.1:8888
 
 Outputs land in `kai_claude/my-project/` and `analyses/my-project/`. Both are gitignored — they're your data, not the source.
 
+## Install the Claude Code plugin (optional, surfaces suggestions in-session)
+
+After the engine is running, install the plugin so suggestions show up in your Claude Code sessions without leaving the TUI:
+
+```
+/plugin marketplace add firstbatchxyz/watchmen
+/plugin install watchmen@watchmen
+```
+
+This gives you a `/watchmen:brief` skill — when invoked, Claude reads the latest curator state for your current workspace and tells you what changed (new skills, CLAUDE.md updates, suggested next actions).
+
+For the in-TUI indicator (bottom-right "💡 watchmen · 3 updates · /watchmen:brief"), add this to `~/.claude/settings.json` (one-time manual step — Claude Code doesn't allow plugins to ship statusLine config):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "$HOME/.claude/plugins/cache/firstbatchxyz/watchmen/PLUGIN_DIR/plugin/bin/statusline.sh"
+  }
+}
+```
+
+Find the exact `PLUGIN_DIR` value with `ls $HOME/.claude/plugins/cache/firstbatchxyz/watchmen/` after install. The indicator stays silent unless the engine has produced changes you haven't acknowledged via `/watchmen:brief`.
+
+The engine writes plugin state to `~/.watchmen/state/<project>.json` and `~/.watchmen/projects.json` at the end of each curator run, so the plugin works without knowing where the engine is installed.
+
 ## Run it continuously
 
 To run watchmen autonomously (incremental analyzer + auto-regen of CLAUDE.md when new prompts come in):
