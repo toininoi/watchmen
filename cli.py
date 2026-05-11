@@ -281,6 +281,26 @@ def cmd_hooks_status(args) -> int:
     return hooks_setup.status()
 
 
+def cmd_update_plugin(args) -> int:
+    import plugin_setup
+    return plugin_setup.update_marketplace()
+
+
+def cmd_install_statusline(args) -> int:
+    import plugin_setup
+    return plugin_setup.install_statusline(force=args.force)
+
+
+def cmd_uninstall_statusline(args) -> int:
+    import plugin_setup
+    return plugin_setup.uninstall_statusline()
+
+
+def cmd_plugin_status(args) -> int:
+    import plugin_setup
+    return plugin_setup.status()
+
+
 # ─── Argument parsing ───────────────────────────────────────────────────────
 
 
@@ -356,6 +376,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("install-hooks", help="wire watchmen_observe.sh into ~/.claude/settings.json").set_defaults(func=cmd_install_hooks)
     sub.add_parser("uninstall-hooks", help="remove watchmen entries from ~/.claude/settings.json").set_defaults(func=cmd_uninstall_hooks)
     sub.add_parser("hooks-status", help="show which hook events are wired up").set_defaults(func=cmd_hooks_status)
+
+    sub.add_parser("update-plugin", help="git pull the marketplace clone so /plugin install picks up the latest").set_defaults(func=cmd_update_plugin)
+    p_isl = sub.add_parser("install-statusline", help="wire the 💡 watchmen indicator into ~/.claude/settings.json")
+    p_isl.add_argument("--force", action="store_true", help="overwrite a non-watchmen statusLine entry")
+    p_isl.set_defaults(func=cmd_install_statusline)
+    sub.add_parser("uninstall-statusline", help="remove the watchmen statusLine entry").set_defaults(func=cmd_uninstall_statusline)
+    sub.add_parser("plugin-status", help="show plugin marketplace + cache + statusLine state").set_defaults(func=cmd_plugin_status)
 
     args = parser.parse_args(argv)
     if not args.cmd:
