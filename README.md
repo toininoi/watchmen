@@ -108,12 +108,12 @@ For the in-TUI indicator (bottom-right "💡 watchmen · 3 updates · /watchmen:
 {
   "statusLine": {
     "type": "command",
-    "command": "$HOME/.claude/plugins/cache/firstbatchxyz/watchmen/PLUGIN_DIR/plugin/bin/statusline.sh"
+    "command": "$HOME/.claude/plugins/cache/watchmen/watchmen/PLUGIN_VERSION/bin/statusline.sh"
   }
 }
 ```
 
-Find the exact `PLUGIN_DIR` value with `ls $HOME/.claude/plugins/cache/firstbatchxyz/watchmen/` after install. The indicator stays silent unless the engine has produced changes you haven't acknowledged via `/watchmen:brief`.
+Find the exact `PLUGIN_VERSION` value with `ls $HOME/.claude/plugins/cache/watchmen/watchmen/` after install (it tracks the version field in `plugin.json`, e.g. `0.1.1/`). The indicator stays silent unless the engine has produced changes you haven't acknowledged via `/watchmen:brief`.
 
 The engine writes plugin state to `~/.watchmen/state/<project>.json` and `~/.watchmen/projects.json` at the end of each curator run, so the plugin works without knowing where the engine is installed.
 

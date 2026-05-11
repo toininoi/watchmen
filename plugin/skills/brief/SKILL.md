@@ -1,6 +1,8 @@
 ---
 name: brief
 description: Surface what watchmen detected in this workspace since the last curator run — new skills, CLAUDE.md changes, suggested actions to take this session.
+allowed-tools:
+  - Bash(*read_state.sh*)
 ---
 
 # Watchmen brief
