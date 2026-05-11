@@ -78,11 +78,18 @@ SKILL_CURATOR_PROMPT_TEMPLATE = dedent("""
       name: {skill_slug}
       description: <1-line activation hint — what task type this skill serves>
       when_to_use: <bullets describing the user-prompt patterns that should trigger this>
+      when_not_to_use: <bullets describing prompt patterns that LOOK similar but should NOT trigger this —
+                       adjacent task shapes, superficially-related vocabulary, narrower/broader variants
+                       that have their own skill or no skill at all>
       ---
 
     Then in the body:
       ## Procedure
       <numbered steps>
+      ## When NOT to use
+      <expanded form of the frontmatter field: concrete counter-examples of prompts that should be rejected,
+      with a 1-line reason each. Cite session_ids where a similar-looking prompt went a different direction.
+      This is the single biggest lever against false activation — be specific.>
       ## Inputs
       <args, env vars, files expected>
       ## Outputs
@@ -116,6 +123,9 @@ CRITIC_PROMPT = dedent("""
 
     Specifically check:
       - Trigger description: would a future agent know when to use this from a user prompt?
+      - Anti-triggers: is `when_not_to_use` present and specific? Would a borderline prompt
+        (adjacent task shape, similar vocabulary) be correctly REJECTED based on what's written?
+        Generic exclusions ("not for unrelated tasks") don't count — flag them as ambiguous.
       - Procedure steps: are they unambiguous? Any "do the thing" hand-waving?
       - Scripts: hardcoded paths, API keys, or values that should be args/env vars?
       - Imports / dependencies: are they declared somewhere?
@@ -193,13 +203,25 @@ CLAUDE_MD_PROMPT = dedent("""
       <pitfalls observed across sessions: error patterns, content-policy issues, env-override priority
       bugs, sub-agent auth failures, etc. Each bullet should be a *specific* trap with *how to avoid* it>
 
+      ## Debugging playbook
+      <when something breaks, what does the user actually do? Each entry: symptom → diagnostic procedure
+      (the specific logs, queries, or commands the user reached for) → likely root causes, cited by
+      session_id. This is the *recovery* counterpart to landmines: landmines say "don't step here",
+      this section says "if you did step there, here's how to find out and fix it". Mine sessions with
+      high tool_error_count or visible frustration for the actual diagnostic moves used.>
+
       ## Communication style notes
       <how the user talks to the agent — tone, expectations, what to mirror; e.g. enthusiasm welcome,
       task-direct compressed handoffs, fast self-correction without friction>
 
     Process:
       1. read_thesis_section for: 'Workflow archetypes', 'Notable sessions', 'Communication style',
-         'Drift', 'Frustration / pushback patterns', 'Skill candidates'.
+         'Drift', 'Frustration / pushback patterns', 'Skill candidates'. The 'Frustration / pushback
+         patterns' section is especially important for the Debugging playbook — it points to sessions
+         where the user hit errors and recovered. Use query_corpus with filters like
+         `SELECT session_id, tool_error_count FROM sessions WHERE tool_error_count > 3 ORDER BY
+         tool_error_count DESC LIMIT 10` to find high-friction sessions, then read_session_full to
+         extract the actual diagnostic moves (which commands/queries the user ran to localize the bug).
       2. list_repo_files (broad pattern like '*' or '**/*') to map the repo's structure.
       3. read_repo_file on key infrastructure files: package.json, pyproject.toml, Cargo.toml,
          README.md, .env.example, tsconfig.json — whichever apply.
