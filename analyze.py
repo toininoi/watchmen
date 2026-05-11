@@ -232,6 +232,22 @@ SYSTEM_PROMPT = dedent("""
       ## Drift / evolution (how usage has changed over time)
       ## Notable sessions
 
+    Section scoping rules:
+      - Communication style and Workflow archetypes describe HOW the user works inside this
+        project_key. They CAN reference cross-topic content that surfaced in long-running sessions
+        tagged to this project (e.g. side-conversations about other repos or personal projects).
+      - Skill candidates must be packageable, reusable artifacts that would live in THIS repo's
+        skills/ directory. Reject candidates that describe other repos, personal projects
+        (investments, stock trading, customer projects rooted in other directories), or non-coding
+        workflows — even if they appeared in sessions tagged to this project. The test: would this
+        skill actually belong checked into THIS repo? If no, don't list it.
+
+    Tone: factual and concrete. Avoid all-caps emphasis, hype framing, marketing-style phrases
+    ("THE PIPELINE GOES LIVE", "STRONGEST POSITIVE SIGNAL"), and dramatic day-counters ("Day 23 of
+    mega-session"). State observations plainly: "May 9: curator pipeline shipped to two repos" is
+    better than "May 9: THE CURATOR PIPELINE GOES LIVE." If a finding matters, the facts will
+    carry it.
+
     Be concrete. Cite session_ids and dates. When done, call update_analysis with the full updated
     thesis.
 """).strip()

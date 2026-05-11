@@ -47,6 +47,10 @@ CANDIDATE_FINDER_PROMPT = dedent("""
         these are about the user, not skills.
       - One-time exploratory work that didn't repeat.
       - Stuff that's already a one-line bash command with no procedure around it.
+      - About OTHER repos, personal side projects, or non-coding workflows (e.g. investment
+        analysis, stock trading, customer projects rooted in other directories), even if the
+        thesis mentions them — they would not belong checked into THIS repo's skills/ directory.
+        The test: would the artifacts live naturally inside the source repo you're scanning?
 
     Process:
       1. Read the thesis sections "Skill candidates" and "Workflow archetypes" via read_thesis_section.
