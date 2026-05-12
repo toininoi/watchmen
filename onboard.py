@@ -39,6 +39,8 @@ def _step(console: Console, n: int, total: int, title: str) -> None:
 
 
 def show_welcome(console: Console, total_steps: int) -> None:
+    import banner
+    banner.render(console)
     body = Text.from_markup(
         "[bold]watchmen[/] mines your Claude Code session history, ships skill\n"
         "bundles + CLAUDE.md files per project, and surfaces them back into\n"
@@ -48,7 +50,7 @@ def show_welcome(console: Console, total_steps: int) -> None:
         f"[dim]{total_steps} steps. Most takes a few seconds; the LLM passes (analyze + curate)\n"
         f"are the only slow ones — see cost estimate before they run.[/]"
     )
-    console.print(Panel(body, title="🔭 watchmen onboard", border_style="cyan"))
+    console.print(Panel(body, title="onboard", border_style="cyan"))
 
 
 def _have_openrouter_key() -> bool:
@@ -294,6 +296,89 @@ def run_curate(console: Console, project_key: str) -> bool:
     return rc == 0
 
 
+def _run_pipeline_silent(project_key: str, source_repo: str, console: Console, label: str) -> dict:
+    """Run analyst→curator pipeline for one project from a worker thread.
+    Uses subprocess.run (no spinner) so multiple pipelines don't clobber each
+    other's console output. Prints start/done lines via console.print (which is
+    thread-safe in Rich), tagged with `label` so the user can follow progress.
+
+    Returns a dict with timings + ok flags for the caller's summary."""
+    import time as _t
+    result = {
+        "project_key": project_key,
+        "label": label,
+        "analyst_ok": False, "analyst_secs": 0.0, "analyst_last": "",
+        "curator_ok": False, "curator_secs": 0.0, "curator_last": "",
+    }
+
+    console.print(f"  {label} [bold]{project_key}[/]: analyst started")
+    t0 = _t.time()
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "analyze.py"), "--project", project_key],
+        cwd=str(ROOT), capture_output=True, text=True,
+    )
+    result["analyst_secs"] = _t.time() - t0
+    result["analyst_ok"] = r.returncode == 0
+    out = (r.stdout or "").strip().splitlines()
+    result["analyst_last"] = out[-1] if out else ((r.stderr or "").strip()[:120])
+    marker = "[green]✓[/]" if result["analyst_ok"] else "[red]✗[/]"
+    console.print(f"  {marker} {label} {project_key} analyst in {result['analyst_secs']:.0f}s")
+    if not result["analyst_ok"]:
+        console.print(f"    [dim]{result['analyst_last'][:120]}[/]")
+        return result
+
+    console.print(f"  {label} [bold]{project_key}[/]: curator started")
+    t0 = _t.time()
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "curate.py"), "--project", project_key, "--repo", source_repo],
+        cwd=str(ROOT), capture_output=True, text=True,
+    )
+    result["curator_secs"] = _t.time() - t0
+    result["curator_ok"] = r.returncode == 0
+    out = (r.stdout or "").strip().splitlines()
+    result["curator_last"] = out[-1] if out else ((r.stderr or "").strip()[:120])
+    marker = "[green]✓[/]" if result["curator_ok"] else "[red]✗[/]"
+    console.print(f"  {marker} {label} {project_key} curator in {result['curator_secs']:.0f}s")
+    if not result["curator_ok"]:
+        console.print(f"    [dim]{result['curator_last'][:120]}[/]")
+    return result
+
+
+def run_pipeline_parallel(console: Console, selected: list, concurrency: int = 3) -> list[dict]:
+    """Run analyst+curator for each selected project, up to `concurrency`
+    projects at once. Each per-project worker runs its analyst+curator
+    sequentially (they need to share the thesis) but pipelines for different
+    projects run independently.
+
+    Conservative concurrency=3 by default — each per-project curator already
+    has internal Stage 2 parallelism, so 3 projects × 4 skill workers × ~2
+    critic-per-skill = ~24 OpenRouter calls in flight. Comfortable for
+    deepseek-v4-flash rate limits."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import state
+
+    console.print(f"\nRunning {len(selected)} projects in parallel (concurrency={concurrency})…\n")
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = []
+        for i, proj in enumerate(selected, 1):
+            proj_state = state.get_project(proj["project_key"])
+            if not proj_state:
+                console.print(f"  [red]✗[/] [{i}/{len(selected)}] {proj['project_key']}: not tracked, skipping")
+                continue
+            label = f"[{i}/{len(selected)}]"
+            futures.append(pool.submit(
+                _run_pipeline_silent,
+                proj["project_key"], proj_state["source_repo"], console, label,
+            ))
+        for fut in as_completed(futures):
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                console.print(f"  [red]✗[/] pipeline error: {type(e).__name__}: {e}")
+    return results
+
+
 def install_autostart(console: Console) -> None:
     if Confirm.ask("\nInstall launchd autostart for daemon + viewer?", default=True):
         import launchd_setup
@@ -393,10 +478,23 @@ def run() -> int:
 
     show_cost_estimate(console, selected)
     if Confirm.ask("\nRun analyze + curate now?", default=True):
-        for proj in selected:
-            run_analyze(console, proj["project_key"])
-        for proj in selected:
-            run_curate(console, proj["project_key"])
+        if len(selected) == 1:
+            # Single project — keep the pretty live-spinner UX.
+            key = selected[0]["project_key"]
+            run_analyze(console, key)
+            run_curate(console, key)
+        else:
+            # Multi-project — parallelize per-project pipelines.
+            results = run_pipeline_parallel(console, selected, concurrency=3)
+            ok_a = sum(1 for r in results if r["analyst_ok"])
+            ok_c = sum(1 for r in results if r["curator_ok"])
+            tot_a = sum(r["analyst_secs"] for r in results)
+            tot_c = sum(r["curator_secs"] for r in results)
+            console.print(
+                f"\n  pipeline complete: {ok_a}/{len(selected)} analysts ok, "
+                f"{ok_c}/{len(selected)} curators ok  "
+                f"(serial-equiv {tot_a + tot_c:.0f}s)"
+            )
     else:
         console.print(f"[dim]Skipped. Run `{_exec_name()} analyze <key>` + `{_exec_name()} curate <key>` later.[/]")
 

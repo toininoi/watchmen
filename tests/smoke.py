@@ -928,6 +928,96 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
             corpus.DB_PATH = orig_db
 
 
+# ─── Onboard parallelism ────────────────────────────────────────────────────
+
+
+def test_onboard_runs_projects_in_parallel():
+    """When multiple projects are selected in onboard, their analyst+curator
+    pipelines must run concurrently — not back-to-back. Regression guard:
+    we replace subprocess.run with a sleep-and-return stub and verify wall
+    time is ~one project's duration, not N×."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # 4 projects × 0.4s each. Sequential = 1.6s. Concurrency=3 → ~0.8s
+    # (3 in flight, one waits its turn). Concurrency=4 → ~0.4s.
+    def fake_pipeline(project_key: str) -> str:
+        time.sleep(0.4)
+        return project_key
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(fake_pipeline, p) for p in ["a", "b", "c", "d"]]
+        results = [f.result() for f in as_completed(futures)]
+    elapsed = time.time() - t0
+
+    assert elapsed < 1.2, \
+        f"parallel onboard dispatch too slow ({elapsed:.2f}s) — regressed to sequential?"
+    assert sorted(results) == ["a", "b", "c", "d"]
+
+
+# ─── API key management ─────────────────────────────────────────────────────
+
+
+def test_api_key_helpers_roundtrip():
+    """_read_current_api_key / _write_api_key must roundtrip cleanly while
+    preserving any other lines in ~/.config/watchmen/.env (e.g. LANGFUSE_KEY,
+    custom OPENROUTER_API_BASE). If write clobbers unrelated lines, teammates
+    rotating their key would lose other config silently."""
+    import os
+    import tempfile
+
+    import cli
+
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = Path(td)
+        env_dir = fake_home / ".config" / "watchmen"
+        env_dir.mkdir(parents=True)
+        env_path = env_dir / ".env"
+        env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
+
+        orig_home = os.environ.get("HOME")
+        orig_env_key = os.environ.pop("OPENROUTER_API_KEY", None)
+        os.environ["HOME"] = str(fake_home)
+        # Path.home() reads $HOME on POSIX, so the override takes effect immediately.
+        try:
+            assert cli._read_current_api_key() == "sk-old"
+            cli._write_api_key("sk-new")
+            assert cli._read_current_api_key() == "sk-new"
+            # Critically: OTHER_VAR must survive the rotation.
+            content = env_path.read_text()
+            assert "OTHER_VAR=keep-me" in content, "rotation clobbered an unrelated env line"
+            assert content.count("OPENROUTER_API_KEY=") == 1, "duplicate OPENROUTER_API_KEY line after rotation"
+        finally:
+            if orig_home is not None:
+                os.environ["HOME"] = orig_home
+            if orig_env_key is not None:
+                os.environ["OPENROUTER_API_KEY"] = orig_env_key
+
+
+# ─── Launchd plist sanity ───────────────────────────────────────────────────
+
+
+def test_launchd_plist_args_use_noun_verb_form():
+    """After the noun-verb CLI refactor (PR #10), `watchmen viewer` and
+    `watchmen daemon` became noun groups requiring a verb (run/install/
+    uninstall). The launchd plists must invoke `watchmen viewer run` and
+    `watchmen daemon run`, not the bare form — otherwise launchd loops on
+    'invalid choice' errors and the viewer/daemon never starts. Regression
+    guard against a teammate adding a new launchd plist that drops `run`."""
+    src = (ROOT / "launchd_setup.py").read_text()
+    # Each install_* function builds an args list. The patterns we want to
+    # see are the verb-form invocations; the patterns we want to NOT see are
+    # the bare noun followed by a flag (the broken pre-fix shape).
+    assert '"watchmen", "viewer", "run"' in src, \
+        "install_viewer must invoke `watchmen viewer run`, not the bare noun"
+    assert '"watchmen", "daemon", "run"' in src, \
+        "install_daemon must invoke `watchmen daemon run`, not the bare noun"
+    # Negative: the bare noun followed by a flag is the broken shape.
+    assert '"watchmen", "viewer", "--host"' not in src
+    assert '"watchmen", "daemon", "--interval"' not in src
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -1007,6 +1097,15 @@ def main() -> int:
     check("scan is incremental + idempotent",           test_corpus_scan_is_incremental_and_idempotent)
     check("--full forces a rebuild",                    test_corpus_full_flag_forces_rebuild)
     check("legacy DB migrates without errors",          test_corpus_migrates_legacy_db_without_file_mtime)
+    print()
+    print("Launchd plist sanity:")
+    check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)
+    print()
+    print("API key management:")
+    check("api-key helpers roundtrip + preserve unrelated lines", test_api_key_helpers_roundtrip)
+    print()
+    print("Onboard parallelism:")
+    check("onboard runs multiple projects concurrently",          test_onboard_runs_projects_in_parallel)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)

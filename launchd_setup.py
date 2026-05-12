@@ -104,7 +104,7 @@ def install_daemon(model: str = "deepseek/deepseek-v4-flash", interval: int = 72
 
     plist = _plist(
         label=DAEMON_LABEL,
-        args=[uv, "run", "watchmen", "daemon", "--interval", str(interval), "--model", model],
+        args=[uv, "run", "watchmen", "daemon", "run", "--interval", str(interval), "--model", model],
         stdout_log=LOG_DIR / "watchmen.daemon.out.log",
         stderr_log=LOG_DIR / "watchmen.daemon.err.log",
         working_dir=ROOT,
@@ -138,7 +138,7 @@ def install_viewer(host: str = "127.0.0.1", port: int = 8888, dry_run: bool = Fa
 
     plist = _plist(
         label=VIEWER_LABEL,
-        args=[uv, "run", "watchmen", "viewer", "--host", host, "--port", str(port)],
+        args=[uv, "run", "watchmen", "viewer", "run", "--host", host, "--port", str(port)],
         stdout_log=LOG_DIR / "watchmen.viewer.out.log",
         stderr_log=LOG_DIR / "watchmen.viewer.err.log",
         working_dir=ROOT,
