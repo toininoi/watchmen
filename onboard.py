@@ -51,19 +51,62 @@ def show_welcome(console: Console, total_steps: int) -> None:
     console.print(Panel(body, title="🔭 watchmen onboard", border_style="cyan"))
 
 
+def _have_openrouter_key() -> bool:
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return True
+    for c in [ROOT / ".env", Path.home() / ".config" / "watchmen" / ".env"]:
+        try:
+            if c.exists() and "OPENROUTER_API_KEY=" in c.read_text():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _prompt_for_openrouter_key(console: Console) -> bool:
+    """Ask the user for an OpenRouter key, write to ~/.config/watchmen/.env,
+    set it in the current process. Returns True if a key is now in scope."""
+    console.print("[bold yellow]OPENROUTER_API_KEY not found.[/]")
+    console.print("[dim]Get one at https://openrouter.ai/keys — credit pre-loading not required for deepseek-v4-flash.[/]")
+    console.print()
+    key = Prompt.ask(
+        "Paste your OpenRouter API key (or press enter to skip)",
+        password=True,
+        default="",
+        show_default=False,
+    ).strip()
+    if not key:
+        console.print("[dim]Skipped. Set OPENROUTER_API_KEY in your shell or in ~/.config/watchmen/.env, then re-run onboard.[/]")
+        return False
+    if not (key.startswith("sk-or-") or key.startswith("sk_")):
+        if not Confirm.ask(
+            f"  [yellow]Key doesn't look like an OpenRouter key (starts with {key[:6]}…). Save anyway?[/]",
+            default=False,
+        ):
+            return False
+
+    env_dir = Path.home() / ".config" / "watchmen"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    env_file = env_dir / ".env"
+
+    # Preserve any other lines, update or append OPENROUTER_API_KEY.
+    lines = env_file.read_text().splitlines() if env_file.exists() else []
+    new_lines = [ln for ln in lines if not ln.startswith("OPENROUTER_API_KEY=")]
+    new_lines.append(f"OPENROUTER_API_KEY={key}")
+    env_file.write_text("\n".join(new_lines) + "\n")
+    env_file.chmod(0o600)
+    os.environ["OPENROUTER_API_KEY"] = key
+    console.print(f"[green]✓[/] Wrote key to {env_file}  [dim](chmod 600)[/]")
+    return True
+
+
 def check_prerequisites(console: Console) -> bool:
+    if not _have_openrouter_key():
+        if not _prompt_for_openrouter_key(console):
+            console.print("[red]✗[/] Can't continue without OPENROUTER_API_KEY.")
+            return False
+
     missing = []
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        # Check the .env fallbacks the engine also looks at.
-        candidates = [
-            ROOT / ".env",
-            Path.home() / ".config" / "watchmen" / ".env",
-        ]
-        found = any(
-            c.exists() and "OPENROUTER_API_KEY" in c.read_text() for c in candidates
-        )
-        if not found:
-            missing.append(("OPENROUTER_API_KEY", "set it in your shell, in a .env, or in ~/.config/watchmen/.env"))
     if not shutil.which("uv"):
         missing.append(("uv", "Install via: brew install uv  (or curl -LsSf https://astral.sh/uv/install.sh | sh)"))
     if not shutil.which("git"):
