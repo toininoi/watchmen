@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"sess-002","timestamp":"2026-05-01T10:00:00.000Z","cwd":"/home/dev/longproject"}
+{"type":"message","id":"m1","parentId":"sess-002","timestamp":"2026-05-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"this prompt should be summarized away"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-05-01T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"old answer"}],"provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":1000,"output":50}}}
+{"type":"compaction","id":"comp-1","parentId":"m2","timestamp":"2026-05-01T10:01:00.000Z","firstKeptEntryId":"m3","summary":"earlier work omitted","tokensBefore":1050}
+{"type":"message","id":"m3","parentId":"comp-1","timestamp":"2026-05-01T10:01:01.000Z","message":{"role":"user","content":[{"type":"text","text":"this prompt SHOULD be counted"}]}}
+{"type":"message","id":"m4","parentId":"m3","timestamp":"2026-05-01T10:01:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"new answer"}],"provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":300,"output":15}}}

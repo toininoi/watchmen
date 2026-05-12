@@ -263,6 +263,81 @@ def test_decode_project_dir_resolves_real_filesystem():
         assert os.path.realpath(out) == os.path.realpath(real), f"expected {real}, got {out}"
 
 
+def test_pi_adapter_parses_branching_fixture():
+    """Synthetic pi session with a fork at m3 (branch-a + branch-b). The adapter
+    must pick the leaf with the latest timestamp (branch-b) and ignore branch-a
+    entirely — counting both branches' user prompts would double-count."""
+    from adapters import pi
+    fixture = ROOT / "tests" / "fixtures" / "pi_session.jsonl"
+    entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
+    session, prompts, tools = pi.scan(entry)
+    assert session["agent"] == "pi"
+    assert session["project_dir"] == "/home/dev/myproject"
+    # 2 user prompts: m1 ('reverse...') + m4-branch-b ('actually no, add docs'). branch-a is NOT counted.
+    assert session["user_prompt_count"] == 2, f"got {session['user_prompt_count']}: {[p['text'] for p in prompts]}"
+    texts = {p["text"] for p in prompts}
+    assert "actually no, add docs instead" in texts
+    assert "add a test" not in texts, "branch-a leaked into the active walk"
+    # 1 thinking block, 2 assistant text outputs, 1 toolCall.
+    assert session["assistant_thinking_count"] == 1
+    assert session["assistant_text_count"] == 2
+    assert session["tool_use_count"] == 1
+    assert {t["tool_name"] for t in tools} == {"writeFile"}
+    # Token attribution from per-message usage.
+    assert session["input_tokens"] == 1500
+    assert session["output_tokens"] == 70
+    assert session["cache_read_tokens"] == 1200
+    assert session["cache_creation_tokens"] == 100
+    # Cost sanity check (sonnet-4.6 pricing).
+    assert 0.005 < session["cost_usd"] < 0.010
+
+
+def test_pi_adapter_respects_compaction_cutoff():
+    """A compaction entry summarizes earlier history; its firstKeptEntryId marks
+    where the kept window starts. Pre-cutoff prompts/tokens must NOT be ingested
+    again or we double-count what the summary already covers."""
+    from adapters import pi
+    fixture = ROOT / "tests" / "fixtures" / "pi_session_compacted.jsonl"
+    entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
+    session, prompts, _ = pi.scan(entry)
+    # Only the post-cutoff user prompt should appear.
+    assert session["user_prompt_count"] == 1
+    assert prompts[0]["text"] == "this prompt SHOULD be counted"
+    # Token total = m4 only (300 input + 15 output), NOT m4 + m2 (1300 + 65).
+    assert session["input_tokens"] == 300
+    assert session["output_tokens"] == 15
+
+
+def test_pi_adapter_silent_on_missing_install():
+    """No ~/.pi/agent/sessions/ on most dev boxes (yet). discover() must yield
+    nothing rather than raise."""
+    from adapters import pi
+    orig = pi.SESSIONS_DIR
+    pi.SESSIONS_DIR = ROOT / "tests" / "_no_such_pi_dir"
+    try:
+        assert list(pi.discover()) == []
+    finally:
+        pi.SESSIONS_DIR = orig
+
+
+def test_pi_adapter_rejects_unsupported_version():
+    """If the spec rev changes (v4+) the adapter must NOT misparse — return an
+    empty session rather than guess at new fields. Regression test against the
+    silent-drift failure mode."""
+    import tempfile
+    from adapters import pi
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "future.jsonl"
+        # Header claims v4; everything else looks identical to v3.
+        p.write_text(
+            '{"type":"session","version":4,"id":"sX","timestamp":"2026-05-01T10:00:00Z","cwd":"/x"}\n'
+            '{"type":"message","id":"m1","parentId":"sX","timestamp":"2026-05-01T10:00:01Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n'
+        )
+        session, prompts, _ = pi.scan({"path": p, "project_dir": None, "is_subagent": False, "parent_session_id": None})
+        assert prompts == []
+        assert session["user_prompt_count"] == 0
+
+
 def test_claude_adapter_stores_decoded_paths():
     """The Claude adapter must call decode_project_dir on the encoded dir name —
     if it stored '-Users-...' the per-project analyst couldn't merge with Codex's
@@ -420,6 +495,10 @@ def main() -> int:
     check("codex adapter parses fixture cleanly",   test_codex_adapter_parses_fixture)
     check("codex adapter dedupes user_message",     test_codex_adapter_dedupe_user_message)
     check("codex adapter silent on missing install", test_codex_adapter_silent_on_missing_install)
+    check("pi adapter parses branching fixture",     test_pi_adapter_parses_branching_fixture)
+    check("pi adapter respects compaction cutoff",   test_pi_adapter_respects_compaction_cutoff)
+    check("pi adapter silent on missing install",    test_pi_adapter_silent_on_missing_install)
+    check("pi adapter rejects unsupported version",  test_pi_adapter_rejects_unsupported_version)
     check("corpus.sessions has agent column",        test_corpus_schema_has_agent_column)
     check("decode_project_dir naive fallback",        test_decode_project_dir_naive_fallback)
     check("decode_project_dir resolves real FS",      test_decode_project_dir_resolves_real_filesystem)

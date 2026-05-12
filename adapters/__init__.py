@@ -32,9 +32,9 @@ returns []) — corpus.py doesn't need to know which agents the user has.
 
 from __future__ import annotations
 
-from . import claude_code, codex
+from . import claude_code, codex, pi
 
 # Order: stable for reproducible scans.
-ADAPTERS = (claude_code, codex)
+ADAPTERS = (claude_code, codex, pi)
 
 __all__ = ["ADAPTERS"]
