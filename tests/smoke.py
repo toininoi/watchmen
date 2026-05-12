@@ -928,6 +928,29 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
             corpus.DB_PATH = orig_db
 
 
+# ─── Launchd plist sanity ───────────────────────────────────────────────────
+
+
+def test_launchd_plist_args_use_noun_verb_form():
+    """After the noun-verb CLI refactor (PR #10), `watchmen viewer` and
+    `watchmen daemon` became noun groups requiring a verb (run/install/
+    uninstall). The launchd plists must invoke `watchmen viewer run` and
+    `watchmen daemon run`, not the bare form — otherwise launchd loops on
+    'invalid choice' errors and the viewer/daemon never starts. Regression
+    guard against a teammate adding a new launchd plist that drops `run`."""
+    src = (ROOT / "launchd_setup.py").read_text()
+    # Each install_* function builds an args list. The patterns we want to
+    # see are the verb-form invocations; the patterns we want to NOT see are
+    # the bare noun followed by a flag (the broken pre-fix shape).
+    assert '"watchmen", "viewer", "run"' in src, \
+        "install_viewer must invoke `watchmen viewer run`, not the bare noun"
+    assert '"watchmen", "daemon", "run"' in src, \
+        "install_daemon must invoke `watchmen daemon run`, not the bare noun"
+    # Negative: the bare noun followed by a flag is the broken shape.
+    assert '"watchmen", "viewer", "--host"' not in src
+    assert '"watchmen", "daemon", "--interval"' not in src
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -1007,6 +1030,9 @@ def main() -> int:
     check("scan is incremental + idempotent",           test_corpus_scan_is_incremental_and_idempotent)
     check("--full forces a rebuild",                    test_corpus_full_flag_forces_rebuild)
     check("legacy DB migrates without errors",          test_corpus_migrates_legacy_db_without_file_mtime)
+    print()
+    print("Launchd plist sanity:")
+    check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
