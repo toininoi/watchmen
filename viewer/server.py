@@ -259,6 +259,8 @@ def metrics_all(request: Request, tracked: int = 0):
         peak_dow, peak_hr, peak_n = flat[0]
         peaks = [["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][peak_dow], f"{peak_hr:02d}:00", peak_n]
     per_project = _metrics.per_project_totals(days=30)
+    tool_usage = _metrics.tool_usage(project_key=None, days=30, tracked_only=tracked_only)
+    streak = _metrics.streak_stats(project_key=None, weeks=26, tracked_only=tracked_only)
 
     return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
         "rows": rows,
@@ -270,6 +272,8 @@ def metrics_all(request: Request, tracked: int = 0):
         "peaks": peaks,
         "per_project": per_project,
         "tracked_only": tracked_only,
+        "tool_usage": tool_usage,
+        "streak": streak,
     })
 
 
@@ -304,6 +308,9 @@ def project_metrics(request: Request, project_key: str):
         peak_dow, peak_hr, peak_n = flat[0]
         peaks = [["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][peak_dow], f"{peak_hr:02d}:00", peak_n]
 
+    tool_usage = _metrics.tool_usage(project_key=project_key, days=30)
+    streak = _metrics.streak_stats(project_key=project_key, weeks=26)
+
     return TEMPLATES.TemplateResponse(request, "metrics.html", {
         "project": get_project_meta(project_key) or {"project_key": project_key},
         "rows": rows,
@@ -313,6 +320,8 @@ def project_metrics(request: Request, project_key: str):
         "calendar_svg": calendar_svg,
         "hour_dow_svg": hour_dow_svg,
         "peaks": peaks,
+        "tool_usage": tool_usage,
+        "streak": streak,
     })
 
 

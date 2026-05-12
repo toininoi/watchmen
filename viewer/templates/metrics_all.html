@@ -94,8 +94,18 @@
 <h2 class="text-lg font-semibold mb-3">When you work</h2>
 <div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-6">
   <div class="stat-card overflow-x-auto lg:col-span-2">
-    <div class="label">Last 26 weeks (all projects)</div>
+    <div class="label">Last 26 weeks{% if tracked_only %} (tracked){% else %} (all projects){% endif %}</div>
     <div class="sub mb-2">Prompt activity per day</div>
+    {% if streak.current or streak.longest %}
+    <div class="flex flex-wrap gap-2 mb-3 text-xs">
+      <span class="px-2 py-1 rounded-full bg-orange-100 text-orange-800 font-medium">
+        🔥 {{ streak.current }}-day current streak
+      </span>
+      <span class="px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+        Longest: {{ streak.longest }} days{% if streak.longest_end %} <span class="text-gray-500">(ended {{ streak.longest_end }})</span>{% endif %}
+      </span>
+    </div>
+    {% endif %}
     {{ calendar_svg|safe }}
   </div>
   <div class="stat-card overflow-x-auto lg:col-span-3">
@@ -110,6 +120,32 @@
     {{ hour_dow_svg|safe }}
   </div>
 </div>
+
+{% if tool_usage %}
+<h2 class="text-lg font-semibold mb-3">Tool usage (last 30 days)</h2>
+<div class="stat-card mb-6">
+  {% set top_count = tool_usage[0].count %}
+  <table class="w-full text-sm" style="font-variant-numeric: tabular-nums;">
+    {% for t in tool_usage %}
+    <tr class="border-b border-gray-100 last:border-b-0">
+      <td class="py-1.5 pr-3 font-mono text-gray-700 whitespace-nowrap" style="width: 1%;">{{ t.tool }}</td>
+      <td class="py-1.5">
+        <div class="bg-gray-100 rounded-sm h-3 overflow-hidden relative">
+          <div class="bg-indigo-500 h-full absolute top-0 left-0" style="width: {{ (100 * t.count / top_count)|round(1) }}%;"></div>
+          {% if t.errors %}
+          <div class="bg-red-400 h-full absolute top-0" style="left: {{ (100 * (t.count - t.errors) / top_count)|round(1) }}%; width: {{ (100 * t.errors / top_count)|round(1) }}%;"></div>
+          {% endif %}
+        </div>
+      </td>
+      <td class="py-1.5 pl-3 text-right text-gray-700 whitespace-nowrap" style="width: 1%;">
+        {{ "{:,}".format(t.count) }}
+        {% if t.errors %}<span class="text-red-500 text-xs ml-1">{{ t.errors }} err</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
 
 <h2 class="text-lg font-semibold mb-3">By tracked project (last 30 days)</h2>
 <div class="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">

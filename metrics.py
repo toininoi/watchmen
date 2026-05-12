@@ -628,6 +628,90 @@ def hour_dow_heatmap_svg(matrix: list[list[int]]) -> str:
     )
 
 
+def tool_usage(
+    project_key: str | None = None,
+    days: int = 30,
+    limit: int = 12,
+    tracked_only: bool = False,
+) -> list[dict]:
+    """Top N tools by call count over the window, plus error counts.
+
+    project_key=None aggregates across all sessions; pair with tracked_only=True
+    to restrict to tracked projects only."""
+    if not CORPUS_DB.exists():
+        return []
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    sql = """SELECT t.tool_name, COUNT(*) AS n, SUM(t.is_error) AS errors
+             FROM tool_calls t JOIN sessions s ON t.session_id = s.session_id
+             WHERE s.is_subagent = 0
+               AND date(t.timestamp, 'localtime') >= ?"""
+    params: list = [cutoff]
+    if project_key:
+        proj_dir = _project_dir_for_key(project_key)
+        if not proj_dir:
+            return []
+        sql += " AND s.project_dir = ?"
+        params.append(proj_dir)
+    elif tracked_only:
+        dirs = _tracked_project_dirs()
+        if not dirs:
+            return []
+        placeholders = ",".join("?" for _ in dirs)
+        sql += f" AND s.project_dir IN ({placeholders})"
+        params.extend(dirs)
+    sql += f" GROUP BY t.tool_name ORDER BY n DESC LIMIT {limit}"
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+    return [{"tool": r["tool_name"], "count": r["n"], "errors": r["errors"] or 0} for r in rows]
+
+
+def streak_stats(
+    project_key: str | None = None,
+    weeks: int = 26,
+    tracked_only: bool = False,
+) -> dict:
+    """Current and longest consecutive-active-day streak in the calendar window.
+    'Active' = at least one prompt that day."""
+    if project_key:
+        daily = activity_calendar(project_key, weeks=weeks)
+    else:
+        daily = activity_calendar_all(weeks=weeks, tracked_only=tracked_only)
+    if not daily:
+        return {"current": 0, "longest": 0, "longest_end": None}
+
+    today_str = date.today().isoformat()
+
+    # Current streak: count consecutive active days ending at today (or last activity).
+    current = 0
+    for d, n in reversed(daily):
+        if d > today_str:
+            continue
+        if n > 0:
+            current += 1
+        else:
+            break
+
+    # Longest streak in the window.
+    longest = 0
+    longest_end = None
+    run = 0
+    run_end = None
+    for d, n in daily:
+        if n > 0:
+            run += 1
+            run_end = d
+            if run > longest:
+                longest = run
+                longest_end = run_end
+        else:
+            run = 0
+            run_end = None
+    return {"current": current, "longest": longest, "longest_end": longest_end}
+
+
 def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, color: str = "#4f46e5") -> str:
     """Tiny inline-SVG line/area sparkline. Zero-deps, renders in any browser."""
     vals = list(values)
