@@ -575,7 +575,7 @@ def _publish_watchmen_state(
         "summary": summary,
         "details": {"added": added, "updated": updated, "removed": removed},
         "suggested_skill": suggested,
-        "viewer_url": f"http://127.0.0.1:8888/project/{project_key}",
+        "viewer_url": f"http://127.0.0.1:8888/p/{project_key}",
     }
     (state_dir / f"{project_key}.json").write_text(json.dumps(payload, indent=2))
 
