@@ -1,0 +1,18 @@
+{"timestamp":"2026-05-01T10:00:00.000Z","type":"session_meta","payload":{"id":"019dff00-1234-7000-8000-000000000001","timestamp":"2026-05-01T10:00:00.000Z","cwd":"/home/dev/myproject","originator":"codex_cli_rs","cli_version":"0.79.0","instructions":"<huge AGENTS.md skipped>","model_provider":{"name":"openai"},"git":{"commit_hash":"abc123","branch":"main","repository_url":"https://github.com/example/myproject"}}}
+{"timestamp":"2026-05-01T10:00:00.100Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-05-01T10:00:00.200Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\nFilesystem sandboxing rules…"}]}}
+{"timestamp":"2026-05-01T10:00:00.300Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/home/dev/myproject</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-05-01T10:00:00.400Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5","cwd":"/home/dev/myproject"}}
+{"timestamp":"2026-05-01T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add a function that reverses a string"}]}}
+{"timestamp":"2026-05-01T10:00:01.100Z","type":"event_msg","payload":{"type":"user_message"}}
+{"timestamp":"2026-05-01T10:00:02.000Z","type":"response_item","payload":{"type":"reasoning"}}
+{"timestamp":"2026-05-01T10:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}","call_id":"c1"}}
+{"timestamp":"2026-05-01T10:00:03.500Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"main.py"}}
+{"timestamp":"2026-05-01T10:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c2","input":"*** Add File: rev.py\n+def rev(s): return s[::-1]"}}
+{"timestamp":"2026-05-01T10:00:04.500Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c2","output":"{\"output\":\"ok\",\"metadata\":{\"exit_code\":0}}"}}
+{"timestamp":"2026-05-01T10:00:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Added rev.py with the reverse helper."}]}}
+{"timestamp":"2026-05-01T10:00:05.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":30,"total_tokens":1050},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":30,"total_tokens":1050},"model_context_window":258400}}}
+{"timestamp":"2026-05-01T10:00:06.000Z","type":"event_msg","payload":{"type":"task_complete"}}
+{"timestamp":"2026-05-01T10:00:10.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"now add a test"}]}}
+{"timestamp":"2026-05-01T10:00:11.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Test added."}]}}
+{"timestamp":"2026-05-01T10:00:11.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":1100,"output_tokens":80,"reasoning_output_tokens":0,"total_tokens":2080},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":900,"output_tokens":30,"reasoning_output_tokens":0,"total_tokens":1030},"model_context_window":258400}}}
