@@ -113,12 +113,13 @@ def turn_cost_usd(
 
 
 def _project_dir_for_key(project_key: str) -> str | None:
-    """Map a project_key back to its encoded project_dir in corpus.db.
-    Uses the heuristic that the project_key matches the last segment of the
-    decoded path, which corpus.db stores as the encoded dir."""
+    """Map a project_key to its corpus.db project_dir.
+
+    Post-normalization, all adapters store the real cwd (matching state.db's
+    source_repo verbatim), so this is just a lookup. Returns None if the
+    project isn't tracked or the state DB doesn't exist yet."""
     if not CORPUS_DB.exists():
         return None
-    # Look up via state.db's source_repo
     state_db = ROOT / "state.db"
     if not state_db.exists():
         return None
@@ -131,10 +132,7 @@ def _project_dir_for_key(project_key: str) -> str | None:
         return None
     if not row or not row[0]:
         return None
-    source_repo = row[0]
-    # Encoded format: leading "-" then path with "/" → "-"
-    encoded = "-" + source_repo.lstrip("/").replace("/", "-")
-    return encoded
+    return row[0]
 
 
 def _local_date(iso_ts: str | None) -> str | None:
@@ -328,8 +326,9 @@ def summarize_window(rows: list[dict], days: int) -> dict:
 
 
 def _tracked_project_dirs() -> list[str]:
-    """Encoded project_dirs for every tracked project. Used to filter the
-    aggregated views down to 'tracked only' when the toggle is on."""
+    """Real-path project_dirs for every tracked project. Used to filter the
+    aggregated views down to 'tracked only' when the toggle is on. Matches
+    the post-normalization adapter convention (real cwd, not encoded)."""
     state_db = ROOT / "state.db"
     if not state_db.exists():
         return []
@@ -340,7 +339,7 @@ def _tracked_project_dirs() -> list[str]:
             ).fetchall()
     except sqlite3.Error:
         return []
-    return ["-" + r[0].lstrip("/").replace("/", "-") for r in rows if r[0]]
+    return [r[0] for r in rows if r[0]]
 
 
 def daily_metrics_all(days: int = 30, tracked_only: bool = False) -> list[dict]:

@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"sess-001","timestamp":"2026-05-01T10:00:00.000Z","cwd":"/home/dev/myproject"}
+{"type":"message","id":"m1","parentId":"sess-001","timestamp":"2026-05-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"reverse a string please"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-05-01T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","text":"need to use s[::-1]"},{"type":"text","text":"Here's a one-liner."},{"type":"toolCall","name":"writeFile","arguments":{"path":"rev.py"}}],"provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":1000,"output":50,"cacheRead":200,"cacheWrite":100,"totalTokens":1250}}}
+{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-05-01T10:00:03.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"ok"}]}}
+{"type":"message","id":"m4-branch-a","parentId":"m3","timestamp":"2026-05-01T10:00:04.000Z","message":{"role":"user","content":[{"type":"text","text":"add a test"}]}}
+{"type":"message","id":"m4-branch-b","parentId":"m3","timestamp":"2026-05-01T10:00:10.000Z","message":{"role":"user","content":[{"type":"text","text":"actually no, add docs instead"}]}}
+{"type":"message","id":"m5","parentId":"m4-branch-b","timestamp":"2026-05-01T10:00:11.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Docs written."}],"provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":500,"output":20,"cacheRead":1000,"cacheWrite":0,"totalTokens":520}}}
+{"type":"custom","id":"c1","parentId":"m5","timestamp":"2026-05-01T10:00:12.000Z","payload":{"extension":"unrelated state"}}

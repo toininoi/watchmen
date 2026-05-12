@@ -222,7 +222,6 @@ def test_corpus_schema_has_agent_column():
     files from before the refactor would be missing it. init_db drops + recreates
     so this is also a guard against forgetting to add it back."""
     import tempfile
-    import sqlite3
     import corpus
     with tempfile.TemporaryDirectory() as td:
         orig = corpus.DB_PATH
@@ -234,6 +233,220 @@ def test_corpus_schema_has_agent_column():
             conn.close()
         finally:
             corpus.DB_PATH = orig
+
+
+def test_decode_project_dir_naive_fallback():
+    """When the encoded path doesn't exist on disk, decode_project_dir must still
+    return a stable canonical form (leading '-' → '/', remaining '-' → '/').
+    Stable means two adapter calls produce the same key for the same vanished project."""
+    from paths import decode_project_dir
+    encoded = "-tmp-watchmen-test-_no_such_path_12345"
+    out = decode_project_dir(encoded)
+    assert out == "/tmp/watchmen/test/_no_such_path_12345", f"got {out!r}"
+    # Idempotent on already-real paths.
+    assert decode_project_dir("/already/real") == "/already/real"
+
+
+def test_decode_project_dir_resolves_real_filesystem():
+    """For a path that exists on disk, decode_project_dir walks the FS to find
+    the longest matching dir name at each level — this is how 'kai-frontend'
+    survives the lossy encoding (instead of splitting into 'kai/frontend')."""
+    import os
+    import tempfile
+    from paths import decode_project_dir
+    with tempfile.TemporaryDirectory() as td:
+        nested = Path(td) / "foo-bar" / "baz"
+        nested.mkdir(parents=True)
+        real = str(nested)
+        encoded = real.replace("/", "-")
+        out = decode_project_dir(encoded)
+        assert os.path.realpath(out) == os.path.realpath(real), f"expected {real}, got {out}"
+
+
+def test_pi_adapter_parses_branching_fixture():
+    """Synthetic pi session with a fork at m3 (branch-a + branch-b). The adapter
+    must pick the leaf with the latest timestamp (branch-b) and ignore branch-a
+    entirely — counting both branches' user prompts would double-count."""
+    from adapters import pi
+    fixture = ROOT / "tests" / "fixtures" / "pi_session.jsonl"
+    entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
+    session, prompts, tools = pi.scan(entry)
+    assert session["agent"] == "pi"
+    assert session["project_dir"] == "/home/dev/myproject"
+    # 2 user prompts: m1 ('reverse...') + m4-branch-b ('actually no, add docs'). branch-a is NOT counted.
+    assert session["user_prompt_count"] == 2, f"got {session['user_prompt_count']}: {[p['text'] for p in prompts]}"
+    texts = {p["text"] for p in prompts}
+    assert "actually no, add docs instead" in texts
+    assert "add a test" not in texts, "branch-a leaked into the active walk"
+    # 1 thinking block, 2 assistant text outputs, 1 toolCall.
+    assert session["assistant_thinking_count"] == 1
+    assert session["assistant_text_count"] == 2
+    assert session["tool_use_count"] == 1
+    assert {t["tool_name"] for t in tools} == {"writeFile"}
+    # Token attribution from per-message usage.
+    assert session["input_tokens"] == 1500
+    assert session["output_tokens"] == 70
+    assert session["cache_read_tokens"] == 1200
+    assert session["cache_creation_tokens"] == 100
+    # Cost sanity check (sonnet-4.6 pricing).
+    assert 0.005 < session["cost_usd"] < 0.010
+
+
+def test_pi_adapter_respects_compaction_cutoff():
+    """A compaction entry summarizes earlier history; its firstKeptEntryId marks
+    where the kept window starts. Pre-cutoff prompts/tokens must NOT be ingested
+    again or we double-count what the summary already covers."""
+    from adapters import pi
+    fixture = ROOT / "tests" / "fixtures" / "pi_session_compacted.jsonl"
+    entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
+    session, prompts, _ = pi.scan(entry)
+    # Only the post-cutoff user prompt should appear.
+    assert session["user_prompt_count"] == 1
+    assert prompts[0]["text"] == "this prompt SHOULD be counted"
+    # Token total = m4 only (300 input + 15 output), NOT m4 + m2 (1300 + 65).
+    assert session["input_tokens"] == 300
+    assert session["output_tokens"] == 15
+
+
+def test_pi_adapter_silent_on_missing_install():
+    """No ~/.pi/agent/sessions/ on most dev boxes (yet). discover() must yield
+    nothing rather than raise."""
+    from adapters import pi
+    orig = pi.SESSIONS_DIR
+    pi.SESSIONS_DIR = ROOT / "tests" / "_no_such_pi_dir"
+    try:
+        assert list(pi.discover()) == []
+    finally:
+        pi.SESSIONS_DIR = orig
+
+
+def test_pi_adapter_rejects_unsupported_version():
+    """If the spec rev changes (v4+) the adapter must NOT misparse — return an
+    empty session rather than guess at new fields. Regression test against the
+    silent-drift failure mode."""
+    import tempfile
+    from adapters import pi
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "future.jsonl"
+        # Header claims v4; everything else looks identical to v3.
+        p.write_text(
+            '{"type":"session","version":4,"id":"sX","timestamp":"2026-05-01T10:00:00Z","cwd":"/x"}\n'
+            '{"type":"message","id":"m1","parentId":"sX","timestamp":"2026-05-01T10:00:01Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n'
+        )
+        session, prompts, _ = pi.scan({"path": p, "project_dir": None, "is_subagent": False, "parent_session_id": None})
+        assert prompts == []
+        assert session["user_prompt_count"] == 0
+
+
+def test_claude_adapter_stores_decoded_paths():
+    """The Claude adapter must call decode_project_dir on the encoded dir name —
+    if it stored '-Users-...' the per-project analyst couldn't merge with Codex's
+    real-path sessions. Regression test for the original split-counts gotcha."""
+    import os
+    import tempfile
+    from adapters import claude_code
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        real_dir = td_path / "foo-bar"
+        real_dir.mkdir()
+        encoded = str(real_dir).replace("/", "-")
+        fake_claude = td_path / "claude_projects"
+        proj = fake_claude / encoded
+        proj.mkdir(parents=True)
+        (proj / "abc.jsonl").write_text(
+            '{"timestamp":"2026-05-01T10:00:00Z","type":"user","message":{"content":"hi"}}\n'
+        )
+        orig = claude_code.PROJECTS_DIR
+        claude_code.PROJECTS_DIR = fake_claude
+        claude_code._DECODE_CACHE.clear()
+        try:
+            entries = list(claude_code.discover())
+            assert len(entries) == 1
+            assert not entries[0]["project_dir"].startswith("-"), \
+                f"adapter stored encoded form: {entries[0]['project_dir']!r}"
+            assert os.path.realpath(entries[0]["project_dir"]) == os.path.realpath(str(real_dir))
+        finally:
+            claude_code.PROJECTS_DIR = orig
+            claude_code._DECODE_CACHE.clear()
+
+
+# ─── CLI settings tests ─────────────────────────────────────────────────────
+
+
+def test_settings_parser_validates_inputs():
+    """_parse_setting must coerce + reject inputs so bad CLI args never reach
+    the DB layer. Covers: boolean parsing (truthy + falsy spellings), int
+    bounds, path existence, unknown keys."""
+    import cli
+
+    # enabled: many truthy + falsy spellings.
+    for v in ("true", "True", "yes", "Y", "on", "1"):
+        col, val = cli._parse_setting("enabled", v)
+        assert (col, val) == ("enabled", 1), f"{v!r} should map to (enabled, 1)"
+    for v in ("false", "no", "N", "off", "0"):
+        col, val = cli._parse_setting("enabled", v)
+        assert (col, val) == ("enabled", 0), f"{v!r} should map to (enabled, 0)"
+    try:
+        cli._parse_setting("enabled", "maybe")
+        raise AssertionError("expected ValueError on enabled=maybe")
+    except ValueError:
+        pass
+
+    # threshold: positive int only.
+    assert cli._parse_setting("threshold", "50") == ("threshold_new_prompts", 50)
+    for bad in ("abc", "-1", "0"):
+        try:
+            cli._parse_setting("threshold", bad)
+            raise AssertionError(f"expected ValueError on threshold={bad}")
+        except ValueError:
+            pass
+
+    # repo: must point at an existing directory.
+    col, val = cli._parse_setting("repo", str(ROOT))
+    assert col == "source_repo"
+    assert val.endswith("watchmen")
+    try:
+        cli._parse_setting("repo", "/tmp/_no_such_dir_for_smoke_test")
+        raise AssertionError("expected ValueError on missing repo path")
+    except ValueError:
+        pass
+
+    # notes: pass-through, any string allowed.
+    assert cli._parse_setting("notes", "anything goes") == ("notes", "anything goes")
+
+    # unknown key.
+    try:
+        cli._parse_setting("bogus", "x")
+        raise AssertionError("expected ValueError on unknown key")
+    except ValueError:
+        pass
+
+
+def test_settings_set_writes_to_state_db():
+    """End-to-end: cmd_settings_set actually mutates state.db. Regression test
+    against forgetting to call state.update_project, or silently swallowing the
+    db error."""
+    import tempfile
+    import argparse
+    import cli
+    import state
+    with tempfile.TemporaryDirectory() as td:
+        orig = state.STATE_DB
+        state.STATE_DB = Path(td) / "state.db"
+        try:
+            state.init_db()
+            state.track_project("smoke-proj", str(ROOT), threshold=30)
+            args = argparse.Namespace(project="smoke-proj", key="threshold", value="77")
+            rc = cli.cmd_settings_set(args)
+            assert rc == 0
+            after = state.get_project("smoke-proj")
+            assert after["threshold_new_prompts"] == 77
+            # Now flip enabled.
+            args = argparse.Namespace(project="smoke-proj", key="enabled", value="false")
+            assert cli.cmd_settings_set(args) == 0
+            assert state.get_project("smoke-proj")["enabled"] == 0
+        finally:
+            state.STATE_DB = orig
 
 
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
@@ -282,7 +495,18 @@ def main() -> int:
     check("codex adapter parses fixture cleanly",   test_codex_adapter_parses_fixture)
     check("codex adapter dedupes user_message",     test_codex_adapter_dedupe_user_message)
     check("codex adapter silent on missing install", test_codex_adapter_silent_on_missing_install)
+    check("pi adapter parses branching fixture",     test_pi_adapter_parses_branching_fixture)
+    check("pi adapter respects compaction cutoff",   test_pi_adapter_respects_compaction_cutoff)
+    check("pi adapter silent on missing install",    test_pi_adapter_silent_on_missing_install)
+    check("pi adapter rejects unsupported version",  test_pi_adapter_rejects_unsupported_version)
     check("corpus.sessions has agent column",        test_corpus_schema_has_agent_column)
+    check("decode_project_dir naive fallback",        test_decode_project_dir_naive_fallback)
+    check("decode_project_dir resolves real FS",      test_decode_project_dir_resolves_real_filesystem)
+    check("claude adapter stores decoded paths",      test_claude_adapter_stores_decoded_paths)
+    print()
+    print("CLI settings:")
+    check("settings parser validates inputs",         test_settings_parser_validates_inputs)
+    check("settings set writes to state.db",          test_settings_set_writes_to_state_db)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
