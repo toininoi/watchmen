@@ -22,6 +22,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
@@ -29,7 +30,7 @@ from textwrap import dedent
 import httpx
 
 from agent import Agent, load_api_key
-from cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers
+from cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers, write_cache
 from tools_lib import make_tools
 
 ROOT = Path(__file__).parent
@@ -783,6 +784,7 @@ def main():
     parser.add_argument("--skip-finder", action="store_true", help="reuse existing _candidates.json")
     parser.add_argument("--skip-skills", action="store_true", help="skip stage 2 — assume kai_claude/<project>/skills/* is already populated")
     parser.add_argument("--regen-all", action="store_true", help="invalidate every input cache for this project, forcing full re-curation")
+    parser.add_argument("--curator-concurrency", type=int, default=4, help="parallel per-skill curator agents in stage 2 (default 4)")
     args = parser.parse_args()
 
     api_key = load_api_key()
@@ -841,50 +843,76 @@ def main():
             return
 
         # ─── Stage 2: per-skill curator ───────────────────────────────────────
-        from cache import write_cache
         completed: list[str] = []
-        cache_hits = 0
         if args.skip_skills:
             existing_skills_dir = out_dir / "skills"
             if existing_skills_dir.exists():
                 completed = sorted(d.name for d in existing_skills_dir.iterdir() if d.is_dir())
             print(f"[2/4] skipping stage 2 — found {len(completed)} existing skills: {', '.join(completed)}", flush=True)
         else:
-            print(f"[2/4] per-skill curators ({len(candidates)} skills)...", flush=True)
-        for i, cand in enumerate(candidates, 1):
-            if args.skip_skills:
-                break
-            slug = cand.get("slug")
-            if not slug:
-                print(f"      [{i}] skipping — no slug", flush=True)
-                continue
-            skill_dir = out_dir / "skills" / slug
-            skill_cache = skill_dir / ".inputs.json"
-            # Cache hit only if the bundle exists AND all recorded reads still match.
-            if (skill_dir / "SKILL.md").exists() and cache_hit(skill_cache, replay_handlers):
-                completed.append(slug)
-                cache_hits += 1
-                print(f"      [{i}/{len(candidates)}] {slug}... cache hit", flush=True)
-                continue
-            print(f"      [{i}/{len(candidates)}] {slug}...", end=" ", flush=True)
-            t0 = time.time()
-            try:
-                skill_recorder = ReadRecorder()
-                curator = build_skill_curator(client, args.model, args.project, args.repo, cand, log_path, run_critic, skill_recorder)
+            # Phase 2a: sequential cache scan — cheap (~ms per skill), determines
+            # which candidates need the expensive agent run.
+            cache_hits: list[str] = []
+            miss_list: list[dict] = []
+            for cand in candidates:
+                slug = cand.get("slug")
+                if not slug:
+                    continue
+                skill_dir = out_dir / "skills" / slug
+                if (skill_dir / "SKILL.md").exists() and cache_hit(skill_dir / ".inputs.json", replay_handlers):
+                    cache_hits.append(slug)
+                else:
+                    miss_list.append(cand)
+            completed.extend(cache_hits)
+
+            print(
+                f"[2/4] per-skill curators ({len(candidates)} skills, {len(cache_hits)} cached, "
+                f"{len(miss_list)} to curate, concurrency={args.curator_concurrency})...",
+                flush=True,
+            )
+            for slug in cache_hits:
+                print(f"      {slug} — cache hit", flush=True)
+
+            # Phase 2b: parallel agent runs for cache misses. Each skill is
+            # independent — separate Agent instance, separate output directory,
+            # separate cache file. httpx.Client is thread-safe and shared.
+            def _curate_one(cand: dict) -> tuple[str, str | None, ReadRecorder, float]:
+                """Run one skill curator. Returns (slug, summary, recorder, elapsed_seconds).
+                summary=None means the agent didn't fire its terminal tool."""
+                slug = cand["slug"]
+                t0 = time.time()
+                rec = ReadRecorder()
+                curator = build_skill_curator(
+                    client, args.model, args.project, args.repo, cand, log_path, run_critic, rec
+                )
                 result, _ = curator.run(
                     f"Author the skill bundle for '{cand['name']}'. Investigate, draft, run the critic, refine, finish.",
                     max_iter=45,
                 )
-                if result:
-                    completed.append(slug)
-                    write_cache(skill_cache, skill_recorder)
-                    print(f"done in {time.time()-t0:.1f}s — {result.get('summary', '')[:80]}", flush=True)
-                else:
-                    print(f"no finish call in {time.time()-t0:.1f}s", flush=True)
-            except Exception as e:
-                print(f"FAILED: {type(e).__name__}: {e}", flush=True)
-        if not args.skip_skills and cache_hits:
-            print(f"      stage 2 cache: {cache_hits}/{len(candidates)} skills reused", flush=True)
+                summary = (result or {}).get("summary") if result else None
+                return slug, summary, rec, time.time() - t0
+
+            concurrency = max(1, args.curator_concurrency)
+            done_count = 0
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {pool.submit(_curate_one, c): c for c in miss_list}
+                for fut in as_completed(futures):
+                    cand = futures[fut]
+                    slug = cand.get("slug", "?")
+                    done_count += 1
+                    try:
+                        slug, summary, rec, elapsed = fut.result()
+                        if summary is not None:
+                            completed.append(slug)
+                            write_cache(out_dir / "skills" / slug / ".inputs.json", rec)
+                            print(
+                                f"      [{done_count}/{len(miss_list)}] {slug} done in {elapsed:.1f}s — {(summary or '')[:80]}",
+                                flush=True,
+                            )
+                        else:
+                            print(f"      [{done_count}/{len(miss_list)}] {slug} no finish call in {elapsed:.1f}s", flush=True)
+                    except Exception as e:
+                        print(f"      [{done_count}/{len(miss_list)}] {slug} FAILED: {type(e).__name__}: {e}", flush=True)
 
         # ─── Stage 3: claude.md author ────────────────────────────────────────
         claude_md_path = out_dir / "CLAUDE.md"

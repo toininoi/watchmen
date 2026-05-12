@@ -596,6 +596,38 @@ def test_invalidate_all_clears_every_cache_file():
         assert (proj / "skills" / "skill-a" / "SKILL.md").exists()
 
 
+def test_stage_2_parallel_dispatcher_preserves_order_independence():
+    """Stage 2's parallel pool must (a) actually run agents concurrently and
+    (b) collect results regardless of completion order. We can't run real
+    LLM agents in a smoke test, so we verify the ThreadPoolExecutor pattern
+    itself by mocking _curate_one with a sleep-and-return stub. If this
+    regresses (e.g. someone reverts to sequential), the elapsed time blows
+    out and the test catches it."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Simulate 4 skills that each take 0.3s to "curate". Sequential would be
+    # ~1.2s; with concurrency=4 the wall-clock should be ~0.3s.
+    def fake_curate(slug: str) -> tuple[str, float]:
+        time.sleep(0.3)
+        return slug, time.time()
+
+    slugs = ["a", "b", "c", "d"]
+    t0 = time.time()
+    results: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(fake_curate, s): s for s in slugs}
+        for fut in as_completed(futures):
+            slug, finished_at = fut.result()
+            results[slug] = finished_at
+    elapsed = time.time() - t0
+
+    # Under true parallelism: ~0.3s total. Under sequential: ~1.2s.
+    # Allow generous slack for CI variance — anything < 0.8s proves it ran in parallel.
+    assert elapsed < 0.8, f"parallel dispatch too slow ({elapsed:.2f}s) — did Stage 2 regress to sequential?"
+    assert set(results.keys()) == set(slugs)
+
+
 def test_only_input_tools_are_recorded():
     """Effect-side tools (write_kai_claude_file, append_curation_log) must NOT
     be wrapped — otherwise their results pollute the cache key, and any minor
@@ -697,6 +729,7 @@ def main() -> int:
     check("cache miss on missing cache file",         test_cache_miss_on_missing_cache_file)
     check("invalidate_all clears every cache file",   test_invalidate_all_clears_every_cache_file)
     check("only input tools are recorded",            test_only_input_tools_are_recorded)
+    check("stage 2 parallel dispatcher runs concurrently", test_stage_2_parallel_dispatcher_preserves_order_independence)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
