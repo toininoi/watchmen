@@ -11,7 +11,15 @@ Subcommands:
   onboard                   Interactive setup wizard (fresh install)
   reonboard                 Re-run the wizard (existing projects survive, new ones added)
   settings list|show|set    View / update per-project settings (threshold, enabled, repo, notes)
-  viewer                    Start local web viewer (default :8888)
+  daemon run|install|uninstall      Foreground run / launchd agent lifecycle
+  viewer run|install|uninstall      Foreground run / launchd agent lifecycle (:8888)
+  hooks install|uninstall|status    Claude Code hook lifecycle + inspection
+  statusline install|uninstall      💡 watchmen indicator in ~/.claude/settings.json
+  plugin update|status              Marketplace clone management
+  launchd status                    Inspect installed launchd agents
+
+Old verb-noun-hyphen forms (install-daemon, hooks-status, …) still work but
+print a soft deprecation hint to stderr — will be removed in a future release.
 
 Designed to be invoked as `uv run watchmen <subcommand>` or via the script entry in pyproject.toml.
 """
@@ -431,6 +439,53 @@ def cmd_metrics(args) -> int:
 # ─── Argument parsing ───────────────────────────────────────────────────────
 
 
+def _deprecate(new_form: str, fn):
+    """Wrap a subcommand handler so it prints a soft deprecation hint to stderr
+    before delegating. Exit code is unchanged — callers don't break.
+
+    Why dual-form: noun-verb (`daemon install`) is more discoverable + tab-
+    completion-friendly than verb-noun-with-hyphens (`install-daemon`), but
+    every teammate's scripts + launchd plists use the old form. We keep both
+    working and nudge usage toward the new shape via this line."""
+    def wrapper(args):
+        sys.stderr.write(f"\033[90m[deprecated, use 'watchmen {new_form}']\033[0m\n")
+        return fn(args)
+    return wrapper
+
+
+def _add_daemon_run_args(p) -> None:
+    """Foreground-daemon args. Same set for old `watchmen daemon` and new
+    `watchmen daemon run`."""
+    p.add_argument("--once", action="store_true", help="single cycle then exit")
+    p.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
+    p.add_argument("--curator-age", type=int, default=86400)
+    p.add_argument("--curator-hours", default="2,14", help="local-time hours when full curator runs (default '2,14' = 2am + 2pm)")
+    p.add_argument("--full-curator-min-age", type=int, default=28800, help="min seconds between full curator runs per project (default 8h)")
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--log-file", default=str(Path.home() / "Library" / "Logs" / "watchmen.log"))
+
+
+def _add_daemon_install_args(p) -> None:
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
+    p.add_argument("--dry-run", action="store_true", help="print plist without installing")
+
+
+def _add_viewer_run_args(p) -> None:
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8888)
+
+
+def _add_viewer_install_args(p) -> None:
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8888)
+    p.add_argument("--dry-run", action="store_true")
+
+
+def _add_statusline_install_args(p) -> None:
+    p.add_argument("--force", action="store_true", help="overwrite a non-watchmen statusLine entry")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="watchmen", description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="cmd")
@@ -469,40 +524,96 @@ def main(argv: list[str] | None = None) -> int:
     p_runs.set_defaults(func=cmd_runs)
 
     sub.add_parser("config", help="edit config (P3)").set_defaults(func=cmd_config)
-    p_view = sub.add_parser("viewer", help="start local web viewer at http://127.0.0.1:8888")
-    p_view.add_argument("--host", default="127.0.0.1")
-    p_view.add_argument("--port", type=int, default=8888)
-    p_view.set_defaults(func=cmd_viewer)
 
-    p_d = sub.add_parser("daemon", help="run scheduling loop (foreground; use install-daemon for autostart)")
-    p_d.add_argument("--once", action="store_true", help="single cycle then exit")
-    p_d.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
-    p_d.add_argument("--curator-age", type=int, default=86400)
-    p_d.add_argument("--curator-hours", default="2,14", help="local-time hours when full curator runs (default '2,14' = 2am + 2pm)")
-    p_d.add_argument("--full-curator-min-age", type=int, default=28800, help="min seconds between full curator runs per project (default 8h)")
-    p_d.add_argument("--model", default=DEFAULT_MODEL)
-    p_d.add_argument("--log-file", default=str(Path.home() / "Library" / "Logs" / "watchmen.log"))
-    p_d.set_defaults(func=cmd_daemon)
+    # ── daemon (noun) ──────────────────────────────────────────────────────
+    p_daemon = sub.add_parser("daemon", help="run / install / uninstall the watchmen daemon")
+    daemon_sub = p_daemon.add_subparsers(dest="daemon_cmd")
+    p_drun = daemon_sub.add_parser("run", help="run scheduling loop in the foreground")
+    _add_daemon_run_args(p_drun)
+    p_drun.set_defaults(func=cmd_daemon)
+    p_dins = daemon_sub.add_parser("install", help="install launchd agent for autostart on login")
+    _add_daemon_install_args(p_dins)
+    p_dins.set_defaults(func=cmd_install_daemon)
+    daemon_sub.add_parser("uninstall", help="remove the launchd agent").set_defaults(func=cmd_uninstall_daemon)
+    p_daemon.set_defaults(func=lambda a: (p_daemon.print_help() or 1))
 
-    p_id = sub.add_parser("install-daemon", help="install launchd agent for watchmen daemon (autostart on login)")
-    p_id.add_argument("--model", default=DEFAULT_MODEL)
-    p_id.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
-    p_id.add_argument("--dry-run", action="store_true", help="print plist without installing")
-    p_id.set_defaults(func=cmd_install_daemon)
+    # ── viewer (noun) ──────────────────────────────────────────────────────
+    p_viewer = sub.add_parser("viewer", help="run / install / uninstall the local web viewer")
+    viewer_sub = p_viewer.add_subparsers(dest="viewer_cmd")
+    p_vrun = viewer_sub.add_parser("run", help="start the viewer in the foreground (http://127.0.0.1:8888)")
+    _add_viewer_run_args(p_vrun)
+    p_vrun.set_defaults(func=cmd_viewer)
+    p_vins = viewer_sub.add_parser("install", help="install launchd agent for autostart on login")
+    _add_viewer_install_args(p_vins)
+    p_vins.set_defaults(func=cmd_install_viewer)
+    viewer_sub.add_parser("uninstall", help="remove the launchd agent").set_defaults(func=cmd_uninstall_viewer)
+    p_viewer.set_defaults(func=lambda a: (p_viewer.print_help() or 1))
 
-    p_iv = sub.add_parser("install-viewer", help="install launchd agent for watchmen viewer (autostart on login)")
-    p_iv.add_argument("--host", default="127.0.0.1")
-    p_iv.add_argument("--port", type=int, default=8888)
-    p_iv.add_argument("--dry-run", action="store_true")
-    p_iv.set_defaults(func=cmd_install_viewer)
+    # ── hooks (noun) ───────────────────────────────────────────────────────
+    p_hooks = sub.add_parser("hooks", help="install / uninstall / inspect Claude Code hooks")
+    hooks_sub = p_hooks.add_subparsers(dest="hooks_cmd")
+    hooks_sub.add_parser("install", help="wire watchmen_observe.sh into ~/.claude/settings.json").set_defaults(func=cmd_install_hooks)
+    hooks_sub.add_parser("uninstall", help="remove watchmen entries from ~/.claude/settings.json").set_defaults(func=cmd_uninstall_hooks)
+    hooks_sub.add_parser("status", help="show which hook events are wired up").set_defaults(func=cmd_hooks_status)
+    p_hooks.set_defaults(func=lambda a: (p_hooks.print_help() or 1))
 
-    sub.add_parser("uninstall-daemon", help="remove the watchmen daemon launchd agent").set_defaults(func=cmd_uninstall_daemon)
-    sub.add_parser("uninstall-viewer", help="remove the watchmen viewer launchd agent").set_defaults(func=cmd_uninstall_viewer)
-    sub.add_parser("launchd-status", help="show installed/loaded launchd agents").set_defaults(func=cmd_launchd_status)
+    # ── statusline (noun) ──────────────────────────────────────────────────
+    p_sl = sub.add_parser("statusline", help="install / uninstall the 💡 watchmen indicator")
+    sl_sub = p_sl.add_subparsers(dest="statusline_cmd")
+    p_slin = sl_sub.add_parser("install", help="wire the 💡 watchmen indicator into ~/.claude/settings.json")
+    _add_statusline_install_args(p_slin)
+    p_slin.set_defaults(func=cmd_install_statusline)
+    sl_sub.add_parser("uninstall", help="remove the watchmen statusLine entry").set_defaults(func=cmd_uninstall_statusline)
+    p_sl.set_defaults(func=lambda a: (p_sl.print_help() or 1))
 
-    sub.add_parser("install-hooks", help="wire watchmen_observe.sh into ~/.claude/settings.json").set_defaults(func=cmd_install_hooks)
-    sub.add_parser("uninstall-hooks", help="remove watchmen entries from ~/.claude/settings.json").set_defaults(func=cmd_uninstall_hooks)
-    sub.add_parser("hooks-status", help="show which hook events are wired up").set_defaults(func=cmd_hooks_status)
+    # ── plugin (noun) ──────────────────────────────────────────────────────
+    p_plug = sub.add_parser("plugin", help="manage the watchmen Claude Code plugin marketplace clone")
+    plug_sub = p_plug.add_subparsers(dest="plugin_cmd")
+    plug_sub.add_parser("update", help="git pull the marketplace clone so /plugin install picks up the latest").set_defaults(func=cmd_update_plugin)
+    plug_sub.add_parser("status", help="show plugin marketplace + cache + statusLine state").set_defaults(func=cmd_plugin_status)
+    p_plug.set_defaults(func=lambda a: (p_plug.print_help() or 1))
+
+    # ── launchd (noun) ─────────────────────────────────────────────────────
+    p_ld = sub.add_parser("launchd", help="inspect the watchmen launchd agents")
+    ld_sub = p_ld.add_subparsers(dest="launchd_cmd")
+    ld_sub.add_parser("status", help="show installed/loaded launchd agents").set_defaults(func=cmd_launchd_status)
+    p_ld.set_defaults(func=lambda a: (p_ld.print_help() or 1))
+
+    # ── deprecated aliases ─────────────────────────────────────────────────
+    # Old verb-noun-with-hyphens forms. Keep working, print soft deprecation
+    # line. Plan: remove after 1-2 releases once teammates' scripts update.
+    p_id = sub.add_parser("install-daemon", help="(deprecated) use `watchmen daemon install`")
+    _add_daemon_install_args(p_id)
+    p_id.set_defaults(func=_deprecate("daemon install", cmd_install_daemon))
+
+    p_iv = sub.add_parser("install-viewer", help="(deprecated) use `watchmen viewer install`")
+    _add_viewer_install_args(p_iv)
+    p_iv.set_defaults(func=_deprecate("viewer install", cmd_install_viewer))
+
+    sub.add_parser("uninstall-daemon", help="(deprecated) use `watchmen daemon uninstall`").set_defaults(
+        func=_deprecate("daemon uninstall", cmd_uninstall_daemon))
+    sub.add_parser("uninstall-viewer", help="(deprecated) use `watchmen viewer uninstall`").set_defaults(
+        func=_deprecate("viewer uninstall", cmd_uninstall_viewer))
+    sub.add_parser("launchd-status", help="(deprecated) use `watchmen launchd status`").set_defaults(
+        func=_deprecate("launchd status", cmd_launchd_status))
+
+    sub.add_parser("install-hooks", help="(deprecated) use `watchmen hooks install`").set_defaults(
+        func=_deprecate("hooks install", cmd_install_hooks))
+    sub.add_parser("uninstall-hooks", help="(deprecated) use `watchmen hooks uninstall`").set_defaults(
+        func=_deprecate("hooks uninstall", cmd_uninstall_hooks))
+    sub.add_parser("hooks-status", help="(deprecated) use `watchmen hooks status`").set_defaults(
+        func=_deprecate("hooks status", cmd_hooks_status))
+
+    p_isl = sub.add_parser("install-statusline", help="(deprecated) use `watchmen statusline install`")
+    _add_statusline_install_args(p_isl)
+    p_isl.set_defaults(func=_deprecate("statusline install", cmd_install_statusline))
+    sub.add_parser("uninstall-statusline", help="(deprecated) use `watchmen statusline uninstall`").set_defaults(
+        func=_deprecate("statusline uninstall", cmd_uninstall_statusline))
+
+    sub.add_parser("update-plugin", help="(deprecated) use `watchmen plugin update`").set_defaults(
+        func=_deprecate("plugin update", cmd_update_plugin))
+    sub.add_parser("plugin-status", help="(deprecated) use `watchmen plugin status`").set_defaults(
+        func=_deprecate("plugin status", cmd_plugin_status))
 
     sub.add_parser("onboard", help="interactive setup wizard (ingest + track + analyze + curate + autostart)").set_defaults(func=cmd_onboard)
     sub.add_parser("reonboard", help="rerun the onboarding wizard (existing projects survive, new ones added)").set_defaults(func=cmd_reonboard)
@@ -524,13 +635,6 @@ def main(argv: list[str] | None = None) -> int:
     p_metrics.add_argument("project", help="project key")
     p_metrics.add_argument("--days", type=int, default=30, help="window length (default 30)")
     p_metrics.set_defaults(func=cmd_metrics)
-
-    sub.add_parser("update-plugin", help="git pull the marketplace clone so /plugin install picks up the latest").set_defaults(func=cmd_update_plugin)
-    p_isl = sub.add_parser("install-statusline", help="wire the 💡 watchmen indicator into ~/.claude/settings.json")
-    p_isl.add_argument("--force", action="store_true", help="overwrite a non-watchmen statusLine entry")
-    p_isl.set_defaults(func=cmd_install_statusline)
-    sub.add_parser("uninstall-statusline", help="remove the watchmen statusLine entry").set_defaults(func=cmd_uninstall_statusline)
-    sub.add_parser("plugin-status", help="show plugin marketplace + cache + statusLine state").set_defaults(func=cmd_plugin_status)
 
     args = parser.parse_args(argv)
     if not args.cmd:

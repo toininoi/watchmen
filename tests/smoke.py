@@ -449,6 +449,61 @@ def test_settings_set_writes_to_state_db():
             state.STATE_DB = orig
 
 
+# ─── CLI noun-verb tests ────────────────────────────────────────────────────
+
+
+def test_cli_noun_verb_and_deprecated_both_dispatch():
+    """`watchmen hooks status` (new) and `watchmen hooks-status` (old) must
+    BOTH invoke cmd_hooks_status. The old form additionally must emit a
+    soft-deprecation line to stderr naming the new form. If either path
+    silently misses, teammates think their command ran when it didn't."""
+    import io
+    import cli
+
+    invoked: list[str] = []
+    orig = cli.cmd_hooks_status
+    cli.cmd_hooks_status = lambda a: (invoked.append("called"), 0)[1]
+    orig_stderr = cli.sys.stderr
+    try:
+        # New form: no deprecation, handler called.
+        invoked.clear()
+        cli.sys.stderr = io.StringIO()
+        rc = cli.main(["hooks", "status"])
+        assert rc == 0
+        assert invoked == ["called"]
+        assert "deprecated" not in cli.sys.stderr.getvalue()
+
+        # Old form: deprecation hint, handler still called.
+        invoked.clear()
+        cli.sys.stderr = io.StringIO()
+        rc = cli.main(["hooks-status"])
+        assert rc == 0
+        assert invoked == ["called"]
+        err = cli.sys.stderr.getvalue()
+        assert "deprecated" in err and "watchmen hooks status" in err
+    finally:
+        cli.cmd_hooks_status = orig
+        cli.sys.stderr = orig_stderr
+
+
+def test_cli_bare_noun_prints_help_and_exits_1():
+    """`watchmen daemon` (with no verb) must print help and exit 1 — same
+    UX as `watchmen settings`. If the bare invocation silently does nothing
+    (or worse, runs the foreground daemon by accident), users get confused."""
+    import io
+    import cli
+    buf = io.StringIO()
+    orig_stdout = cli.sys.stdout
+    cli.sys.stdout = buf
+    try:
+        rc = cli.main(["daemon"])
+    finally:
+        cli.sys.stdout = orig_stdout
+    assert rc == 1, f"bare `daemon` should exit 1, got {rc}"
+    assert "run" in buf.getvalue() and "install" in buf.getvalue() and "uninstall" in buf.getvalue(), \
+        "help must list the available verbs"
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -507,6 +562,10 @@ def main() -> int:
     print("CLI settings:")
     check("settings parser validates inputs",         test_settings_parser_validates_inputs)
     check("settings set writes to state.db",          test_settings_set_writes_to_state_db)
+    print()
+    print("CLI noun-verb refactor:")
+    check("hooks status new+old forms dispatch",      test_cli_noun_verb_and_deprecated_both_dispatch)
+    check("bare noun (`daemon`) prints help, exits 1", test_cli_bare_noun_prints_help_and_exits_1)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)

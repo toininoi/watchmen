@@ -300,7 +300,7 @@ def install_autostart(console: Console) -> None:
         launchd_setup.install_daemon()
         launchd_setup.install_viewer()
     else:
-        console.print(f"[dim]Skipped. You can run `{_exec_name()} install-daemon` later.[/]")
+        console.print(f"[dim]Skipped. You can run `{_exec_name()} daemon install` later.[/]")
 
 
 def install_hooks_if_wanted(console: Console) -> None:
@@ -308,7 +308,7 @@ def install_hooks_if_wanted(console: Console) -> None:
     if Confirm.ask("\nWire Claude Code hooks (real-time event capture)?", default=True):
         hooks_setup.install()
     else:
-        console.print(f"[dim]Skipped. Run `{_exec_name()} install-hooks` later if you want hook capture.[/]")
+        console.print(f"[dim]Skipped. Run `{_exec_name()} hooks install` later if you want hook capture.[/]")
 
 
 def show_plugin_install(console: Console) -> None:
@@ -319,7 +319,7 @@ def show_plugin_install(console: Console) -> None:
         "[bold cyan]  /plugin install watchmen@watchmen[/]\n"
         "[bold cyan]  /reload-plugins[/]\n\n"
         f"Then wire the [bold]💡 indicator[/] into your statusLine:\n"
-        f"[bold cyan]  {_exec_name()} install-statusline[/]"
+        f"[bold cyan]  {_exec_name()} statusline install[/]"
     )
     console.print(Panel(body, title="Install the Claude Code plugin", border_style="cyan"))
 
