@@ -39,6 +39,8 @@ def _step(console: Console, n: int, total: int, title: str) -> None:
 
 
 def show_welcome(console: Console, total_steps: int) -> None:
+    import banner
+    banner.render(console)
     body = Text.from_markup(
         "[bold]watchmen[/] mines your Claude Code session history, ships skill\n"
         "bundles + CLAUDE.md files per project, and surfaces them back into\n"
@@ -48,7 +50,7 @@ def show_welcome(console: Console, total_steps: int) -> None:
         f"[dim]{total_steps} steps. Most takes a few seconds; the LLM passes (analyze + curate)\n"
         f"are the only slow ones — see cost estimate before they run.[/]"
     )
-    console.print(Panel(body, title="🔭 watchmen onboard", border_style="cyan"))
+    console.print(Panel(body, title="onboard", border_style="cyan"))
 
 
 def _have_openrouter_key() -> bool:
