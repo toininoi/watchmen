@@ -17,7 +17,9 @@ Usage:
 
 import argparse
 import json
+import re
 import shutil
+import sqlite3
 import subprocess
 import time
 from datetime import datetime
@@ -553,6 +555,13 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
     except Exception as e:
         print(f"      _publish_watchmen_state failed (non-fatal): {type(e).__name__}: {e}", flush=True)
 
+    # Rebuild the FTS5 skill index. Plugin's UserPromptSubmit hook queries this
+    # to surface "you could have used /<skill>" suggestions.
+    try:
+        _build_skill_index()
+    except Exception as e:
+        print(f"      _build_skill_index failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+
 
 def _git_commit_artifacts(
     project_dir: Path,
@@ -617,6 +626,77 @@ def _git_commit_artifacts(
     r = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "HEAD"],
                        capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _extract_frontmatter_field(fm: str, field: str) -> str:
+    """Pull a single field's value out of a SKILL.md YAML frontmatter as flat text.
+    Joins bullet lists into space-separated plain text suitable for FTS5 indexing."""
+    pat = rf"^{field}:\s*(.*?)(?=\n[a-z_]+:\s|\n---|\Z)"
+    m = re.search(pat, fm, re.MULTILINE | re.DOTALL)
+    if not m:
+        return ""
+    raw = m.group(1).strip()
+    parts = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.startswith(("- ", "* ")):
+            line = line[2:].strip()
+        if line:
+            parts.append(line)
+    return " ".join(parts)
+
+
+def _build_skill_index() -> None:
+    """Rebuild ~/.watchmen/skill_index.db (FTS5) from every tracked project's skill
+    bundles. The plugin's UserPromptSubmit hook queries this to surface
+    'you could have used /<skill> to save time & tokens' indicators."""
+    import state as _state
+
+    base = Path.home() / ".watchmen"
+    base.mkdir(parents=True, exist_ok=True)
+    db_path = base / "skill_index.db"
+
+    rows: list[tuple[str, str, str, str]] = []
+    for p in _state.list_projects():
+        project_key = p.get("project_key")
+        if not project_key:
+            continue
+        skills_dir = ROOT / "kai_claude" / project_key / "skills"
+        if not skills_dir.exists():
+            continue
+        for skill_dir in skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            content = skill_md.read_text(errors="replace")
+            m = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+            fm = m.group(1) if m else ""
+            when_to = _extract_frontmatter_field(fm, "when_to_use")
+            when_not = _extract_frontmatter_field(fm, "when_not_to_use")
+            description = _extract_frontmatter_field(fm, "description")
+            # Indexable: trigger phrases + description. when_not_to_use is stored but kept
+            # in a separate column so the hook can subtract it later if needed.
+            indexable = " ".join(filter(None, [when_to, description]))
+            rows.append((project_key, skill_dir.name, indexable, when_not))
+
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("DROP TABLE IF EXISTS skill_match")
+        conn.execute("""
+            CREATE VIRTUAL TABLE skill_match USING fts5(
+                when_to_use,
+                when_not_to_use,
+                skill_slug UNINDEXED,
+                project_key UNINDEXED
+            )
+        """)
+        conn.executemany(
+            "INSERT INTO skill_match (project_key, skill_slug, when_to_use, when_not_to_use) "
+            "VALUES (?, ?, ?, ?)",
+            rows,
+        )
+    print(f"      indexed {len(rows)} skill(s) across projects → {db_path}", flush=True)
 
 
 def _publish_watchmen_state(
