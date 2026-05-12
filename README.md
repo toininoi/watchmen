@@ -66,6 +66,16 @@ echo "OPENROUTER_API_KEY=sk-or-v1-..." > ~/.config/watchmen/.env
 
 ## Quickstart
 
+The fastest path is the interactive wizard:
+
+```bash
+watchmen onboard
+```
+
+It walks through ingest → project selection → analyze → curate → autostart → plugin install in one guided pass, with a Rich TUI that confirms before any LLM-paid step. Idempotent — re-run it anytime to add a new project.
+
+If you'd rather drive the steps manually:
+
 ```bash
 # 1. Wire watchmen into your Claude Code hook config (live event capture)
 watchmen install-hooks

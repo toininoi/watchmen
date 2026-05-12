@@ -301,6 +301,11 @@ def cmd_plugin_status(args) -> int:
     return plugin_setup.status()
 
 
+def cmd_onboard(args) -> int:
+    import onboard
+    return onboard.run()
+
+
 # ─── Argument parsing ───────────────────────────────────────────────────────
 
 
@@ -376,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("install-hooks", help="wire watchmen_observe.sh into ~/.claude/settings.json").set_defaults(func=cmd_install_hooks)
     sub.add_parser("uninstall-hooks", help="remove watchmen entries from ~/.claude/settings.json").set_defaults(func=cmd_uninstall_hooks)
     sub.add_parser("hooks-status", help="show which hook events are wired up").set_defaults(func=cmd_hooks_status)
+
+    sub.add_parser("onboard", help="interactive setup wizard (ingest + track + analyze + curate + autostart)").set_defaults(func=cmd_onboard)
 
     sub.add_parser("update-plugin", help="git pull the marketplace clone so /plugin install picks up the latest").set_defaults(func=cmd_update_plugin)
     p_isl = sub.add_parser("install-statusline", help="wire the 💡 watchmen indicator into ~/.claude/settings.json")
