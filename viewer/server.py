@@ -9,9 +9,6 @@ import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
-from pygments import highlight
-from pygments.formatters import HtmlFormatter
-from pygments.lexers import DiffLexer
 
 ROOT = Path(__file__).parent.parent  # kai-hooks-mvp/
 ANALYSES = ROOT / "analyses"
@@ -285,20 +282,20 @@ def project_diff(request: Request, project_key: str, sha: str):
     subject = head[2] if len(head) > 2 else ""
     body = parts[1] if len(parts) > 1 else ""
 
-    # Diff (excludes the commit header — we render that ourselves)
+    # Raw diff — let diff2html (client-side) render it as side-by-side or unified.
     r = subprocess.run(
         ["git", "-C", str(pdir), "show", "--pretty=", "--no-color", sha_full],
         capture_output=True, text=True,
     )
-    diff_text = r.stdout or "(no diff — likely the initial commit)"
-    diff_html = highlight(diff_text, DiffLexer(), HtmlFormatter(cssclass="codehilite", nowrap=False))
+    diff_text = r.stdout or ""
 
-    # Neighbors for prev/next navigation
+    # Neighbors for prev navigation; absence indicates this is the initial commit.
     r_prev = subprocess.run(
         ["git", "-C", str(pdir), "rev-parse", f"{sha_full}^"],
         capture_output=True, text=True,
     )
     prev_sha = r_prev.stdout.strip() if r_prev.returncode == 0 else None
+    is_initial = prev_sha is None
 
     return TEMPLATES.TemplateResponse(request, "diff.html", {
         "project": get_project_meta(project_key) or {"project_key": project_key},
@@ -309,8 +306,9 @@ def project_diff(request: Request, project_key: str, sha: str):
             "subject": subject,
             "body": body,
         },
-        "diff_html": diff_html,
+        "diff_text": diff_text,
         "prev_sha": prev_sha,
+        "is_initial": is_initial,
     })
 
 

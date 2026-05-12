@@ -2,18 +2,18 @@
 {% block title %}{{ commit.short }} — {{ project.project_key }} — watchmen{% endblock %}
 {% block content %}
 
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html@3.4.48/bundles/css/diff2html.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/diff2html@3.4.48/bundles/js/diff2html-ui.min.js"></script>
+
 <style>
-  .diff-body { font-family: ui-monospace, "SF Mono", "Menlo", monospace; font-size: 12.5px; line-height: 1.45; }
-  .diff-body .codehilite { background: #fff; border-radius: 8px; padding: 0; overflow-x: auto; border: 1px solid #e5e7eb; }
-  .diff-body .codehilite pre { padding: 16px; margin: 0; }
-  .diff-body .gh { color: #6b7280; }                     /* generic header */
-  .diff-body .gd { background: #ffeef0; color: #b91c1c; }/* deletion */
-  .diff-body .gi { background: #e7f7ed; color: #15803d; }/* insertion */
-  .diff-body .gu { color: #6366f1; }                     /* hunk header */
-  .diff-body .gr { color: #b91c1c; font-weight: 600; }
+  .d2h-wrapper { font-size: 12.5px; }
+  .d2h-file-header { background: #f6f8fa; }
+  .d2h-info { background: #f1f8ff; }
+  /* Tighten up the file-list panel */
+  .d2h-file-list-wrapper { margin-bottom: 12px; }
 </style>
 
-<div class="mb-6">
+<div class="mb-4">
   <div class="text-xs text-gray-500 mb-1">
     <a href="/p/{{ project.project_key }}" class="hover:text-gray-700">{{ project.project_key }}</a>
     &nbsp;/&nbsp;
@@ -21,17 +21,31 @@
     &nbsp;/&nbsp;
     <span class="font-mono">{{ commit.short }}</span>
   </div>
-  <h1 class="text-xl font-semibold">{{ commit.subject }}</h1>
-  <div class="text-sm text-gray-600 mt-1 font-mono">{{ commit.ts }}</div>
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-xl font-semibold">{{ commit.subject }}</h1>
+      <div class="text-sm text-gray-600 mt-1 font-mono">{{ commit.ts }}</div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button id="view-side" class="px-3 py-1.5 text-sm rounded-md bg-indigo-600 text-white hover:bg-indigo-700">Side-by-side</button>
+      <button id="view-unified" class="px-3 py-1.5 text-sm rounded-md bg-white border border-gray-300 hover:bg-gray-50">Unified</button>
+    </div>
+  </div>
 </div>
+
+{% if is_initial %}
+<div class="mb-4 px-4 py-3 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
+  <strong>Baseline snapshot.</strong> This is the first commit for this project — git has no parent to compare against, so the renderer shows every file as added. The content was already on disk before this; we just took the initial snapshot here. The <em>next</em> curator run will produce a real diff against this baseline.
+</div>
+{% endif %}
 
 {% if commit.body %}
 <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4 text-sm whitespace-pre-wrap font-mono text-gray-700">{{ commit.body }}</div>
 {% endif %}
 
-<div class="diff-body">
-  {{ diff_html|safe }}
-</div>
+<div id="diff-target" class="bg-white border border-gray-200 rounded-lg overflow-hidden"></div>
+
+<pre id="raw-diff" style="display:none">{{ diff_text }}</pre>
 
 <div class="mt-6 flex items-center gap-4 text-sm">
   {% if prev_sha %}
@@ -39,5 +53,38 @@
   {% endif %}
   <a href="/p/{{ project.project_key }}/runs" class="text-gray-600 hover:underline">all runs</a>
 </div>
+
+<script>
+  (function() {
+    const raw = document.getElementById('raw-diff').textContent;
+    const target = document.getElementById('diff-target');
+    const btnSide = document.getElementById('view-side');
+    const btnUni = document.getElementById('view-unified');
+
+    function render(mode) {
+      target.innerHTML = '';
+      const ui = new Diff2HtmlUI(target, raw, {
+        outputFormat: mode,           // 'side-by-side' or 'line-by-line'
+        drawFileList: true,
+        matching: 'lines',
+        renderNothingWhenEmpty: false,
+        fileListToggle: true,
+        fileContentToggle: true,
+      });
+      ui.draw();
+      ui.highlightCode();
+      btnSide.className = (mode === 'side-by-side')
+        ? 'px-3 py-1.5 text-sm rounded-md bg-indigo-600 text-white hover:bg-indigo-700'
+        : 'px-3 py-1.5 text-sm rounded-md bg-white border border-gray-300 hover:bg-gray-50';
+      btnUni.className = (mode === 'line-by-line')
+        ? 'px-3 py-1.5 text-sm rounded-md bg-indigo-600 text-white hover:bg-indigo-700'
+        : 'px-3 py-1.5 text-sm rounded-md bg-white border border-gray-300 hover:bg-gray-50';
+    }
+
+    btnSide.addEventListener('click', () => render('side-by-side'));
+    btnUni.addEventListener('click', () => render('line-by-line'));
+    render('side-by-side');
+  })();
+</script>
 
 {% endblock %}
