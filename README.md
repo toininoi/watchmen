@@ -65,7 +65,7 @@ When the wizard finishes, install the plugin inside any Claude Code session:
 Then wire the in-TUI indicator (one-time, picks up the newest plugin version automatically):
 
 ```bash
-watchmen install-statusline
+watchmen statusline install
 ```
 
 That's the whole install. The rest of this README is for understanding what's happening + manual control.
@@ -86,12 +86,12 @@ echo "OPENROUTER_API_KEY=sk-or-v1-..." > .env
 ### After we push a plugin update
 
 ```bash
-watchmen update-plugin              # git pulls the marketplace clone
+watchmen plugin update               # git pulls the marketplace clone
 # then inside Claude Code:
 /plugin uninstall watchmen@watchmen
 /plugin install watchmen@watchmen
 /reload-plugins
-watchmen install-statusline         # refresh the version in the statusLine path
+watchmen statusline install          # refresh the version in the statusLine path
 ```
 
 ## Quickstart (manual)
@@ -100,7 +100,7 @@ If you'd rather drive the steps by hand instead of via the wizard:
 
 ```bash
 # 1. Wire watchmen into your Claude Code hook config (live event capture)
-watchmen install-hooks
+watchmen hooks install
 
 # 2. Start the hook server in a long-lived terminal (captures every session event)
 uv run python server.py
@@ -118,7 +118,7 @@ watchmen analyze my-project                  # longitudinal LLM analyst, day-by-
 watchmen curate my-project                   # skill bundles + CLAUDE.md
 
 # 6. Browse the output
-watchmen viewer                              # http://127.0.0.1:8888
+watchmen viewer run                          # http://127.0.0.1:8888
 ```
 
 Outputs land in `kai_claude/my-project/` and `analyses/my-project/`. Both are gitignored — they're your data, not the source.
@@ -139,9 +139,9 @@ The plugin reads `~/.watchmen/state/<project>.json` (written by the engine at en
 To run watchmen autonomously (incremental analyzer + auto-regen of CLAUDE.md when new prompts come in):
 
 ```bash
-watchmen install-daemon                      # launchd agent, autostart on login, keepalive
-watchmen install-viewer                      # also autostart the viewer at :8888
-watchmen launchd-status                      # verify
+watchmen daemon install                      # launchd agent, autostart on login, keepalive
+watchmen viewer install                      # also autostart the viewer at :8888
+watchmen launchd status                      # verify
 ```
 
 Default cadence:
@@ -166,9 +166,9 @@ Logs:
 To stop:
 
 ```bash
-watchmen uninstall-daemon
-watchmen uninstall-viewer
-watchmen uninstall-hooks
+watchmen daemon uninstall
+watchmen viewer uninstall
+watchmen hooks uninstall
 ```
 
 ## Command reference
@@ -178,8 +178,8 @@ watchmen uninstall-hooks
 watchmen status                  Dashboard view of tracked projects
 watchmen list                    Auto-detect projects from corpus
 watchmen runs                    Recent run history
-watchmen hooks-status            Show wired-up hook events
-watchmen launchd-status          Show daemon/viewer agent state
+watchmen hooks status            Show wired-up hook events
+watchmen launchd status          Show daemon/viewer agent state
 
 # Project lifecycle
 watchmen track <key> --repo <path>
@@ -193,13 +193,13 @@ watchmen curate <key>            Full curator: candidates → skills → CLAUDE.
 watchmen curate <key> --regen-claude    Stage 3 only (regenerate CLAUDE.md)
 
 # Continuous mode (foreground)
-watchmen daemon                  Run scheduling loop in foreground
-watchmen daemon --once           Single cycle, then exit (testing)
-watchmen viewer                  FastAPI viewer in foreground
+watchmen daemon run              Run scheduling loop in foreground
+watchmen daemon run --once       Single cycle, then exit (testing)
+watchmen viewer run              FastAPI viewer in foreground
 
 # Autostart (launchd)
-watchmen install-{hooks,daemon,viewer}
-watchmen uninstall-{hooks,daemon,viewer}
+watchmen {hooks,daemon,viewer} install
+watchmen {hooks,daemon,viewer} uninstall
 ```
 
 ## How it works
