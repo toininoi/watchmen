@@ -248,12 +248,28 @@ def project_metrics(request: Request, project_key: str):
         "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
         "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
     }
+    calendar = _metrics.activity_calendar(project_key, weeks=26)
+    hour_dow = _metrics.activity_by_hour_dow(project_key, days=90)
+    calendar_svg = _metrics.calendar_heatmap_svg(calendar, weeks=26)
+    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+
+    # Peak hour + day for the summary line under the heatmap
+    peaks = []
+    flat = [(dow, hr, hour_dow[dow][hr]) for dow in range(7) for hr in range(24)]
+    flat.sort(key=lambda t: t[2], reverse=True)
+    if flat and flat[0][2] > 0:
+        peak_dow, peak_hr, peak_n = flat[0]
+        peaks = [["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][peak_dow], f"{peak_hr:02d}:00", peak_n]
+
     return TEMPLATES.TemplateResponse(request, "metrics.html", {
         "project": get_project_meta(project_key) or {"project_key": project_key},
         "rows": rows,
         "last7": last7,
         "last30": last30,
         "sparks": sparks,
+        "calendar_svg": calendar_svg,
+        "hour_dow_svg": hour_dow_svg,
+        "peaks": peaks,
     })
 
 

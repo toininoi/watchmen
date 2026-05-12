@@ -80,6 +80,26 @@
   </div>
 </div>
 
+<h2 class="text-lg font-semibold mb-3">When you work</h2>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+  <div class="stat-card overflow-x-auto">
+    <div class="label">Last 26 weeks</div>
+    <div class="sub mb-2">Prompt activity per day</div>
+    {{ calendar_svg|safe }}
+  </div>
+  <div class="stat-card overflow-x-auto">
+    <div class="label">Day × hour (last 90 days)</div>
+    <div class="sub mb-2">
+      {% if peaks %}
+        Peak: <span class="font-semibold">{{ peaks[0] }} {{ peaks[1] }}</span> ({{ peaks[2] }} prompts)
+      {% else %}
+        not enough data yet
+      {% endif %}
+    </div>
+    {{ hour_dow_svg|safe }}
+  </div>
+</div>
+
 <h2 class="text-lg font-semibold mb-3">Daily breakdown</h2>
 <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
   <table class="daily min-w-full">

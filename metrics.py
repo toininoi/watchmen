@@ -282,6 +282,168 @@ def summarize_window(rows: list[dict], days: int) -> dict:
     }
 
 
+def activity_calendar(project_key: str, weeks: int = 26) -> list[tuple[str, int]]:
+    """Per-day prompt counts for the last `weeks` weeks (Sunday-aligned).
+    Returns [(date_iso, prompt_count)] in chronological order."""
+    project_dir = _project_dir_for_key(project_key)
+    if not project_dir or not CORPUS_DB.exists():
+        return []
+    days = weeks * 7
+    today = date.today()
+    # Sunday-align: roll back to the Sunday of this week, then go N-1 weeks back.
+    # weekday(): Mon=0..Sun=6 → days to subtract to reach Sunday
+    to_sunday = (today.weekday() + 1) % 7
+    end = today  # inclusive
+    start = today - timedelta(days=(weeks * 7 - 1 - to_sunday))
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT date(p.timestamp, 'localtime') AS d, COUNT(*) AS n
+               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+               WHERE s.project_dir = ? AND s.is_subagent = 0
+                 AND date(p.timestamp, 'localtime') >= ?
+                 AND date(p.timestamp, 'localtime') <= ?
+               GROUP BY date(p.timestamp, 'localtime')""",
+            (project_dir, start.isoformat(), end.isoformat()),
+        ).fetchall()
+    counts = {r["d"]: r["n"] for r in rows}
+    out = []
+    for i in range(weeks * 7):
+        d = start + timedelta(days=i)
+        if d > end:
+            break
+        out.append((d.isoformat(), counts.get(d.isoformat(), 0)))
+    return out
+
+
+def activity_by_hour_dow(project_key: str, days: int = 90) -> list[list[int]]:
+    """7×24 matrix of prompt counts. Row 0 = Sunday, col 0 = midnight (local).
+    Returns matrix[dow][hour] = count."""
+    project_dir = _project_dir_for_key(project_key)
+    if not project_dir or not CORPUS_DB.exists():
+        return [[0] * 24 for _ in range(7)]
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT CAST(strftime('%w', p.timestamp, 'localtime') AS INT) AS dow,
+                      CAST(strftime('%H', p.timestamp, 'localtime') AS INT) AS hr,
+                      COUNT(*) AS n
+               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+               WHERE s.project_dir = ? AND s.is_subagent = 0
+                 AND date(p.timestamp, 'localtime') >= ?
+               GROUP BY dow, hr""",
+            (project_dir, cutoff),
+        ).fetchall()
+    m = [[0] * 24 for _ in range(7)]
+    for r in rows:
+        if r["dow"] is None or r["hr"] is None:
+            continue
+        m[r["dow"]][r["hr"]] = r["n"]
+    return m
+
+
+def _heatmap_color(n: int, hi: int, palette: list[str]) -> str:
+    if n <= 0 or hi <= 0:
+        return palette[0]
+    # 4 active buckets above the empty bucket.
+    bucket = min(4, max(1, int((n / hi) * 4) + (1 if n > 0 else 0)))
+    return palette[bucket]
+
+
+def calendar_heatmap_svg(daily: list[tuple[str, int]], weeks: int = 26) -> str:
+    """GitHub-style contribution grid. 7 rows (Sun→Sat), N cols (weeks)."""
+    cell = 12
+    gap = 3
+    pad_left = 28
+    pad_top = 18
+    width = pad_left + weeks * (cell + gap)
+    height = pad_top + 7 * (cell + gap) + 12
+    palette = ["#f3f4f6", "#dbeafe", "#93c5fd", "#3b82f6", "#1e40af"]
+    counts = [c for _, c in daily]
+    hi = max(counts) if counts else 0
+
+    rects = []
+    if daily:
+        first_d = date.fromisoformat(daily[0][0])
+        for idx, (d_str, n) in enumerate(daily):
+            d = date.fromisoformat(d_str)
+            col = (d - first_d).days // 7
+            row = (d.weekday() + 1) % 7  # Sun=0
+            x = pad_left + col * (cell + gap)
+            y = pad_top + row * (cell + gap)
+            fill = _heatmap_color(n, hi, palette)
+            rects.append(
+                f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{fill}">'
+                f'<title>{d_str}: {n} prompt{"s" if n != 1 else ""}</title></rect>'
+            )
+
+    # Day labels (Sun, Mon...)
+    day_labels = ""
+    for i, name in enumerate(["Sun", "", "Tue", "", "Thu", "", "Sat"]):
+        if name:
+            y = pad_top + i * (cell + gap) + cell - 2
+            day_labels += f'<text x="0" y="{y}" font-size="10" fill="#6b7280">{name}</text>'
+
+    legend = ""
+    lg_x = width - 5 * (cell + gap) - 60
+    legend += f'<text x="{lg_x}" y="{height - 4}" font-size="10" fill="#6b7280">less</text>'
+    for i, c in enumerate(palette):
+        x = lg_x + 28 + i * (cell + 2)
+        legend += f'<rect x="{x}" y="{height - 14}" width="{cell}" height="{cell}" rx="2" fill="{c}"/>'
+    legend += f'<text x="{lg_x + 28 + 5 * (cell + 2) + 4}" y="{height - 4}" font-size="10" fill="#6b7280">more</text>'
+
+    return (
+        f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">'
+        f'{day_labels}{"".join(rects)}{legend}</svg>'
+    )
+
+
+def hour_dow_heatmap_svg(matrix: list[list[int]]) -> str:
+    """7-row × 24-col heatmap. Row 0 = Sunday."""
+    cell_w = 22
+    cell_h = 22
+    gap = 3
+    pad_left = 36
+    pad_top = 22
+    width = pad_left + 24 * (cell_w + gap)
+    height = pad_top + 7 * (cell_h + gap) + 10
+    palette = ["#f3f4f6", "#fce7f3", "#f9a8d4", "#ec4899", "#9d174d"]
+    hi = max((max(row) for row in matrix), default=0)
+
+    cells = ""
+    for dow in range(7):
+        for hr in range(24):
+            n = matrix[dow][hr]
+            fill = _heatmap_color(n, hi, palette)
+            x = pad_left + hr * (cell_w + gap)
+            y = pad_top + dow * (cell_h + gap)
+            day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow]
+            cells += (
+                f'<rect x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" rx="3" fill="{fill}">'
+                f'<title>{day_name} {hr:02d}:00 — {n} prompt{"s" if n != 1 else ""}</title></rect>'
+            )
+
+    # Hour labels along the top (every 3 hours)
+    hour_labels = ""
+    for hr in range(0, 24, 3):
+        x = pad_left + hr * (cell_w + gap) + cell_w / 2
+        hour_labels += f'<text x="{x}" y="14" font-size="10" fill="#6b7280" text-anchor="middle">{hr:02d}</text>'
+
+    # Day labels down the left
+    day_labels = ""
+    for i, name in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
+        y = pad_top + i * (cell_h + gap) + cell_h - 6
+        day_labels += f'<text x="0" y="{y}" font-size="11" fill="#6b7280">{name}</text>'
+
+    return (
+        f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">'
+        f'{hour_labels}{day_labels}{cells}</svg>'
+    )
+
+
 def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, color: str = "#4f46e5") -> str:
     """Tiny inline-SVG line/area sparkline. Zero-deps, renders in any browser."""
     vals = list(values)
