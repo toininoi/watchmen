@@ -719,6 +719,215 @@ def test_substantive_filter_handles_alias_choices():
     assert "tool_use_count" in bare and ".tool_use_count" not in bare
 
 
+# ─── Incremental corpus scan tests ──────────────────────────────────────────
+
+
+def _isolate_adapters(td_path: Path):
+    """Helper for corpus-scan tests: point every adapter at a non-existent or
+    fixture path so the real ~/.codex, ~/.pi installs don't leak into the test.
+    Returns a restore() callable to put things back."""
+    from adapters import claude_code, codex, pi
+    import corpus
+    orig = {
+        "claude_dir": claude_code.PROJECTS_DIR,
+        "codex_dir": codex.SESSIONS_DIR,
+        "pi_dir": pi.SESSIONS_DIR,
+        "db": corpus.DB_PATH,
+    }
+    claude_code.PROJECTS_DIR = td_path / "claude_projects"
+    claude_code._DECODE_CACHE.clear()
+    codex.SESSIONS_DIR = td_path / "_no_codex"
+    pi.SESSIONS_DIR = td_path / "_no_pi"
+    corpus.DB_PATH = td_path / "corpus.db"
+    def restore():
+        claude_code.PROJECTS_DIR = orig["claude_dir"]
+        codex.SESSIONS_DIR = orig["codex_dir"]
+        pi.SESSIONS_DIR = orig["pi_dir"]
+        corpus.DB_PATH = orig["db"]
+        claude_code._DECODE_CACHE.clear()
+    return restore
+
+
+def test_corpus_scan_is_incremental_and_idempotent():
+    """The whole point of the incremental scan: second consecutive scan must
+    skip every file (mtime unchanged) and complete in O(stat calls), not
+    O(parse every JSONL). If this regresses, the daemon goes back to ~15s of
+    rebuild work every 2h for no reason."""
+    import os
+    import tempfile
+    import time as _time
+
+    from adapters import claude_code
+    import corpus
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        # Build a fake ~/.claude/projects with one project + one transcript.
+        proj = td_path / "claude_projects" / "-tmp-fixture"
+        proj.mkdir(parents=True)
+        (proj / "abc.jsonl").write_text(
+            '{"timestamp":"2026-05-01T10:00:00Z","type":"user","message":{"content":"hi"}}\n'
+            '{"timestamp":"2026-05-01T10:00:01Z","type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":10,"output_tokens":3}}}\n'
+        )
+
+        restore = _isolate_adapters(td_path)
+        try:
+            # First scan: cold — must parse the file.
+            corpus.scan_all()
+            import sqlite3
+            with sqlite3.connect(str(corpus.DB_PATH)) as c:
+                row = c.execute("SELECT file_mtime, message_count FROM sessions WHERE session_id = 'abc'").fetchone()
+            assert row is not None, "first scan didn't write the session"
+            mtime_after_first, msgs_first = row
+            assert mtime_after_first is not None and mtime_after_first > 0
+            assert msgs_first == 2
+
+            # Second scan: warm — must SKIP, not re-parse. We verify the skip by
+            # patching adapter.scan() to raise; if it gets called, the test fails.
+            invoked = {"count": 0}
+            orig_scan = claude_code.scan
+            def trip_wire(entry):
+                invoked["count"] += 1
+                return orig_scan(entry)
+            claude_code.scan = trip_wire
+            try:
+                corpus.scan_all()
+            finally:
+                claude_code.scan = orig_scan
+            assert invoked["count"] == 0, f"second scan re-parsed {invoked['count']} files instead of skipping"
+
+            # Now mutate the file (append a line) and re-scan — must re-parse.
+            _time.sleep(0.05)  # ensure mtime tick on filesystems with 1s granularity
+            with open(proj / "abc.jsonl", "a") as f:
+                f.write('{"timestamp":"2026-05-01T10:00:02Z","type":"user","message":{"content":"again"}}\n')
+            os.utime(proj / "abc.jsonl", None)  # force mtime update on edge cases
+            corpus.scan_all()
+            with sqlite3.connect(str(corpus.DB_PATH)) as c:
+                row = c.execute("SELECT file_mtime, message_count FROM sessions WHERE session_id = 'abc'").fetchone()
+            mtime_after_third, msgs_third = row
+            assert mtime_after_third > mtime_after_first, "mtime didn't advance after file append"
+            assert msgs_third == 3, f"expected 3 messages after append, got {msgs_third}"
+        finally:
+            restore()
+
+
+def test_corpus_full_flag_forces_rebuild():
+    """`scan --full` must DROP and recreate tables even if mtimes haven't
+    changed. Needed when adapter logic changes (e.g. new field, bugfix in
+    parser) and we want every row re-derived from current parsers."""
+    import tempfile
+
+    from adapters import claude_code
+    import corpus
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        proj = td_path / "claude_projects" / "-tmp-fixture"
+        proj.mkdir(parents=True)
+        (proj / "xyz.jsonl").write_text(
+            '{"timestamp":"2026-05-01T10:00:00Z","type":"user","message":{"content":"hello"}}\n'
+        )
+
+        restore = _isolate_adapters(td_path)
+        try:
+            corpus.scan_all()
+            # full=True must re-parse despite mtime match.
+            invoked = {"count": 0}
+            orig_scan = claude_code.scan
+            def trip_wire(entry):
+                invoked["count"] += 1
+                return orig_scan(entry)
+            claude_code.scan = trip_wire
+            try:
+                corpus.scan_all(full=True)
+            finally:
+                claude_code.scan = orig_scan
+            assert invoked["count"] == 1, f"--full should reparse, got {invoked['count']} calls"
+        finally:
+            restore()
+
+
+def test_corpus_migrates_legacy_db_without_file_mtime():
+    """Existing teammates have corpus.db files from before this PR — same
+    schema as current sessions/prompts/tool_calls minus the file_mtime column.
+    First scan after upgrade must add the column without erroring, then treat
+    every row as cache-miss (mtime is NULL → re-parse). If the migration logic
+    drops, teammates upgrading hit `no such column: file_mtime` on first scan."""
+    import sqlite3
+    import tempfile
+
+    import corpus
+
+    # The real legacy schema (everything except file_mtime). Pre-this-PR DBs
+    # look like this.
+    legacy_sessions_schema = """
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            project_dir TEXT,
+            transcript_path TEXT,
+            started_at TEXT,
+            ended_at TEXT,
+            duration_seconds REAL,
+            is_subagent INTEGER NOT NULL DEFAULT 0,
+            parent_session_id TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            user_prompt_count INTEGER NOT NULL DEFAULT 0,
+            assistant_text_count INTEGER NOT NULL DEFAULT 0,
+            assistant_thinking_count INTEGER NOT NULL DEFAULT 0,
+            tool_use_count INTEGER NOT NULL DEFAULT 0,
+            tool_error_count INTEGER NOT NULL DEFAULT 0,
+            models TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            model_dominant TEXT,
+            cost_usd REAL NOT NULL DEFAULT 0,
+            agent TEXT NOT NULL DEFAULT 'claude_code'
+        );
+    """
+
+    legacy_prompts_schema = """
+        CREATE TABLE prompts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            timestamp TEXT,
+            text TEXT,
+            word_count INTEGER,
+            char_count INTEGER,
+            is_first_in_session INTEGER NOT NULL DEFAULT 0
+        );
+    """
+    legacy_tools_schema = """
+        CREATE TABLE tool_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            timestamp TEXT,
+            tool_name TEXT,
+            is_error INTEGER NOT NULL DEFAULT 0
+        );
+    """
+
+    with tempfile.TemporaryDirectory() as td:
+        legacy_db = Path(td) / "corpus.db"
+        with sqlite3.connect(str(legacy_db)) as c:
+            c.executescript(legacy_sessions_schema + legacy_prompts_schema + legacy_tools_schema)
+            c.execute("INSERT INTO sessions (session_id, transcript_path) VALUES ('old-row', '/path/that/no/longer/exists.jsonl')")
+
+        orig_db = corpus.DB_PATH
+        corpus.DB_PATH = legacy_db
+        try:
+            conn = corpus.init_db()  # must not raise
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            assert "file_mtime" in cols, "init_db must add file_mtime to legacy schemas"
+            # Legacy row's file_mtime is NULL — must read back cleanly.
+            row = conn.execute("SELECT file_mtime FROM sessions WHERE session_id = 'old-row'").fetchone()
+            assert row[0] is None
+            conn.close()
+        finally:
+            corpus.DB_PATH = orig_db
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -793,6 +1002,11 @@ def main() -> int:
     print("Session filtering:")
     check("substantive filter drops trivial sessions",  test_substantive_filter_drops_trivial_sessions)
     check("substantive filter accepts alias choices",   test_substantive_filter_handles_alias_choices)
+    print()
+    print("Incremental corpus scan:")
+    check("scan is incremental + idempotent",           test_corpus_scan_is_incremental_and_idempotent)
+    check("--full forces a rebuild",                    test_corpus_full_flag_forces_rebuild)
+    check("legacy DB migrates without errors",          test_corpus_migrates_legacy_db_without_file_mtime)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
