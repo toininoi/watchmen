@@ -347,6 +347,11 @@ def run() -> int:
     console = Console()
     TOTAL = 6
 
+    # First-install safety: state.db won't have its schema yet on a totally
+    # fresh clone. init_db is idempotent (CREATE TABLE IF NOT EXISTS).
+    import state
+    state.init_db()
+
     show_welcome(console, TOTAL)
 
     _step(console, 1, TOTAL, "Prerequisites check")
