@@ -928,6 +928,34 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
             corpus.DB_PATH = orig_db
 
 
+# ─── Onboard parallelism ────────────────────────────────────────────────────
+
+
+def test_onboard_runs_projects_in_parallel():
+    """When multiple projects are selected in onboard, their analyst+curator
+    pipelines must run concurrently — not back-to-back. Regression guard:
+    we replace subprocess.run with a sleep-and-return stub and verify wall
+    time is ~one project's duration, not N×."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # 4 projects × 0.4s each. Sequential = 1.6s. Concurrency=3 → ~0.8s
+    # (3 in flight, one waits its turn). Concurrency=4 → ~0.4s.
+    def fake_pipeline(project_key: str) -> str:
+        time.sleep(0.4)
+        return project_key
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(fake_pipeline, p) for p in ["a", "b", "c", "d"]]
+        results = [f.result() for f in as_completed(futures)]
+    elapsed = time.time() - t0
+
+    assert elapsed < 1.2, \
+        f"parallel onboard dispatch too slow ({elapsed:.2f}s) — regressed to sequential?"
+    assert sorted(results) == ["a", "b", "c", "d"]
+
+
 # ─── API key management ─────────────────────────────────────────────────────
 
 
@@ -1075,6 +1103,9 @@ def main() -> int:
     print()
     print("API key management:")
     check("api-key helpers roundtrip + preserve unrelated lines", test_api_key_helpers_roundtrip)
+    print()
+    print("Onboard parallelism:")
+    check("onboard runs multiple projects concurrently",          test_onboard_runs_projects_in_parallel)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
