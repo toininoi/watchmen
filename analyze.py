@@ -30,14 +30,10 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 
 
 def load_api_key() -> str:
-    if k := os.environ.get("OPENROUTER_API_KEY"):
-        return k
-    env_path = Path.home() / "Development" / "prod" / "kai-agent-new" / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise RuntimeError("OPENROUTER_API_KEY not set and not found in kai-agent-new/.env")
+    # Use the same lookup as agent.py: env → repo-local .env → ~/.config/watchmen/.env.
+    # Kept as a thin wrapper so analyze.py stays self-runnable from CLI.
+    from agent import load_api_key as _load
+    return _load()
 
 
 # ─── Tools ──────────────────────────────────────────────────────────────────

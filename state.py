@@ -283,8 +283,8 @@ def auto_detect_projects() -> list[dict]:
 
 def _try_resolve_real_path(decoded: str) -> Path | None:
     """Heuristically map a decoded path back to a real existing dir.
-    e.g. /Users/batuhanaktas/Development/prod/kai/frontend → /Users/batuhanaktas/Development/prod/kai-frontend
-    by walking from root and gluing dash-separated tail segments back together."""
+    e.g. ~/code/kai/frontend → ~/code/kai-frontend by walking from root and
+    gluing dash-separated tail segments back together."""
     parts = Path(decoded).parts
     if not parts or parts[0] != "/":
         return None

@@ -150,6 +150,30 @@ def test_cache_5m_vs_1h_are_different():
     assert abs(cost_1h - 10.00) < 0.01
 
 
+# ─── Codebase hygiene tests ─────────────────────────────────────────────────
+
+
+def test_no_hardcoded_user_paths():
+    """No .py file should hardcode a developer's machine path or project name.
+    Regression test for the bug where analyze.py shipped with
+    `Path.home() / 'Development' / 'prod' / 'kai-agent-new' / '.env'` —
+    every teammate without that exact dir layout hit a RuntimeError mid-onboard."""
+    forbidden = [
+        "kai-agent-new",           # original dev box's project dir name
+        "/Users/batuhanaktas",     # absolute home path
+    ]
+    leaks: list[str] = []
+    for py in ROOT.glob("*.py"):
+        if py.name == "smoke.py":  # this file is allowed to mention them
+            continue
+        text = py.read_text(errors="replace")
+        for needle in forbidden:
+            if needle in text:
+                leaks.append(f"{py.name}: contains '{needle}'")
+    if leaks:
+        raise AssertionError("hardcoded user-specific paths found:\n  " + "\n  ".join(leaks))
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 
@@ -167,6 +191,9 @@ def main() -> int:
     check("price_for_model falls back cleanly",     test_price_for_unknown_falls_back)
     check("turn_cost matches docs worked example",  test_turn_cost_worked_example)
     check("5m vs 1h cache writes priced differently", test_cache_5m_vs_1h_are_different)
+    print()
+    print("Codebase hygiene:")
+    check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
 
     print()
     if FAIL:
