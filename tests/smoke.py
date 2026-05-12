@@ -504,6 +504,130 @@ def test_cli_bare_noun_prints_help_and_exits_1():
         "help must list the available verbs"
 
 
+# ─── Curator cache tests ────────────────────────────────────────────────────
+
+
+def test_cache_hit_when_results_unchanged():
+    """The whole reason caching exists: when every recorded read returns the
+    same hash on replay, we skip the agent. If this regresses, every curator
+    run goes back to re-curating every skill from scratch."""
+    import tempfile
+    from cache import ReadRecorder, cache_hit, wrap_handlers, write_cache
+
+    state = {"counter": 0}
+
+    def fake_read_repo_file(file_path: str) -> str:
+        return f"contents of {file_path}"
+
+    def fake_query_corpus(sql: str) -> str:
+        # Result depends on state['counter'] — we'll mutate it between calls.
+        return f"counter={state['counter']}; sql={sql}"
+
+    handlers = {"read_repo_file": fake_read_repo_file, "query_corpus": fake_query_corpus}
+    recorder = ReadRecorder()
+    wrapped = wrap_handlers(handlers, recorder)
+
+    # Simulate an agent making two reads.
+    wrapped["read_repo_file"](file_path="lib/foo.py")
+    wrapped["query_corpus"](sql="SELECT 1")
+
+    with tempfile.TemporaryDirectory() as td:
+        cache_file = Path(td) / "inputs.json"
+        write_cache(cache_file, recorder)
+        # State unchanged → cache hit.
+        assert cache_hit(cache_file, handlers) is True
+        # State changes → fake_query_corpus returns a different result → cache miss.
+        state["counter"] = 1
+        assert cache_hit(cache_file, handlers) is False
+
+
+def test_cache_miss_on_vanished_session_or_file():
+    """If a tool raises during replay (file deleted, session vanished, schema
+    drift in corpus.db), cache_hit must return False — NOT crash. Otherwise a
+    deleted repo file would tank the entire curator run."""
+    import tempfile
+    from cache import ReadRecorder, cache_hit, wrap_handlers, write_cache
+
+    def fake_read_repo_file(file_path: str) -> str:
+        return "ok"
+
+    handlers = {"read_repo_file": fake_read_repo_file}
+    recorder = ReadRecorder()
+    wrap_handlers(handlers, recorder)["read_repo_file"](file_path="lib/x.py")
+
+    with tempfile.TemporaryDirectory() as td:
+        cache_file = Path(td) / "inputs.json"
+        write_cache(cache_file, recorder)
+        # Swap the handler for one that raises — simulates the underlying file vanishing.
+        broken = {"read_repo_file": lambda **k: (_ for _ in ()).throw(FileNotFoundError("gone"))}
+        assert cache_hit(cache_file, broken) is False
+
+
+def test_cache_miss_on_missing_cache_file():
+    """Bootstrap path: first run, no cache file. Must return False so the
+    agent runs normally and writes the initial cache."""
+    import tempfile
+    from cache import cache_hit
+    with tempfile.TemporaryDirectory() as td:
+        assert cache_hit(Path(td) / "nonexistent.json", {}) is False
+
+
+def test_invalidate_all_clears_every_cache_file():
+    """--regen-all must wipe stage 1 + stage 2 (per skill) + stage 3 caches.
+    If any tier survives, --regen-all is a lie."""
+    import tempfile
+    from cache import invalidate_all
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "myproject"
+        (proj / "skills" / "skill-a").mkdir(parents=True)
+        (proj / "skills" / "skill-b").mkdir(parents=True)
+        (proj / ".candidates.inputs.json").write_text("[]")
+        (proj / ".claude_md.inputs.json").write_text("[]")
+        (proj / "skills" / "skill-a" / ".inputs.json").write_text("[]")
+        (proj / "skills" / "skill-b" / ".inputs.json").write_text("[]")
+        # A non-cache file should NOT be touched.
+        (proj / "skills" / "skill-a" / "SKILL.md").write_text("hi")
+
+        removed = invalidate_all(proj)
+        assert removed == 4
+        assert not (proj / ".candidates.inputs.json").exists()
+        assert not (proj / "skills" / "skill-b" / ".inputs.json").exists()
+        # Non-cache survives.
+        assert (proj / "skills" / "skill-a" / "SKILL.md").exists()
+
+
+def test_only_input_tools_are_recorded():
+    """Effect-side tools (write_kai_claude_file, append_curation_log) must NOT
+    be wrapped — otherwise their results pollute the cache key, and any minor
+    write-tool semantic change would force every cache to miss."""
+    from cache import INPUT_TOOLS, ReadRecorder, wrap_handlers
+    recorded: list[str] = []
+
+    def make_handler(name):
+        def fn(**k):
+            recorded.append(name)
+            return "result"
+        return fn
+
+    handlers = {
+        "read_repo_file": make_handler("read_repo_file"),
+        "write_kai_claude_file": make_handler("write_kai_claude_file"),
+        "append_curation_log": make_handler("append_curation_log"),
+    }
+    recorder = ReadRecorder()
+    wrapped = wrap_handlers(handlers, recorder)
+
+    # All three callable; only read_repo_file should land in the recorder.
+    wrapped["read_repo_file"](file_path="x")
+    wrapped["write_kai_claude_file"](file_path="y", content="z")
+    wrapped["append_curation_log"](entry="w")
+
+    assert len(recorder) == 1
+    assert recorder.export()[0]["tool"] == "read_repo_file"
+    assert "write_kai_claude_file" not in INPUT_TOOLS
+    assert "append_curation_log" not in INPUT_TOOLS
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -566,6 +690,13 @@ def main() -> int:
     print("CLI noun-verb refactor:")
     check("hooks status new+old forms dispatch",      test_cli_noun_verb_and_deprecated_both_dispatch)
     check("bare noun (`daemon`) prints help, exits 1", test_cli_bare_noun_prints_help_and_exits_1)
+    print()
+    print("Curator cache:")
+    check("cache hit when results unchanged",         test_cache_hit_when_results_unchanged)
+    check("cache miss on vanished session/file",      test_cache_miss_on_vanished_session_or_file)
+    check("cache miss on missing cache file",         test_cache_miss_on_missing_cache_file)
+    check("invalidate_all clears every cache file",   test_invalidate_all_clears_every_cache_file)
+    check("only input tools are recorded",            test_only_input_tools_are_recorded)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
