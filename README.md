@@ -41,40 +41,62 @@ _running.md              # latest aggregated thesis
 
 Models: defaults to `deepseek/deepseek-v4-flash` (fast, cheap, capable of multi-turn tool calling). Configurable per command.
 
-## Install
+## Install — for the team
+
+Three commands and a wizard. Total wall time ~10 min + 30–90 min per project of LLM passes.
 
 ```bash
 git clone https://github.com/firstbatchxyz/watchmen.git
 cd watchmen
-uv sync                      # install Python deps
-uv tool install --editable . # makes the `watchmen` CLI available system-wide
-```
-
-Set your API key (one of):
-
-```bash
-# Option A — env var (recommended for development)
-export OPENROUTER_API_KEY=sk-or-v1-...
-
-# Option B — .env in the project root
-echo "OPENROUTER_API_KEY=sk-or-v1-..." > .env
-
-# Option C — global config
-mkdir -p ~/.config/watchmen
-echo "OPENROUTER_API_KEY=sk-or-v1-..." > ~/.config/watchmen/.env
-```
-
-## Quickstart
-
-The fastest path is the interactive wizard:
-
-```bash
+uv sync && uv tool install --editable .
 watchmen onboard
 ```
 
-It walks through ingest → project selection → analyze → curate → autostart → plugin install in one guided pass, with a Rich TUI that confirms before any LLM-paid step. Idempotent — re-run it anytime to add a new project.
+The wizard handles everything: prompts for your `OPENROUTER_API_KEY` (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the launchd daemon + viewer for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
 
-If you'd rather drive the steps manually:
+When the wizard finishes, install the plugin inside any Claude Code session:
+
+```
+/plugin marketplace add firstbatchxyz/watchmen
+/plugin install watchmen@watchmen
+/reload-plugins
+```
+
+Then wire the in-TUI indicator (one-time, picks up the newest plugin version automatically):
+
+```bash
+watchmen install-statusline
+```
+
+That's the whole install. The rest of this README is for understanding what's happening + manual control.
+
+### API key — manual options (the wizard handles this for you)
+
+```bash
+# Option A — env var
+export OPENROUTER_API_KEY=sk-or-v1-...
+
+# Option B — global config (what the wizard writes)
+mkdir -p ~/.config/watchmen && echo "OPENROUTER_API_KEY=sk-or-v1-..." > ~/.config/watchmen/.env
+
+# Option C — repo-local .env
+echo "OPENROUTER_API_KEY=sk-or-v1-..." > .env
+```
+
+### After we push a plugin update
+
+```bash
+watchmen update-plugin              # git pulls the marketplace clone
+# then inside Claude Code:
+/plugin uninstall watchmen@watchmen
+/plugin install watchmen@watchmen
+/reload-plugins
+watchmen install-statusline         # refresh the version in the statusLine path
+```
+
+## Quickstart (manual)
+
+If you'd rather drive the steps by hand instead of via the wizard:
 
 ```bash
 # 1. Wire watchmen into your Claude Code hook config (live event capture)
@@ -101,31 +123,16 @@ watchmen viewer                              # http://127.0.0.1:8888
 
 Outputs land in `kai_claude/my-project/` and `analyses/my-project/`. Both are gitignored — they're your data, not the source.
 
-## Install the Claude Code plugin (optional, surfaces suggestions in-session)
+## The Claude Code plugin
 
-After the engine is running, install the plugin so suggestions show up in your Claude Code sessions without leaving the TUI:
+Once installed (`/plugin install watchmen@watchmen` after `/plugin marketplace add firstbatchxyz/watchmen`), the plugin gives you:
 
-```
-/plugin marketplace add firstbatchxyz/watchmen
-/plugin install watchmen@watchmen
-```
+- **`/watchmen:brief`** — pull the latest curator state for your current workspace. Claude reads what changed since the last run (new skills, CLAUDE.md updates), summarizes it, and asks if you want to load a suggested skill. Your decision; nothing auto-loads.
+- **`💡 watchmen` statusLine indicator** — appears bottom-right of the Claude Code TUI when there's something new for the project you're in. Acknowledges itself when you invoke `/watchmen:brief`.
+- **In-flight skill suggestions** — every prompt you submit gets matched against your project's skill index (FTS5, sub-millisecond). If a strong match exists, the statusLine refreshes after the assistant's response with "💡 you could have used /<skill> to save time & tokens on this task". Retrospective hint; no agent context injection.
+- **Diff view in the viewer** — every curator run becomes a git commit in `kai_claude/<project>/`. The viewer (`http://127.0.0.1:8888/p/<project>/runs`) shows a side-by-side diff per run, GitHub-style.
 
-This gives you a `/watchmen:brief` skill — when invoked, Claude reads the latest curator state for your current workspace and tells you what changed (new skills, CLAUDE.md updates, suggested next actions).
-
-For the in-TUI indicator (bottom-right "💡 watchmen · 3 updates · /watchmen:brief"), add this to `~/.claude/settings.json` (one-time manual step — Claude Code doesn't allow plugins to ship statusLine config):
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "$HOME/.claude/plugins/cache/watchmen/watchmen/PLUGIN_VERSION/bin/statusline.sh"
-  }
-}
-```
-
-Find the exact `PLUGIN_VERSION` value with `ls $HOME/.claude/plugins/cache/watchmen/watchmen/` after install (it tracks the version field in `plugin.json`, e.g. `0.1.1/`). The indicator stays silent unless the engine has produced changes you haven't acknowledged via `/watchmen:brief`.
-
-The engine writes plugin state to `~/.watchmen/state/<project>.json` and `~/.watchmen/projects.json` at the end of each curator run, so the plugin works without knowing where the engine is installed.
+The plugin reads `~/.watchmen/state/<project>.json` (written by the engine at end of every curator run) and `~/.watchmen/projects.json` (index of tracked projects). It never reaches into the engine's install dir.
 
 ## Run it continuously
 
