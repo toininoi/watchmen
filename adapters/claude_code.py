@@ -18,10 +18,15 @@ from pathlib import Path
 from typing import Iterable
 
 from metrics import turn_cost_usd
+from paths import decode_project_dir
 
 NAME = "claude_code"
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+# Cache: encoded dir name → decoded real cwd. Filesystem walk is cheap but we
+# do it once per encoded dir, not once per transcript.
+_DECODE_CACHE: dict[str, str] = {}
 
 
 def _parse_iso(ts: str | None):
@@ -33,16 +38,23 @@ def _parse_iso(ts: str | None):
         return None
 
 
+def _resolve(encoded: str) -> str:
+    if encoded not in _DECODE_CACHE:
+        _DECODE_CACHE[encoded] = decode_project_dir(encoded)
+    return _DECODE_CACHE[encoded]
+
+
 def discover() -> Iterable[dict]:
     if not PROJECTS_DIR.exists():
         return
     for project_dir in PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
             continue
+        decoded = _resolve(project_dir.name)
         for jsonl in project_dir.glob("*.jsonl"):
             yield {
                 "path": jsonl,
-                "project_dir": project_dir.name,
+                "project_dir": decoded,
                 "is_subagent": False,
                 "parent_session_id": None,
             }
@@ -55,7 +67,7 @@ def discover() -> Iterable[dict]:
             for sub_jsonl in sub_path.glob("*.jsonl"):
                 yield {
                     "path": sub_jsonl,
-                    "project_dir": project_dir.name,
+                    "project_dir": decoded,
                     "is_subagent": True,
                     "parent_session_id": sub_dir.name,
                 }
