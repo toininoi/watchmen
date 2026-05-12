@@ -40,11 +40,27 @@ MODEL_PRICES: dict[str, tuple[float, float, float, float, float]] = {
     # Haiku family — 4.5 jumped from older 3.5 pricing.
     "haiku-4.5": (1.00,  1.25,  2.00,  0.10, 5.00),
     "haiku-3.5": (0.80,  1.00,  1.60,  0.08, 4.00),
+    # ── OpenAI (Codex CLI). Source: https://openai.com/api/pricing
+    # OpenAI doesn't bill cache writes separately, so 5m/1h slots = input rate
+    # (won't be charged — codex adapter sets cc_5m/cc_1h to 0). Cache-read column
+    # used for cached_input_tokens, which OpenAI prices at ~10% of input.
+    # Last verified: 2026-05-12.
+    "gpt-5.5":     (1.25, 1.25, 1.25, 0.125, 10.00),
+    "gpt-5.4":     (1.25, 1.25, 1.25, 0.125, 10.00),
+    "gpt-5-mini":  (0.25, 0.25, 0.25, 0.025, 2.00),
+    "gpt-5":       (1.25, 1.25, 1.25, 0.125, 10.00),
+    "gpt-4.1":     (2.00, 2.00, 2.00, 0.500, 8.00),
+    "gpt-4o":      (2.50, 2.50, 2.50, 1.250, 10.00),
+    "o3":          (2.00, 2.00, 2.00, 0.500, 8.00),
+    "o4-mini":     (1.10, 1.10, 1.10, 0.275, 4.40),
 }
 DEFAULT_PRICE = MODEL_PRICES["sonnet-4.6"]
 
 
 _VERSION_DASH = re.compile(r"(opus|sonnet|haiku)-(\d+)-(\d+)\b")
+# GPT model names use dots too (gpt-5.5, gpt-4.1) but API also returns dash forms
+# in some cases (gpt-5-5-mini). Same normalizer pattern:
+_GPT_DASH = re.compile(r"gpt-(\d+)-(\d+)\b")
 
 
 def price_for_model(model: str | None) -> tuple[float, float, float, float, float]:
@@ -57,6 +73,7 @@ def price_for_model(model: str | None) -> tuple[float, float, float, float, floa
         return DEFAULT_PRICE
     m = model.lower()
     m = _VERSION_DASH.sub(lambda x: f"{x.group(1)}-{x.group(2)}.{x.group(3)}", m)
+    m = _GPT_DASH.sub(lambda x: f"gpt-{x.group(1)}.{x.group(2)}", m)
     for key in sorted(MODEL_PRICES.keys(), key=len, reverse=True):
         if key in m:
             return MODEL_PRICES[key]
@@ -66,6 +83,10 @@ def price_for_model(model: str | None) -> tuple[float, float, float, float, floa
         return MODEL_PRICES["sonnet-4.6"]
     if "haiku" in m:
         return MODEL_PRICES["haiku-4.5"]
+    if "gpt-5" in m or m.startswith("o4"):
+        return MODEL_PRICES["gpt-5"]
+    if "gpt-4" in m or m.startswith("o3"):
+        return MODEL_PRICES["gpt-4.1"]
     return DEFAULT_PRICE
 
 

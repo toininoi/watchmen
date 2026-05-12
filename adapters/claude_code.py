@@ -1,0 +1,211 @@
+"""Claude Code session adapter.
+
+Reads ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl plus subagent
+transcripts under <encoded-cwd>/<parent-session>/subagents/.
+
+Schema notes from Claude Code transcripts:
+  Each line: {timestamp, type: "user"|"assistant", message: {content, model?, usage?}}
+  - user.content can be a string OR a list with text/tool_result blocks
+  - assistant.content is a list with text/thinking/tool_use blocks
+  - usage carries cache_creation.ephemeral_5m_input_tokens / _1h variants
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable
+
+from metrics import turn_cost_usd
+
+NAME = "claude_code"
+
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def _parse_iso(ts: str | None):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def discover() -> Iterable[dict]:
+    if not PROJECTS_DIR.exists():
+        return
+    for project_dir in PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for jsonl in project_dir.glob("*.jsonl"):
+            yield {
+                "path": jsonl,
+                "project_dir": project_dir.name,
+                "is_subagent": False,
+                "parent_session_id": None,
+            }
+        for sub_dir in project_dir.iterdir():
+            if not sub_dir.is_dir():
+                continue
+            sub_path = sub_dir / "subagents"
+            if not sub_path.exists():
+                continue
+            for sub_jsonl in sub_path.glob("*.jsonl"):
+                yield {
+                    "path": sub_jsonl,
+                    "project_dir": project_dir.name,
+                    "is_subagent": True,
+                    "parent_session_id": sub_dir.name,
+                }
+
+
+def scan(entry: dict):
+    path: Path = entry["path"]
+    project_dir = entry["project_dir"]
+    is_subagent = entry["is_subagent"]
+    parent_sid = entry["parent_session_id"]
+
+    session = {
+        "session_id": path.stem,
+        "project_dir": project_dir,
+        "transcript_path": str(path),
+        "started_at": None,
+        "ended_at": None,
+        "duration_seconds": None,
+        "is_subagent": int(is_subagent),
+        "parent_session_id": parent_sid,
+        "message_count": 0,
+        "user_prompt_count": 0,
+        "assistant_text_count": 0,
+        "assistant_thinking_count": 0,
+        "tool_use_count": 0,
+        "tool_error_count": 0,
+        "models": "[]",
+        "input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 0,
+        "model_dominant": None,
+        "cost_usd": 0.0,
+        "agent": NAME,
+    }
+    prompts: list = []
+    tool_calls: list = []
+    models: set[str] = set()
+    model_output_tokens: dict[str, int] = {}
+    is_first = True
+
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            ts = e.get("timestamp")
+            if ts:
+                if not session["started_at"] or ts < session["started_at"]:
+                    session["started_at"] = ts
+                if not session["ended_at"] or ts > session["ended_at"]:
+                    session["ended_at"] = ts
+
+            etype = e.get("type")
+            if etype not in ("user", "assistant"):
+                continue
+
+            session["message_count"] += 1
+            msg = e.get("message", {}) or {}
+            content = msg.get("content")
+
+            if etype == "user":
+                if isinstance(content, str):
+                    text = content
+                    prompts.append({
+                        "session_id": session["session_id"],
+                        "timestamp": ts,
+                        "text": text,
+                        "word_count": len(text.split()),
+                        "char_count": len(text),
+                        "is_first_in_session": int(is_first),
+                    })
+                    is_first = False
+                    session["user_prompt_count"] += 1
+                elif isinstance(content, list):
+                    text_parts: list[str] = []
+                    saw_tool_result = False
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif btype == "tool_result":
+                            saw_tool_result = True
+                            if block.get("is_error"):
+                                session["tool_error_count"] += 1
+                    if text_parts and not saw_tool_result:
+                        text = "\n".join(text_parts)
+                        prompts.append({
+                            "session_id": session["session_id"],
+                            "timestamp": ts,
+                            "text": text,
+                            "word_count": len(text.split()),
+                            "char_count": len(text),
+                            "is_first_in_session": int(is_first),
+                        })
+                        is_first = False
+                        session["user_prompt_count"] += 1
+
+            elif etype == "assistant":
+                model = msg.get("model")
+                if model:
+                    models.add(model)
+                usage = msg.get("usage") or {}
+                if isinstance(usage, dict):
+                    in_t = int(usage.get("input_tokens") or 0)
+                    cc_t = int(usage.get("cache_creation_input_tokens") or 0)
+                    cr_t = int(usage.get("cache_read_input_tokens") or 0)
+                    out_t = int(usage.get("output_tokens") or 0)
+                    cache_creation = usage.get("cache_creation") or {}
+                    cc_5m = int(cache_creation.get("ephemeral_5m_input_tokens") or 0) if isinstance(cache_creation, dict) else 0
+                    cc_1h = int(cache_creation.get("ephemeral_1h_input_tokens") or 0) if isinstance(cache_creation, dict) else 0
+                    if cc_5m + cc_1h == 0 and cc_t > 0:
+                        cc_5m = cc_t  # default-bucket fallback
+                    session["input_tokens"] += in_t
+                    session["cache_creation_tokens"] += cc_t
+                    session["cache_read_tokens"] += cr_t
+                    session["output_tokens"] += out_t
+                    session["cost_usd"] += turn_cost_usd(model, in_t, cc_5m, cc_1h, cr_t, out_t)
+                    if model:
+                        model_output_tokens[model] = model_output_tokens.get(model, 0) + out_t
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "text":
+                            session["assistant_text_count"] += 1
+                        elif btype == "thinking":
+                            session["assistant_thinking_count"] += 1
+                        elif btype == "tool_use":
+                            session["tool_use_count"] += 1
+                            tool_calls.append({
+                                "session_id": session["session_id"],
+                                "timestamp": ts,
+                                "tool_name": block.get("name", "?"),
+                                "is_error": 0,
+                            })
+
+    session["models"] = json.dumps(sorted(models))
+    if model_output_tokens:
+        session["model_dominant"] = max(model_output_tokens.items(), key=lambda kv: kv[1])[0]
+    a = _parse_iso(session["started_at"])
+    b = _parse_iso(session["ended_at"])
+    if a and b:
+        session["duration_seconds"] = (b - a).total_seconds()
+    return session, prompts, tool_calls

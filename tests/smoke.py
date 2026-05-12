@@ -150,6 +150,92 @@ def test_cache_5m_vs_1h_are_different():
     assert abs(cost_1h - 10.00) < 0.01
 
 
+# ─── Adapter tests ──────────────────────────────────────────────────────────
+
+
+def test_codex_adapter_parses_fixture():
+    """Synthetic Codex rollout exercises all the quirks the adapter has to handle:
+    synthetic <permissions> / <environment_context> injections (must be skipped),
+    response_item + event_msg/user_message dedupe (count once), per-turn cost from
+    last_token_usage (not cumulative), function_call + custom_tool_call as tool uses,
+    reasoning blocks as thinking. If counts drift, the adapter regressed."""
+    from pathlib import Path
+
+    from adapters import codex
+
+    fixture = ROOT / "tests" / "fixtures" / "codex_rollout.jsonl"
+    assert fixture.exists(), f"fixture missing: {fixture}"
+    entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
+    session, prompts, tools = codex.scan(entry)
+
+    # 2 real user prompts (the developer + environment_context lines must NOT count).
+    assert session["user_prompt_count"] == 2, f"expected 2 user prompts, got {session['user_prompt_count']}"
+    assert len(prompts) == 2
+    assert prompts[0]["text"].startswith("add a function")
+    assert prompts[1]["text"].startswith("now add a test")
+    # 2 tool uses: function_call + custom_tool_call.
+    assert session["tool_use_count"] == 2, f"expected 2 tool uses, got {session['tool_use_count']}"
+    assert {t["tool_name"] for t in tools} == {"exec_command", "apply_patch"}
+    # 1 reasoning block → thinking_count = 1.
+    assert session["assistant_thinking_count"] == 1
+    # 2 assistant text outputs.
+    assert session["assistant_text_count"] == 2
+    # Model from turn_context.
+    assert session["model_dominant"] == "gpt-5.5"
+    # project_dir from session_meta.cwd, NOT the fixture filename.
+    assert session["project_dir"] == "/home/dev/myproject"
+    assert session["agent"] == "codex"
+    # Cost is non-zero and uses per-turn (last_token_usage) deltas.
+    assert session["cost_usd"] > 0
+    # Tokens: first turn 1000/200/80, second turn 1000/900/30 → uncached 800+100=900, cached 200+900=1100.
+    assert session["input_tokens"] == 900, f"uncached input: expected 900, got {session['input_tokens']}"
+    assert session["cache_read_tokens"] == 1100, f"cached: expected 1100, got {session['cache_read_tokens']}"
+
+
+def test_codex_adapter_dedupe_user_message():
+    """The fixture has both a response_item user message AND an event_msg/user_message
+    for the same turn — they describe the same prompt. The adapter must NOT
+    double-count by ignoring user_message event_msgs."""
+    from adapters import codex
+    fixture = ROOT / "tests" / "fixtures" / "codex_rollout.jsonl"
+    entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
+    session, _, _ = codex.scan(entry)
+    # The fixture has exactly one event_msg/user_message line (after the first real prompt).
+    # If we accidentally count it, user_prompt_count would be 3 instead of 2.
+    assert session["user_prompt_count"] == 2
+
+
+def test_codex_adapter_silent_on_missing_install():
+    """When ~/.codex doesn't exist, discover() must yield nothing — not raise."""
+    from adapters import codex
+    # Point the adapter at a non-existent path temporarily.
+    orig = codex.SESSIONS_DIR
+    codex.SESSIONS_DIR = ROOT / "tests" / "_no_such_codex_dir"
+    try:
+        assert list(codex.discover()) == []
+    finally:
+        codex.SESSIONS_DIR = orig
+
+
+def test_corpus_schema_has_agent_column():
+    """The sessions table must have an `agent` column with a default — old corpus.db
+    files from before the refactor would be missing it. init_db drops + recreates
+    so this is also a guard against forgetting to add it back."""
+    import tempfile
+    import sqlite3
+    import corpus
+    with tempfile.TemporaryDirectory() as td:
+        orig = corpus.DB_PATH
+        corpus.DB_PATH = Path(td) / "corpus.db"
+        try:
+            conn = corpus.init_db()
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            assert "agent" in cols, f"sessions table missing 'agent' column. got: {cols}"
+            conn.close()
+        finally:
+            corpus.DB_PATH = orig
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -191,6 +277,12 @@ def main() -> int:
     check("price_for_model falls back cleanly",     test_price_for_unknown_falls_back)
     check("turn_cost matches docs worked example",  test_turn_cost_worked_example)
     check("5m vs 1h cache writes priced differently", test_cache_5m_vs_1h_are_different)
+    print()
+    print("Adapters:")
+    check("codex adapter parses fixture cleanly",   test_codex_adapter_parses_fixture)
+    check("codex adapter dedupes user_message",     test_codex_adapter_dedupe_user_message)
+    check("codex adapter silent on missing install", test_codex_adapter_silent_on_missing_install)
+    check("corpus.sessions has agent column",        test_corpus_schema_has_agent_column)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
