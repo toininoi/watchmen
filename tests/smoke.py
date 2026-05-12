@@ -295,6 +295,85 @@ def test_claude_adapter_stores_decoded_paths():
             claude_code._DECODE_CACHE.clear()
 
 
+# ─── CLI settings tests ─────────────────────────────────────────────────────
+
+
+def test_settings_parser_validates_inputs():
+    """_parse_setting must coerce + reject inputs so bad CLI args never reach
+    the DB layer. Covers: boolean parsing (truthy + falsy spellings), int
+    bounds, path existence, unknown keys."""
+    import cli
+
+    # enabled: many truthy + falsy spellings.
+    for v in ("true", "True", "yes", "Y", "on", "1"):
+        col, val = cli._parse_setting("enabled", v)
+        assert (col, val) == ("enabled", 1), f"{v!r} should map to (enabled, 1)"
+    for v in ("false", "no", "N", "off", "0"):
+        col, val = cli._parse_setting("enabled", v)
+        assert (col, val) == ("enabled", 0), f"{v!r} should map to (enabled, 0)"
+    try:
+        cli._parse_setting("enabled", "maybe")
+        raise AssertionError("expected ValueError on enabled=maybe")
+    except ValueError:
+        pass
+
+    # threshold: positive int only.
+    assert cli._parse_setting("threshold", "50") == ("threshold_new_prompts", 50)
+    for bad in ("abc", "-1", "0"):
+        try:
+            cli._parse_setting("threshold", bad)
+            raise AssertionError(f"expected ValueError on threshold={bad}")
+        except ValueError:
+            pass
+
+    # repo: must point at an existing directory.
+    col, val = cli._parse_setting("repo", str(ROOT))
+    assert col == "source_repo"
+    assert val.endswith("watchmen")
+    try:
+        cli._parse_setting("repo", "/tmp/_no_such_dir_for_smoke_test")
+        raise AssertionError("expected ValueError on missing repo path")
+    except ValueError:
+        pass
+
+    # notes: pass-through, any string allowed.
+    assert cli._parse_setting("notes", "anything goes") == ("notes", "anything goes")
+
+    # unknown key.
+    try:
+        cli._parse_setting("bogus", "x")
+        raise AssertionError("expected ValueError on unknown key")
+    except ValueError:
+        pass
+
+
+def test_settings_set_writes_to_state_db():
+    """End-to-end: cmd_settings_set actually mutates state.db. Regression test
+    against forgetting to call state.update_project, or silently swallowing the
+    db error."""
+    import tempfile
+    import argparse
+    import cli
+    import state
+    with tempfile.TemporaryDirectory() as td:
+        orig = state.STATE_DB
+        state.STATE_DB = Path(td) / "state.db"
+        try:
+            state.init_db()
+            state.track_project("smoke-proj", str(ROOT), threshold=30)
+            args = argparse.Namespace(project="smoke-proj", key="threshold", value="77")
+            rc = cli.cmd_settings_set(args)
+            assert rc == 0
+            after = state.get_project("smoke-proj")
+            assert after["threshold_new_prompts"] == 77
+            # Now flip enabled.
+            args = argparse.Namespace(project="smoke-proj", key="enabled", value="false")
+            assert cli.cmd_settings_set(args) == 0
+            assert state.get_project("smoke-proj")["enabled"] == 0
+        finally:
+            state.STATE_DB = orig
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -345,6 +424,10 @@ def main() -> int:
     check("decode_project_dir naive fallback",        test_decode_project_dir_naive_fallback)
     check("decode_project_dir resolves real FS",      test_decode_project_dir_resolves_real_filesystem)
     check("claude adapter stores decoded paths",      test_claude_adapter_stores_decoded_paths)
+    print()
+    print("CLI settings:")
+    check("settings parser validates inputs",         test_settings_parser_validates_inputs)
+    check("settings set writes to state.db",          test_settings_set_writes_to_state_db)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)

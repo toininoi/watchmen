@@ -4,12 +4,14 @@ Subcommands:
   status                    Dashboard: tracked projects, last-run, what needs analysis
   list                      Auto-detect projects from corpus.db (>=30 prompts)
   track <key> --repo <p>    Track a project so watchmen analyze/curate operates on it
-  ingest                    Re-run corpus.py (rebuild corpus.db from ~/.claude/projects)
+  ingest                    Re-run corpus.py (rebuild corpus.db from all agents)
   analyze <key>             Run analyst (incremental — only days after last_analyst_day)
   curate <key>              Run curator (--regen-claude for stage 3 only)
   runs [--project <key>]    Recent run history
-  config                    Open config in $EDITOR (placeholder for now)
-  viewer                    Start local web viewer (placeholder for P2)
+  onboard                   Interactive setup wizard (fresh install)
+  reonboard                 Re-run the wizard (existing projects survive, new ones added)
+  settings list|show|set    View / update per-project settings (threshold, enabled, repo, notes)
+  viewer                    Start local web viewer (default :8888)
 
 Designed to be invoked as `uv run watchmen <subcommand>` or via the script entry in pyproject.toml.
 """
@@ -306,6 +308,97 @@ def cmd_onboard(args) -> int:
     return onboard.run()
 
 
+def cmd_reonboard(args) -> int:
+    """Re-run the onboarding wizard. Same code path as `onboard` — onboard.run()
+    is already idempotent (existing projects show up tracked, get refreshed)."""
+    import onboard
+    print(_dim("Re-running onboarding wizard. Tracked projects survive — new ones are added."))
+    return onboard.run()
+
+
+# ─── Settings ───────────────────────────────────────────────────────────────
+
+
+_SETTABLE_KEYS = ("enabled", "threshold", "repo", "notes")
+
+
+def _parse_setting(key: str, value: str) -> tuple[str, object]:
+    """Map a CLI-friendly key + value to (db_column, coerced_value).
+    Raises ValueError with a human-readable message on bad input."""
+    if key == "enabled":
+        v = value.strip().lower()
+        if v in ("true", "yes", "y", "on", "1"):
+            return "enabled", 1
+        if v in ("false", "no", "n", "off", "0"):
+            return "enabled", 0
+        raise ValueError(f"enabled must be true/false (got {value!r})")
+    if key == "threshold":
+        try:
+            n = int(value)
+        except ValueError:
+            raise ValueError(f"threshold must be an integer (got {value!r})") from None
+        if n < 1:
+            raise ValueError("threshold must be ≥ 1")
+        return "threshold_new_prompts", n
+    if key == "repo":
+        path = Path(value).expanduser().resolve()
+        if not path.exists() or not path.is_dir():
+            raise ValueError(f"not a directory: {path}")
+        return "source_repo", str(path)
+    if key == "notes":
+        return "notes", value
+    raise ValueError(f"unknown setting {key!r}. valid: {', '.join(_SETTABLE_KEYS)}")
+
+
+def cmd_settings_list(args) -> int:
+    state.init_db()
+    rows = state.list_projects()
+    if not rows:
+        print(_dim("No projects tracked yet. Run `watchmen onboard` or `watchmen track <key> --repo <path>`."))
+        return 0
+    print(_bold(f"\n{len(rows)} tracked project(s):\n"))
+    print(f"  {'project':<30} {'state':<8} {'threshold':>9}  {'repo'}")
+    print(_dim("  " + "─" * 90))
+    for p in rows:
+        st = "enabled" if p["enabled"] else _yellow("paused")
+        repo = (p["source_repo"] or "").replace(str(Path.home()), "~", 1)
+        print(f"  {p['project_key'][:30]:<30} {st:<8} {p['threshold_new_prompts']:>9}  {repo}")
+    return 0
+
+
+def cmd_settings_show(args) -> int:
+    state.init_db()
+    p = state.get_project(args.project)
+    if not p:
+        print(f"ERROR: project '{args.project}' not tracked. Run `watchmen list` to see candidates.")
+        return 1
+    print(_bold(f"\n{args.project}\n"))
+    for k in ("source_repo", "enabled", "threshold_new_prompts", "notes",
+              "last_analyst_day", "last_analyst_run",
+              "last_curator_run", "last_curator_skill_count",
+              "created_at", "updated_at"):
+        v = p.get(k)
+        if isinstance(v, int) and k == "enabled":
+            v = "true" if v else "false"
+        print(f"  {k:<28}  {v if v is not None else _dim('(unset)')}")
+    return 0
+
+
+def cmd_settings_set(args) -> int:
+    state.init_db()
+    if not state.get_project(args.project):
+        print(f"ERROR: project '{args.project}' not tracked.")
+        return 1
+    try:
+        column, value = _parse_setting(args.key, args.value)
+    except ValueError as ex:
+        print(f"ERROR: {ex}")
+        return 1
+    state.update_project(args.project, **{column: value})
+    print(_green(f"✓ {args.project}: {args.key} = {value}"))
+    return 0
+
+
 def cmd_metrics(args) -> int:
     import metrics as _metrics
     from rich.console import Console
@@ -412,6 +505,20 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("hooks-status", help="show which hook events are wired up").set_defaults(func=cmd_hooks_status)
 
     sub.add_parser("onboard", help="interactive setup wizard (ingest + track + analyze + curate + autostart)").set_defaults(func=cmd_onboard)
+    sub.add_parser("reonboard", help="rerun the onboarding wizard (existing projects survive, new ones added)").set_defaults(func=cmd_reonboard)
+
+    p_settings = sub.add_parser("settings", help="view / update per-project settings")
+    settings_sub = p_settings.add_subparsers(dest="settings_cmd")
+    settings_sub.add_parser("list", help="show all tracked projects + their settings").set_defaults(func=cmd_settings_list)
+    p_show = settings_sub.add_parser("show", help="show one project's full settings")
+    p_show.add_argument("project")
+    p_show.set_defaults(func=cmd_settings_show)
+    p_set = settings_sub.add_parser("set", help=f"update a setting. keys: {', '.join(_SETTABLE_KEYS)}")
+    p_set.add_argument("project")
+    p_set.add_argument("key", choices=_SETTABLE_KEYS)
+    p_set.add_argument("value")
+    p_set.set_defaults(func=cmd_settings_set)
+    p_settings.set_defaults(func=lambda a: (p_settings.print_help() or 1))
 
     p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (sessions, tokens, cost, suggestion uptake)")
     p_metrics.add_argument("project", help="project key")
