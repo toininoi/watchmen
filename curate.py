@@ -17,6 +17,8 @@ Usage:
 
 import argparse
 import json
+import shutil
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -520,6 +522,21 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
     changelog_path.write_text(new_text)
     manifest_path.write_text(json.dumps(current, indent=2, sort_keys=True))
 
+    # Commit artifacts to a per-project git repo so the viewer can render
+    # a diff between successive runs. Non-fatal on failure (git missing, etc.).
+    last_commit: str | None = None
+    try:
+        last_commit = _git_commit_artifacts(
+            project_dir=out_dir,
+            run_kind=run_kind,
+            ts_str=ts,
+            added=added,
+            updated=updated,
+            removed=removed,
+        )
+    except Exception as e:
+        print(f"      _git_commit_artifacts failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+
     # Publish state for the Claude Code plugin to read at ~/.watchmen/.
     # Decoupled from the engine's install location so the plugin doesn't need
     # to know where the engine lives.
@@ -531,9 +548,75 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
             added=added,
             updated=updated,
             removed=removed,
+            last_commit=last_commit,
         )
     except Exception as e:
         print(f"      _publish_watchmen_state failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+
+
+def _git_commit_artifacts(
+    project_dir: Path,
+    run_kind: str,
+    ts_str: str,
+    added: list[str],
+    updated: list[str],
+    removed: list[str],
+) -> str | None:
+    """Init git in kai_claude/<project>/ on first call, commit the current state,
+    return the resulting commit SHA. Returns None if git is unavailable, the
+    directory is missing, or nothing changed on a working repo with no HEAD.
+
+    Each curator run becomes a commit; the viewer renders the diff between
+    consecutive commits as the substantive "what watchmen changed" view."""
+    if not shutil.which("git") or not project_dir.exists():
+        return None
+
+    if not (project_dir / ".git").exists():
+        r = subprocess.run(
+            ["git", "-C", str(project_dir), "init", "-q", "-b", "main"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return None
+        # Local identity so commits work in environments without global git config.
+        subprocess.run(["git", "-C", str(project_dir), "config", "user.email", "curator@watchmen"],
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(project_dir), "config", "user.name", "watchmen curator"],
+                       capture_output=True)
+        # Skip mtime-only bookkeeping that creates noise in diffs.
+        gitignore = project_dir / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text("_manifest.json\n_run.log\n")
+
+    subprocess.run(["git", "-C", str(project_dir), "add", "-A"], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(project_dir), "status", "--porcelain"],
+                       capture_output=True, text=True)
+    if not r.stdout.strip():
+        # No staged diff — return existing HEAD if any (curator wrote nothing substantive).
+        r = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+                           capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    title = f"{run_kind} @ {ts_str}"
+    body_lines = []
+    if added:
+        body_lines.append("Added:")
+        body_lines.extend(f"  - {a}" for a in added)
+    if updated:
+        body_lines.append("Updated:")
+        body_lines.extend(f"  - {u}" for u in updated)
+    if removed:
+        body_lines.append("Removed:")
+        body_lines.extend(f"  - {x}" for x in removed)
+    msg = title + ("\n\n" + "\n".join(body_lines) if body_lines else "")
+
+    r = subprocess.run(["git", "-C", str(project_dir), "commit", "-q", "-m", msg],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    r = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
 
 
 def _publish_watchmen_state(
@@ -543,6 +626,7 @@ def _publish_watchmen_state(
     added: list[str],
     updated: list[str],
     removed: list[str],
+    last_commit: str | None,
 ) -> None:
     """Write ~/.watchmen/state/<project>.json + refresh ~/.watchmen/projects.json.
 
@@ -567,15 +651,22 @@ def _publish_watchmen_state(
         parts.append(f"-{len(removed)} removed")
     summary = ", ".join(parts) or "no changes"
 
+    if last_commit:
+        diff_url = f"http://127.0.0.1:8888/p/{project_key}/diff/{last_commit}"
+    else:
+        diff_url = None
+
     payload = {
-        "schema": 1,
+        "schema": 2,
         "project_key": project_key,
         "ts": ts_str,
         "run_kind": run_kind,
         "summary": summary,
         "details": {"added": added, "updated": updated, "removed": removed},
         "suggested_skill": suggested,
+        "last_commit": last_commit,
         "viewer_url": f"http://127.0.0.1:8888/p/{project_key}",
+        "diff_url": diff_url,
     }
     (state_dir / f"{project_key}.json").write_text(json.dumps(payload, indent=2))
 

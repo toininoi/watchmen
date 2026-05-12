@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ project.project_key }} runs — watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-6">
+  <div class="text-xs text-gray-500 mb-1">
+    <a href="/p/{{ project.project_key }}" class="hover:text-gray-700">← {{ project.project_key }}</a>
+  </div>
+  <h1 class="text-2xl font-semibold">Curator runs</h1>
+  <div class="text-sm text-gray-600 mt-1">Each commit is one curator pass. Click a row to see the diff.</div>
+</div>
+
+{% if runs %}
+<div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">When</th>
+        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Subject</th>
+        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Commit</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      {% for r in runs %}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-2 text-sm font-mono text-gray-600 whitespace-nowrap">{{ r.ts }}</td>
+        <td class="px-4 py-2 text-sm">
+          <a href="/p/{{ project.project_key }}/diff/{{ r.sha }}" class="text-indigo-600 hover:underline">{{ r.subject }}</a>
+        </td>
+        <td class="px-4 py-2 text-xs font-mono text-gray-500">{{ r.short }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="text-sm text-gray-500">No curator runs recorded yet.</div>
+{% endif %}
+
+{% endblock %}

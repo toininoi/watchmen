@@ -1,12 +1,17 @@
 """watchmen viewer — local FastAPI dashboard for browsing analyses + skill bundles + CLAUDE.md."""
 
+import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
+from pygments import highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import DiffLexer
 
 ROOT = Path(__file__).parent.parent  # kai-hooks-mvp/
 ANALYSES = ROOT / "analyses"
@@ -225,6 +230,87 @@ def runs_page(request: Request):
     runs = list_recent_runs(limit=200)
     return TEMPLATES.TemplateResponse(request, "runs.html", {
         "runs": runs,
+    })
+
+
+def _project_git_dir(project_key: str) -> Path | None:
+    pdir = KAI_CLAUDE / project_key
+    if not pdir.exists() or not (pdir / ".git").exists():
+        return None
+    return pdir
+
+
+@app.get("/p/{project_key}/runs", response_class=HTMLResponse)
+def project_runs(request: Request, project_key: str):
+    pdir = _project_git_dir(project_key)
+    if pdir is None:
+        raise HTTPException(404, detail="no run history yet — curator hasn't committed anything for this project")
+    if not shutil.which("git"):
+        raise HTTPException(500, detail="git not available")
+    r = subprocess.run(
+        ["git", "-C", str(pdir), "log", "--pretty=format:%H%x09%ai%x09%s", "-n", "50"],
+        capture_output=True, text=True,
+    )
+    runs = []
+    for line in (r.stdout or "").strip().split("\n"):
+        if not line:
+            continue
+        sha, ai_ts, subject = (line.split("\t", 2) + ["", ""])[:3]
+        runs.append({"sha": sha, "short": sha[:8], "ts": ai_ts, "subject": subject})
+    return TEMPLATES.TemplateResponse(request, "project_runs.html", {
+        "project": get_project_meta(project_key) or {"project_key": project_key},
+        "runs": runs,
+    })
+
+
+@app.get("/p/{project_key}/diff/{sha}", response_class=HTMLResponse)
+def project_diff(request: Request, project_key: str, sha: str):
+    pdir = _project_git_dir(project_key)
+    if pdir is None:
+        raise HTTPException(404, detail="no run history for this project")
+    if not shutil.which("git"):
+        raise HTTPException(500, detail="git not available")
+
+    # Commit metadata (subject + body)
+    r = subprocess.run(
+        ["git", "-C", str(pdir), "log", "-1", "--pretty=format:%H%n%ai%n%s%n--BODY--%n%b", sha],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        raise HTTPException(404, detail=f"commit {sha} not found")
+    parts = r.stdout.split("\n--BODY--\n", 1)
+    head = parts[0].split("\n", 2)
+    sha_full = head[0]
+    ai_ts = head[1] if len(head) > 1 else ""
+    subject = head[2] if len(head) > 2 else ""
+    body = parts[1] if len(parts) > 1 else ""
+
+    # Diff (excludes the commit header — we render that ourselves)
+    r = subprocess.run(
+        ["git", "-C", str(pdir), "show", "--pretty=", "--no-color", sha_full],
+        capture_output=True, text=True,
+    )
+    diff_text = r.stdout or "(no diff — likely the initial commit)"
+    diff_html = highlight(diff_text, DiffLexer(), HtmlFormatter(cssclass="codehilite", nowrap=False))
+
+    # Neighbors for prev/next navigation
+    r_prev = subprocess.run(
+        ["git", "-C", str(pdir), "rev-parse", f"{sha_full}^"],
+        capture_output=True, text=True,
+    )
+    prev_sha = r_prev.stdout.strip() if r_prev.returncode == 0 else None
+
+    return TEMPLATES.TemplateResponse(request, "diff.html", {
+        "project": get_project_meta(project_key) or {"project_key": project_key},
+        "commit": {
+            "sha": sha_full,
+            "short": sha_full[:8],
+            "ts": ai_ts,
+            "subject": subject,
+            "body": body,
+        },
+        "diff_html": diff_html,
+        "prev_sha": prev_sha,
     })
 
 

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ commit.short }} — {{ project.project_key }} — watchmen{% endblock %}
+{% block content %}
+
+<style>
+  .diff-body { font-family: ui-monospace, "SF Mono", "Menlo", monospace; font-size: 12.5px; line-height: 1.45; }
+  .diff-body .codehilite { background: #fff; border-radius: 8px; padding: 0; overflow-x: auto; border: 1px solid #e5e7eb; }
+  .diff-body .codehilite pre { padding: 16px; margin: 0; }
+  .diff-body .gh { color: #6b7280; }                     /* generic header */
+  .diff-body .gd { background: #ffeef0; color: #b91c1c; }/* deletion */
+  .diff-body .gi { background: #e7f7ed; color: #15803d; }/* insertion */
+  .diff-body .gu { color: #6366f1; }                     /* hunk header */
+  .diff-body .gr { color: #b91c1c; font-weight: 600; }
+</style>
+
+<div class="mb-6">
+  <div class="text-xs text-gray-500 mb-1">
+    <a href="/p/{{ project.project_key }}" class="hover:text-gray-700">{{ project.project_key }}</a>
+    &nbsp;/&nbsp;
+    <a href="/p/{{ project.project_key }}/runs" class="hover:text-gray-700">runs</a>
+    &nbsp;/&nbsp;
+    <span class="font-mono">{{ commit.short }}</span>
+  </div>
+  <h1 class="text-xl font-semibold">{{ commit.subject }}</h1>
+  <div class="text-sm text-gray-600 mt-1 font-mono">{{ commit.ts }}</div>
+</div>
+
+{% if commit.body %}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-4 text-sm whitespace-pre-wrap font-mono text-gray-700">{{ commit.body }}</div>
+{% endif %}
+
+<div class="diff-body">
+  {{ diff_html|safe }}
+</div>
+
+<div class="mt-6 flex items-center gap-4 text-sm">
+  {% if prev_sha %}
+    <a href="/p/{{ project.project_key }}/diff/{{ prev_sha }}" class="text-indigo-600 hover:underline">← previous run</a>
+  {% endif %}
+  <a href="/p/{{ project.project_key }}/runs" class="text-gray-600 hover:underline">all runs</a>
+</div>
+
+{% endblock %}

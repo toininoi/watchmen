@@ -27,6 +27,9 @@ The block below contains the JSON state file watchmen wrote at the end of its la
 
 3. **If `suggested_skill` is non-null in the state**: ask the user *"Want me to load the `<skill>` skill for this session?"* and wait for a yes/no. If yes, instruct them to invoke it (e.g. `/skill-name`) — you can't load it programmatically, only signal.
 
-4. **If the state mentions a `viewer_url`**: include it as a closing line for the user to click through and read the full changelog/skill details. Example: `Full changes: http://127.0.0.1:8888/project/kai-agent-new`
+4. **Include a closing link to the run's details**:
+   - If `diff_url` is non-null (schema 2+): show that — it points at the side-by-side diff for this exact run, e.g. `Diff: http://127.0.0.1:8888/p/kai-agent-new/diff/<sha>`
+   - Else fall back to `viewer_url` (the project overview page)
+   - One line, link only — no extra commentary.
 
 The `read_state.sh` call also touches an acknowledgment file, which clears the statusLine indicator for this project. So once you've shown the user this brief, the indicator will be gone until the next curator run.
