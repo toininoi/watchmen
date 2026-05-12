@@ -407,6 +407,114 @@ def cmd_settings_set(args) -> int:
     return 0
 
 
+def _check_openrouter_key(key: str) -> tuple[bool, str]:
+    """Probe OpenRouter's /auth/key endpoint with the given key. Returns
+    (ok, human_message). Used by `watchmen settings api-key [--check]` to
+    surface bad keys BEFORE they reach the analyst/curator and turn into
+    silent 401s halfway through a run."""
+    import httpx
+    try:
+        r = httpx.get(
+            "https://openrouter.ai/api/v1/auth/key",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=10.0,
+        )
+    except httpx.RequestError as e:
+        return False, f"connection error: {type(e).__name__}"
+    if r.status_code == 200:
+        try:
+            info = (r.json() or {}).get("data") or {}
+        except ValueError:
+            info = {}
+        usage = info.get("usage")
+        limit = info.get("limit")
+        if usage is not None and limit is not None and limit > 0:
+            return True, f"valid — credits used ${float(usage):.2f} of ${float(limit):.2f}"
+        if usage is not None and limit is None:
+            return True, f"valid — credits used ${float(usage):.2f} (no hard limit)"
+        return True, "valid"
+    if r.status_code == 401:
+        try:
+            msg = (r.json().get("error") or {}).get("message", "")
+        except (ValueError, AttributeError):
+            msg = ""
+        return False, f"401 — {msg or 'unauthorized'}"
+    return False, f"HTTP {r.status_code} — {r.text[:120]}"
+
+
+def _read_current_api_key() -> str | None:
+    """Return the OpenRouter API key from env or ~/.config/watchmen/.env, or
+    None if neither is set."""
+    import os
+    if k := os.environ.get("OPENROUTER_API_KEY"):
+        return k
+    env_path = Path.home() / ".config" / "watchmen" / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith("OPENROUTER_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def _write_api_key(key: str) -> Path:
+    """Persist the key to ~/.config/watchmen/.env, preserving other lines.
+    Returns the file path."""
+    env_dir = Path.home() / ".config" / "watchmen"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    env_path = env_dir / ".env"
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    new_lines = [ln for ln in lines if not ln.startswith("OPENROUTER_API_KEY=")]
+    new_lines.append(f"OPENROUTER_API_KEY={key}")
+    env_path.write_text("\n".join(new_lines) + "\n")
+    env_path.chmod(0o600)
+    return env_path
+
+
+def cmd_settings_api_key(args) -> int:
+    """Set or check the OpenRouter API key. Live-validates against OpenRouter's
+    /auth/key endpoint so a bad key gets caught BEFORE the analyst/curator
+    silently 401s halfway through a run."""
+    from rich.console import Console
+    from rich.prompt import Confirm, Prompt
+    console = Console()
+
+    current = _read_current_api_key()
+    if current:
+        ok, info = _check_openrouter_key(current)
+        marker = "[green]✓[/]" if ok else "[red]✗[/]"
+        console.print(f"{marker} current key: {info}  [dim]({current[:8]}…{current[-4:]})[/]")
+    else:
+        console.print("[dim]no key currently set[/]")
+
+    if args.check:
+        return 0 if (current and ok) else 1
+
+    if args.set:
+        new_key = args.set.strip()
+    else:
+        console.print()
+        new_key = Prompt.ask(
+            "Paste new OpenRouter API key (enter to keep current)",
+            password=True, default="", show_default=False,
+        ).strip()
+    if not new_key:
+        console.print("[dim]no change.[/]")
+        return 0
+
+    ok, info = _check_openrouter_key(new_key)
+    if ok:
+        path = _write_api_key(new_key)
+        console.print(f"[green]✓[/] {info}")
+        console.print(f"  wrote → {path} [dim](chmod 600)[/]")
+        return 0
+    console.print(f"[red]✗[/] new key rejected: {info}")
+    if not Confirm.ask("Save anyway?", default=False):
+        return 1
+    path = _write_api_key(new_key)
+    console.print(f"[yellow]![/] saved despite rejection → {path}")
+    return 0
+
+
 def cmd_metrics(args) -> int:
     import metrics as _metrics
     from rich.console import Console
@@ -629,6 +737,10 @@ def main(argv: list[str] | None = None) -> int:
     p_set.add_argument("key", choices=_SETTABLE_KEYS)
     p_set.add_argument("value")
     p_set.set_defaults(func=cmd_settings_set)
+    p_apikey = settings_sub.add_parser("api-key", help="set or check the OpenRouter API key (live-validated against /auth/key)")
+    p_apikey.add_argument("--check", action="store_true", help="check current key without changing it")
+    p_apikey.add_argument("--set", metavar="KEY", help="set a key non-interactively (for scripting)")
+    p_apikey.set_defaults(func=cmd_settings_api_key)
     p_settings.set_defaults(func=lambda a: (p_settings.print_help() or 1))
 
     p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (sessions, tokens, cost, suggestion uptake)")

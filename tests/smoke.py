@@ -928,6 +928,45 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
             corpus.DB_PATH = orig_db
 
 
+# ─── API key management ─────────────────────────────────────────────────────
+
+
+def test_api_key_helpers_roundtrip():
+    """_read_current_api_key / _write_api_key must roundtrip cleanly while
+    preserving any other lines in ~/.config/watchmen/.env (e.g. LANGFUSE_KEY,
+    custom OPENROUTER_API_BASE). If write clobbers unrelated lines, teammates
+    rotating their key would lose other config silently."""
+    import os
+    import tempfile
+
+    import cli
+
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = Path(td)
+        env_dir = fake_home / ".config" / "watchmen"
+        env_dir.mkdir(parents=True)
+        env_path = env_dir / ".env"
+        env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
+
+        orig_home = os.environ.get("HOME")
+        orig_env_key = os.environ.pop("OPENROUTER_API_KEY", None)
+        os.environ["HOME"] = str(fake_home)
+        # Path.home() reads $HOME on POSIX, so the override takes effect immediately.
+        try:
+            assert cli._read_current_api_key() == "sk-old"
+            cli._write_api_key("sk-new")
+            assert cli._read_current_api_key() == "sk-new"
+            # Critically: OTHER_VAR must survive the rotation.
+            content = env_path.read_text()
+            assert "OTHER_VAR=keep-me" in content, "rotation clobbered an unrelated env line"
+            assert content.count("OPENROUTER_API_KEY=") == 1, "duplicate OPENROUTER_API_KEY line after rotation"
+        finally:
+            if orig_home is not None:
+                os.environ["HOME"] = orig_home
+            if orig_env_key is not None:
+                os.environ["OPENROUTER_API_KEY"] = orig_env_key
+
+
 # ─── Launchd plist sanity ───────────────────────────────────────────────────
 
 
@@ -1033,6 +1072,9 @@ def main() -> int:
     print()
     print("Launchd plist sanity:")
     check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)
+    print()
+    print("API key management:")
+    check("api-key helpers roundtrip + preserve unrelated lines", test_api_key_helpers_roundtrip)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
