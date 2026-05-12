@@ -309,6 +309,16 @@ watchmen/
 └── pyproject.toml
 ```
 
+## Tests
+
+Cold-start smoke tests live at `tests/smoke.py`. They catch the bugs that only show up on a fresh install (no `state.db`, no corpus) and the bugs that silently misprice tokens. No pytest dep — runs as a plain script.
+
+```bash
+uv run python tests/smoke.py
+```
+
+CI runs the same command on every push to `main` and every PR (`.github/workflows/test.yml`). If you change anything in `state.py`, `metrics.py`, `corpus.py`, or `onboard.py`, expect the smoke test to gate the merge.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
