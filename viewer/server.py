@@ -230,6 +230,33 @@ def runs_page(request: Request):
     })
 
 
+@app.get("/p/{project_key}/metrics", response_class=HTMLResponse)
+def project_metrics(request: Request, project_key: str):
+    import metrics as _metrics
+
+    rows = _metrics.daily_metrics(project_key, days=30)
+    last7 = _metrics.summarize_window(rows, 7)
+    last30 = _metrics.summarize_window(rows, 30)
+    # Daily series in chronological order for sparklines (rows is newest-first).
+    series = list(reversed(rows))
+    sparks = {
+        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
+        "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
+        "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
+        "tool_errors":  _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
+        "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
+        "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
+    }
+    return TEMPLATES.TemplateResponse(request, "metrics.html", {
+        "project": get_project_meta(project_key) or {"project_key": project_key},
+        "rows": rows,
+        "last7": last7,
+        "last30": last30,
+        "sparks": sparks,
+    })
+
+
 def _project_git_dir(project_key: str) -> Path | None:
     pdir = KAI_CLAUDE / project_key
     if not pdir.exists() or not (pdir / ".git").exists():

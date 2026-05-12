@@ -306,6 +306,35 @@ def cmd_onboard(args) -> int:
     return onboard.run()
 
 
+def cmd_metrics(args) -> int:
+    import metrics as _metrics
+    from rich.console import Console
+    from rich.table import Table
+
+    rows = _metrics.daily_metrics(args.project, days=args.days)
+    if not rows:
+        print(f"No data for project '{args.project}'. Run `watchmen ingest` first?")
+        return 1
+    last7 = _metrics.summarize_window(rows, min(7, args.days))
+    last30 = _metrics.summarize_window(rows, args.days)
+    console = Console()
+    rollup = Table(title=f"{args.project} — {args.days}-day rollup", show_header=True, header_style="bold magenta")
+    rollup.add_column("Metric")
+    rollup.add_column("7d", justify="right")
+    rollup.add_column(f"{args.days}d", justify="right")
+    rollup.add_row("Sessions", str(last7["sessions"]), str(last30["sessions"]))
+    rollup.add_row("Prompts", str(last7["prompts"]), str(last30["prompts"]))
+    rollup.add_row("Tool errors", str(last7["tool_errors"]), str(last30["tool_errors"]))
+    rollup.add_row("Input tokens", f"{last7['input_tokens']:,}", f"{last30['input_tokens']:,}")
+    rollup.add_row("Output tokens", f"{last7['output_tokens']:,}", f"{last30['output_tokens']:,}")
+    rollup.add_row("Cost (USD)", f"${last7['cost_usd']:.2f}", f"${last30['cost_usd']:.2f}")
+    rollup.add_row("Suggestions fired", str(last7["suggestions_fired"]), str(last30["suggestions_fired"]))
+    rollup.add_row("Uptake", str(last7["uptake"]), str(last30["uptake"]))
+    console.print(rollup)
+    console.print(f"\n  full daily breakdown: http://127.0.0.1:8888/p/{args.project}/metrics")
+    return 0
+
+
 # ─── Argument parsing ───────────────────────────────────────────────────────
 
 
@@ -383,6 +412,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("hooks-status", help="show which hook events are wired up").set_defaults(func=cmd_hooks_status)
 
     sub.add_parser("onboard", help="interactive setup wizard (ingest + track + analyze + curate + autostart)").set_defaults(func=cmd_onboard)
+
+    p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (sessions, tokens, cost, suggestion uptake)")
+    p_metrics.add_argument("project", help="project key")
+    p_metrics.add_argument("--days", type=int, default=30, help="window length (default 30)")
+    p_metrics.set_defaults(func=cmd_metrics)
 
     sub.add_parser("update-plugin", help="git pull the marketplace clone so /plugin install picks up the latest").set_defaults(func=cmd_update_plugin)
     p_isl = sub.add_parser("install-statusline", help="wire the 💡 watchmen indicator into ~/.claude/settings.json")

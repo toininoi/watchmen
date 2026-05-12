@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}{{ project.project_key }} metrics — watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-6">
+  <div class="text-xs text-gray-500 mb-1">
+    <a href="/p/{{ project.project_key }}" class="hover:text-gray-700">← {{ project.project_key }}</a>
+  </div>
+  <h1 class="text-2xl font-semibold">Efficiency metrics</h1>
+  <div class="text-sm text-gray-600 mt-1">Daily rollups for the last 30 days. Suggestions + uptake start showing data once the plugin is installed and you submit prompts.</div>
+</div>
+
+<style>
+  .stat-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
+  .stat-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
+  .stat-card .value { font-size: 22px; font-weight: 600; color: #111827; margin-top: 4px; }
+  .stat-card .sub   { font-size: 12px; color: #6b7280; margin-top: 2px; }
+  .stat-card .spark { margin-top: 8px; display: block; }
+  table.daily { font-size: 13px; }
+  table.daily th { text-align: right; padding: 6px 10px; font-weight: 500; color: #6b7280; background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
+  table.daily td { text-align: right; padding: 6px 10px; border-bottom: 1px solid #f3f4f6; font-variant-numeric: tabular-nums; }
+  table.daily td.date { text-align: left; color: #374151; font-family: ui-monospace, "SF Mono", "Menlo", monospace; }
+  table.daily tr.empty td { color: #9ca3af; }
+</style>
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+  <div class="stat-card">
+    <div class="label">Sessions / 7d</div>
+    <div class="value">{{ last7.sessions }}</div>
+    <div class="sub">{{ last30.sessions }} in last 30d</div>
+    <div class="spark">{{ sparks.sessions|safe }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Prompts / 7d</div>
+    <div class="value">{{ last7.prompts }}</div>
+    <div class="sub">{{ "%.1f"|format(last7.prompts / last7.sessions if last7.sessions else 0) }} per session</div>
+    <div class="spark">{{ sparks.prompts|safe }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Tool errors / 7d</div>
+    <div class="value">{{ last7.tool_errors }}</div>
+    <div class="sub">{{ "%.2f"|format(last7.tool_errors / last7.sessions if last7.sessions else 0) }} per session</div>
+    <div class="spark">{{ sparks.tool_errors|safe }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Cost / 7d</div>
+    <div class="value">${{ "%.2f"|format(last7.cost_usd) }}</div>
+    <div class="sub">${{ "%.2f"|format(last30.cost_usd) }} in last 30d</div>
+    <div class="spark">{{ sparks.cost_usd|safe }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Input tokens / 7d</div>
+    <div class="value">{{ "{:,}".format(last7.input_tokens) }}</div>
+    <div class="sub">{{ "{:,}".format(last7.cache_read_tokens) }} from cache</div>
+    <div class="spark">{{ sparks.input_tokens|safe }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Output tokens / 7d</div>
+    <div class="value">{{ "{:,}".format(last7.output_tokens) }}</div>
+    <div class="sub">{{ "%.2f"|format(last7.output_tokens / last7.sessions if last7.sessions else 0) }}k per session avg</div>
+    <div class="spark">{{ sparks.output_tokens|safe }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Skill suggestions / 7d</div>
+    <div class="value">{{ last7.suggestions_fired }}</div>
+    <div class="sub">
+      {% if last7.suggestions_fired %}
+        {{ last7.uptake }} taken ({{ "%.0f"|format(100 * last7.uptake / last7.suggestions_fired) }}% uptake)
+      {% else %}
+        no fires yet
+      {% endif %}
+    </div>
+    <div class="spark">{{ sparks.suggestions|safe }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Cache hit ratio / 7d</div>
+    {% set total_in = last7.input_tokens + last7.cache_creation_tokens + last7.cache_read_tokens %}
+    <div class="value">{{ "%.0f"|format(100 * last7.cache_read_tokens / total_in if total_in else 0) }}%</div>
+    <div class="sub">cache read / total input</div>
+  </div>
+</div>
+
+<h2 class="text-lg font-semibold mb-3">Daily breakdown</h2>
+<div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+  <table class="daily min-w-full">
+    <thead>
+      <tr>
+        <th class="text-left">Date</th>
+        <th>Sessions</th>
+        <th>Prompts</th>
+        <th>Errors</th>
+        <th>Input tok</th>
+        <th>Output tok</th>
+        <th>Cost</th>
+        <th>Suggestions</th>
+        <th>Uptake</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr class="{% if not r.sessions and not r.suggestions_fired %}empty{% endif %}">
+        <td class="date">{{ r.date }}</td>
+        <td>{{ r.sessions or "" }}</td>
+        <td>{{ r.prompts or "" }}</td>
+        <td>{{ r.tool_errors or "" }}</td>
+        <td>{{ "{:,}".format(r.input_tokens) if r.input_tokens else "" }}</td>
+        <td>{{ "{:,}".format(r.output_tokens) if r.output_tokens else "" }}</td>
+        <td>{{ "${:.2f}".format(r.cost_usd) if r.cost_usd > 0 else "" }}</td>
+        <td>{{ r.suggestions_fired or "" }}</td>
+        <td>
+          {% if r.suggestions_fired %}{{ r.uptake }}/{{ r.suggestions_fired }}{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="mt-4 text-xs text-gray-500">
+  Cost estimates use public Anthropic list prices per million tokens. Cache reads price at ~10% of fresh input. Suggestion uptake counts a hit when /&lt;skill&gt; appears in the same session within an hour of the suggestion firing.
+</div>
+
+{% endblock %}

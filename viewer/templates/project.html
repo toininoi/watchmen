@@ -9,6 +9,7 @@
     <div class="text-sm text-gray-600 mt-1 font-mono">{{ project.source_repo|replace("/Users/batuhanaktas", "~") }}</div>
   </div>
   <div class="text-right space-y-1">
+    <div><a href="/p/{{ project.project_key }}/metrics" class="text-sm text-indigo-600 hover:underline">View metrics →</a></div>
     <div><a href="/p/{{ project.project_key }}/runs" class="text-sm text-indigo-600 hover:underline">View curator runs →</a></div>
     <div><a href="/p/{{ project.project_key }}/thesis" class="text-sm text-indigo-600 hover:underline">View thesis →</a></div>
   </div>

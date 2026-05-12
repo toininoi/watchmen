@@ -25,6 +25,7 @@ WATCHMEN = Path.home() / ".watchmen"
 INDEX_DB = WATCHMEN / "skill_index.db"
 PROJECTS_INDEX = WATCHMEN / "projects.json"
 STATE_DIR = WATCHMEN / "state"
+SUGGESTIONS_LOG = WATCHMEN / "suggestions.jsonl"
 
 # BM25 returns negative numbers; more negative = more relevant. -0.5 keeps the
 # bar fairly high; tune as we observe false positives.
@@ -139,13 +140,32 @@ def main() -> int:
         write_suggestion(project_key, None)
         return 0
 
-    write_suggestion(project_key, {
+    suggestion = {
         "schema": 1,
         "ts": time.strftime("%Y-%m-%dT%H:%M"),
         "skill_slug": skill_slug,
         "score": round(score, 3),
         "prompt_excerpt": prompt[:140] + ("…" if len(prompt) > 140 else ""),
-    })
+    }
+    write_suggestion(project_key, suggestion)
+
+    # Append-only audit log for the metrics aggregator. Each suggestion fire is
+    # one JSON line; the aggregator joins with subsequent prompts to compute
+    # uptake. Include session_id so we can correlate within a session window.
+    try:
+        SUGGESTIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with SUGGESTIONS_LOG.open("a") as fh:
+            fh.write(json.dumps({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "project_key": project_key,
+                "session_id": evt.get("session_id"),
+                "skill_slug": skill_slug,
+                "score": round(score, 3),
+                "prompt_excerpt": suggestion["prompt_excerpt"],
+            }) + "\n")
+    except OSError:
+        pass
+
     return 0
 
 
