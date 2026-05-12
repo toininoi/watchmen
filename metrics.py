@@ -22,43 +22,72 @@ ROOT = Path(__file__).parent
 CORPUS_DB = ROOT / "corpus.db"
 SUGGESTIONS_LOG = Path.home() / ".watchmen" / "suggestions.jsonl"
 
-# Per 1M tokens. Match by case-insensitive substring on model id.
-# Order matters: first match wins; put most specific patterns first.
-MODEL_PRICES: list[tuple[str, tuple[float, float, float, float]]] = [
-    # (substr,    (input,  cache_create, cache_read, output))
-    ("opus-4",    (15.00,  18.75,        1.50,       75.00)),
-    ("opus",      (15.00,  18.75,        1.50,       75.00)),
-    ("sonnet-4",  (3.00,   3.75,         0.30,       15.00)),
-    ("sonnet",    (3.00,   3.75,         0.30,       15.00)),
-    ("haiku-4",   (0.80,   1.00,         0.08,       4.00)),
-    ("haiku",     (0.80,   1.00,         0.08,       4.00)),
-]
-DEFAULT_PRICE = (3.00, 3.75, 0.30, 15.00)  # fall back to sonnet pricing
+# Per 1M tokens. Source: https://platform.claude.com/docs/en/about-claude/pricing
+# Tuple shape: (input, cache_write_5m, cache_write_1h, cache_read, output).
+# Last verified: 2026-05-12.
+MODEL_PRICES: dict[str, tuple[float, float, float, float, float]] = {
+    # Opus 4.5/4.6/4.7 share the new (cheaper) pricing.
+    "opus-4.7":  (5.00,  6.25,  10.00, 0.50, 25.00),
+    "opus-4.6":  (5.00,  6.25,  10.00, 0.50, 25.00),
+    "opus-4.5":  (5.00,  6.25,  10.00, 0.50, 25.00),
+    # Older Opus 4 / 4.1 keep the previous higher rates.
+    "opus-4.1":  (15.00, 18.75, 30.00, 1.50, 75.00),
+    "opus-4":    (15.00, 18.75, 30.00, 1.50, 75.00),
+    # Sonnet family (4 / 4.5 / 4.6 all identical).
+    "sonnet-4.6":(3.00,  3.75,  6.00,  0.30, 15.00),
+    "sonnet-4.5":(3.00,  3.75,  6.00,  0.30, 15.00),
+    "sonnet-4":  (3.00,  3.75,  6.00,  0.30, 15.00),
+    # Haiku family — 4.5 jumped from older 3.5 pricing.
+    "haiku-4.5": (1.00,  1.25,  2.00,  0.10, 5.00),
+    "haiku-3.5": (0.80,  1.00,  1.60,  0.08, 4.00),
+}
+DEFAULT_PRICE = MODEL_PRICES["sonnet-4.6"]
 
 
-def price_for_model(model: str | None) -> tuple[float, float, float, float]:
+_VERSION_DASH = re.compile(r"(opus|sonnet|haiku)-(\d+)-(\d+)\b")
+
+
+def price_for_model(model: str | None) -> tuple[float, float, float, float, float]:
+    """Match by lowercase substring. Longest key wins, so 'opus-4.7' matches
+    before 'opus-4'. Anthropic API model names use dashes between version
+    components ('claude-opus-4-7'), so we first normalize 'X-major-minor' to
+    'X-major.minor' to match our dot-separated keys. Falls back to family
+    default, then sonnet."""
     if not model:
         return DEFAULT_PRICE
     m = model.lower()
-    for substr, prices in MODEL_PRICES:
-        if substr in m:
-            return prices
+    m = _VERSION_DASH.sub(lambda x: f"{x.group(1)}-{x.group(2)}.{x.group(3)}", m)
+    for key in sorted(MODEL_PRICES.keys(), key=len, reverse=True):
+        if key in m:
+            return MODEL_PRICES[key]
+    if "opus" in m:
+        return MODEL_PRICES["opus-4.7"]
+    if "sonnet" in m:
+        return MODEL_PRICES["sonnet-4.6"]
+    if "haiku" in m:
+        return MODEL_PRICES["haiku-4.5"]
     return DEFAULT_PRICE
 
 
-def session_cost_usd(
+def turn_cost_usd(
     model: str | None,
     input_tokens: int,
-    cache_creation_tokens: int,
-    cache_read_tokens: int,
+    cache_creation_5m: int,
+    cache_creation_1h: int,
+    cache_read: int,
     output_tokens: int,
 ) -> float:
-    p_in, p_cc, p_cr, p_out = price_for_model(model)
+    """Cost for one assistant turn, in USD. Per-turn attribution means we use
+    THIS turn's model — not the session's dominant model — which matters when
+    a session spans multiple models (e.g. Opus for planning, Sonnet for grunt
+    work)."""
+    p_in, p_5m, p_1h, p_cr, p_out = price_for_model(model)
     return (
-        (input_tokens * p_in)
-        + (cache_creation_tokens * p_cc)
-        + (cache_read_tokens * p_cr)
-        + (output_tokens * p_out)
+        input_tokens * p_in
+        + cache_creation_5m * p_5m
+        + cache_creation_1h * p_1h
+        + cache_read * p_cr
+        + output_tokens * p_out
     ) / 1_000_000
 
 
@@ -111,7 +140,7 @@ def daily_metrics(project_key: str, days: int = 30) -> list[dict]:
         rows = conn.execute(
             """SELECT session_id, started_at, ended_at, user_prompt_count,
                       tool_error_count, input_tokens, cache_creation_tokens,
-                      cache_read_tokens, output_tokens, model_dominant
+                      cache_read_tokens, output_tokens, model_dominant, cost_usd
                FROM sessions
                WHERE project_dir = ? AND is_subagent = 0""",
             (project_dir,),
@@ -130,13 +159,8 @@ def daily_metrics(project_key: str, days: int = 30) -> list[dict]:
         bucket["cache_creation_tokens"] += r["cache_creation_tokens"] or 0
         bucket["cache_read_tokens"] += r["cache_read_tokens"] or 0
         bucket["output_tokens"] += r["output_tokens"] or 0
-        bucket["cost_usd"] += session_cost_usd(
-            r["model_dominant"],
-            r["input_tokens"] or 0,
-            r["cache_creation_tokens"] or 0,
-            r["cache_read_tokens"] or 0,
-            r["output_tokens"] or 0,
-        )
+        # cost is per-turn-summed at scan time; use the stored value if present.
+        bucket["cost_usd"] += (r["cost_usd"] if r["cost_usd"] is not None else 0.0)
 
     # 2. Pull suggestions for this project from the log, group by local date.
     suggestions = _load_suggestions(project_key)
@@ -314,7 +338,7 @@ def daily_metrics_all(days: int = 30, tracked_only: bool = False) -> list[dict]:
             conn.row_factory = sqlite3.Row
             base_sql = """SELECT session_id, started_at, user_prompt_count, tool_error_count,
                                   input_tokens, cache_creation_tokens, cache_read_tokens,
-                                  output_tokens, model_dominant
+                                  output_tokens, model_dominant, cost_usd
                            FROM sessions
                            WHERE is_subagent = 0
                              AND date(started_at, 'localtime') >= ?"""
@@ -342,13 +366,7 @@ def daily_metrics_all(days: int = 30, tracked_only: bool = False) -> list[dict]:
             b["cache_creation_tokens"] += r["cache_creation_tokens"] or 0
             b["cache_read_tokens"] += r["cache_read_tokens"] or 0
             b["output_tokens"] += r["output_tokens"] or 0
-            b["cost_usd"] += session_cost_usd(
-                r["model_dominant"],
-                r["input_tokens"] or 0,
-                r["cache_creation_tokens"] or 0,
-                r["cache_read_tokens"] or 0,
-                r["output_tokens"] or 0,
-            )
+            b["cost_usd"] += (r["cost_usd"] if r["cost_usd"] is not None else 0.0)
 
     # Suggestions log — already partitioned by project_key, but we sum all.
     if SUGGESTIONS_LOG.exists():

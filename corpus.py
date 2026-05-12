@@ -43,7 +43,8 @@ def init_db() -> sqlite3.Connection:
             cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
-            model_dominant TEXT
+            model_dominant TEXT,
+            cost_usd REAL NOT NULL DEFAULT 0
         );
         CREATE INDEX idx_sessions_project ON sessions(project_dir);
         CREATE INDEX idx_sessions_subagent ON sessions(is_subagent);
@@ -72,6 +73,20 @@ def init_db() -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def _turn_cost_usd(
+    model: str | None,
+    input_tokens: int,
+    cache_5m: int,
+    cache_1h: int,
+    cache_read: int,
+    output_tokens: int,
+) -> float:
+    """Per-turn cost in USD. Imports lazily from metrics so the price table is
+    defined in exactly one place."""
+    from metrics import turn_cost_usd
+    return turn_cost_usd(model, input_tokens, cache_5m, cache_1h, cache_read, output_tokens)
 
 
 def parse_iso(ts: str | None):
@@ -105,6 +120,7 @@ def scan_transcript(path: Path, project_dir: str, is_subagent: bool, parent_sid:
         "cache_read_tokens": 0,
         "output_tokens": 0,
         "model_dominant": None,
+        "cost_usd": 0.0,
     }
     prompts: list = []
     tool_calls: list = []
@@ -190,10 +206,20 @@ def scan_transcript(path: Path, project_dir: str, is_subagent: bool, parent_sid:
                     cc_t = int(usage.get("cache_creation_input_tokens") or 0)
                     cr_t = int(usage.get("cache_read_input_tokens") or 0)
                     out_t = int(usage.get("output_tokens") or 0)
+                    # Split cache creation into 5m vs 1h when the breakdown is available.
+                    cache_creation = usage.get("cache_creation") or {}
+                    cc_5m = int(cache_creation.get("ephemeral_5m_input_tokens") or 0) if isinstance(cache_creation, dict) else 0
+                    cc_1h = int(cache_creation.get("ephemeral_1h_input_tokens") or 0) if isinstance(cache_creation, dict) else 0
+                    # If granular fields are absent but the legacy total is set, assume 5m
+                    # (most common default). Otherwise the breakdown wins.
+                    if cc_5m + cc_1h == 0 and cc_t > 0:
+                        cc_5m = cc_t
                     session["input_tokens"] += in_t
                     session["cache_creation_tokens"] += cc_t
                     session["cache_read_tokens"] += cr_t
                     session["output_tokens"] += out_t
+                    # Per-turn cost: this turn's actual model, not the session's dominant.
+                    session["cost_usd"] += _turn_cost_usd(model, in_t, cc_5m, cc_1h, cr_t, out_t)
                     if model:
                         model_output_tokens[model] = model_output_tokens.get(model, 0) + out_t
                 if isinstance(content, list):
@@ -269,11 +295,11 @@ def scan_all() -> None:
                (session_id, project_dir, transcript_path, started_at, ended_at, duration_seconds,
                 is_subagent, parent_session_id, message_count, user_prompt_count,
                 assistant_text_count, assistant_thinking_count, tool_use_count, tool_error_count, models,
-                input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, model_dominant)
+                input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, model_dominant, cost_usd)
                VALUES (:session_id, :project_dir, :transcript_path, :started_at, :ended_at, :duration_seconds,
                        :is_subagent, :parent_session_id, :message_count, :user_prompt_count,
                        :assistant_text_count, :assistant_thinking_count, :tool_use_count, :tool_error_count, :models,
-                       :input_tokens, :cache_creation_tokens, :cache_read_tokens, :output_tokens, :model_dominant)""",
+                       :input_tokens, :cache_creation_tokens, :cache_read_tokens, :output_tokens, :model_dominant, :cost_usd)""",
             session,
         )
         if prompts:
