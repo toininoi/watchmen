@@ -282,10 +282,26 @@ def summarize_window(rows: list[dict], days: int) -> dict:
     }
 
 
-def daily_metrics_all(days: int = 30) -> list[dict]:
-    """Aggregated daily metrics across every is_subagent=0 session in the corpus
-    (not just tracked projects). Suggestions come from the log (which only has
-    entries for tracked projects, but the aggregate counter is fine either way)."""
+def _tracked_project_dirs() -> list[str]:
+    """Encoded project_dirs for every tracked project. Used to filter the
+    aggregated views down to 'tracked only' when the toggle is on."""
+    state_db = ROOT / "state.db"
+    if not state_db.exists():
+        return []
+    try:
+        with sqlite3.connect(str(state_db)) as conn:
+            rows = conn.execute(
+                "SELECT source_repo FROM projects WHERE source_repo IS NOT NULL"
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    return ["-" + r[0].lstrip("/").replace("/", "-") for r in rows if r[0]]
+
+
+def daily_metrics_all(days: int = 30, tracked_only: bool = False) -> list[dict]:
+    """Aggregated daily metrics across every is_subagent=0 session in the corpus.
+    Set tracked_only=True to restrict to projects in state.db. Suggestions come
+    from the log (which only has tracked projects, so they're unchanged either way)."""
     today = date.today()
     cutoff = today - timedelta(days=days - 1)
     by_day: dict[str, dict] = {}
@@ -296,15 +312,24 @@ def daily_metrics_all(days: int = 30) -> list[dict]:
     if CORPUS_DB.exists():
         with sqlite3.connect(str(CORPUS_DB)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT session_id, started_at, user_prompt_count, tool_error_count,
-                          input_tokens, cache_creation_tokens, cache_read_tokens,
-                          output_tokens, model_dominant
-                   FROM sessions
-                   WHERE is_subagent = 0
-                     AND date(started_at, 'localtime') >= ?"""
-                , (cutoff.isoformat(),),
-            ).fetchall()
+            base_sql = """SELECT session_id, started_at, user_prompt_count, tool_error_count,
+                                  input_tokens, cache_creation_tokens, cache_read_tokens,
+                                  output_tokens, model_dominant
+                           FROM sessions
+                           WHERE is_subagent = 0
+                             AND date(started_at, 'localtime') >= ?"""
+            params: list = [cutoff.isoformat()]
+            if tracked_only:
+                tracked_dirs = _tracked_project_dirs()
+                if not tracked_dirs:
+                    rows = []
+                else:
+                    placeholders = ",".join("?" for _ in tracked_dirs)
+                    base_sql += f" AND project_dir IN ({placeholders})"
+                    params.extend(tracked_dirs)
+                    rows = conn.execute(base_sql, params).fetchall()
+            else:
+                rows = conn.execute(base_sql, params).fetchall()
         for r in rows:
             d_str = _local_date(r["started_at"])
             if not d_str or d_str not in by_day:
@@ -357,9 +382,8 @@ def daily_metrics_all(days: int = 30) -> list[dict]:
     return out
 
 
-def activity_calendar_all(weeks: int = 26) -> list[tuple[str, int]]:
-    """Same shape as activity_calendar but unfiltered — every Claude Code prompt
-    you've submitted across every project, not just tracked ones."""
+def activity_calendar_all(weeks: int = 26, tracked_only: bool = False) -> list[tuple[str, int]]:
+    """Calendar across all activity, optionally restricted to tracked projects."""
     if not CORPUS_DB.exists():
         return []
     today = date.today()
@@ -367,17 +391,24 @@ def activity_calendar_all(weeks: int = 26) -> list[tuple[str, int]]:
     end = today
     start = today - timedelta(days=(weeks * 7 - 1 - to_sunday))
 
+    sql = """SELECT date(p.timestamp, 'localtime') AS d, COUNT(*) AS n
+             FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+             WHERE s.is_subagent = 0
+               AND date(p.timestamp, 'localtime') >= ?
+               AND date(p.timestamp, 'localtime') <= ?"""
+    params: list = [start.isoformat(), end.isoformat()]
+    if tracked_only:
+        tracked_dirs = _tracked_project_dirs()
+        if not tracked_dirs:
+            return [((start + timedelta(days=i)).isoformat(), 0) for i in range(weeks * 7) if start + timedelta(days=i) <= end]
+        placeholders = ",".join("?" for _ in tracked_dirs)
+        sql += f" AND s.project_dir IN ({placeholders})"
+        params.extend(tracked_dirs)
+    sql += " GROUP BY date(p.timestamp, 'localtime')"
+
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """SELECT date(p.timestamp, 'localtime') AS d, COUNT(*) AS n
-               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.is_subagent = 0
-                 AND date(p.timestamp, 'localtime') >= ?
-                 AND date(p.timestamp, 'localtime') <= ?
-               GROUP BY date(p.timestamp, 'localtime')""",
-            (start.isoformat(), end.isoformat()),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     counts = {r["d"]: r["n"] for r in rows}
     out = []
     for i in range(weeks * 7):
@@ -388,24 +419,31 @@ def activity_calendar_all(weeks: int = 26) -> list[tuple[str, int]]:
     return out
 
 
-def activity_by_hour_dow_all(days: int = 90) -> list[list[int]]:
-    """Hour-of-day × day-of-week heatmap across all Claude Code activity."""
+def activity_by_hour_dow_all(days: int = 90, tracked_only: bool = False) -> list[list[int]]:
+    """Hour-of-day × day-of-week heatmap, optionally restricted to tracked projects."""
     if not CORPUS_DB.exists():
         return [[0] * 24 for _ in range(7)]
     cutoff = (date.today() - timedelta(days=days)).isoformat()
 
+    sql = """SELECT CAST(strftime('%w', p.timestamp, 'localtime') AS INT) AS dow,
+                    CAST(strftime('%H', p.timestamp, 'localtime') AS INT) AS hr,
+                    COUNT(*) AS n
+             FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+             WHERE s.is_subagent = 0
+               AND date(p.timestamp, 'localtime') >= ?"""
+    params: list = [cutoff]
+    if tracked_only:
+        tracked_dirs = _tracked_project_dirs()
+        if not tracked_dirs:
+            return [[0] * 24 for _ in range(7)]
+        placeholders = ",".join("?" for _ in tracked_dirs)
+        sql += f" AND s.project_dir IN ({placeholders})"
+        params.extend(tracked_dirs)
+    sql += " GROUP BY dow, hr"
+
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """SELECT CAST(strftime('%w', p.timestamp, 'localtime') AS INT) AS dow,
-                      CAST(strftime('%H', p.timestamp, 'localtime') AS INT) AS hr,
-                      COUNT(*) AS n
-               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.is_subagent = 0
-                 AND date(p.timestamp, 'localtime') >= ?
-               GROUP BY dow, hr""",
-            (cutoff,),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     m = [[0] * 24 for _ in range(7)]
     for r in rows:
         if r["dow"] is None or r["hr"] is None:

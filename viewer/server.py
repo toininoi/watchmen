@@ -231,10 +231,11 @@ def runs_page(request: Request):
 
 
 @app.get("/metrics", response_class=HTMLResponse)
-def metrics_all(request: Request):
+def metrics_all(request: Request, tracked: int = 0):
     import metrics as _metrics
 
-    rows = _metrics.daily_metrics_all(days=30)
+    tracked_only = bool(tracked)
+    rows = _metrics.daily_metrics_all(days=30, tracked_only=tracked_only)
     last7 = _metrics.summarize_window(rows, 7)
     last30 = _metrics.summarize_window(rows, 30)
     series = list(reversed(rows))
@@ -247,8 +248,8 @@ def metrics_all(request: Request):
         "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
         "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
     }
-    calendar = _metrics.activity_calendar_all(weeks=26)
-    hour_dow = _metrics.activity_by_hour_dow_all(days=90)
+    calendar = _metrics.activity_calendar_all(weeks=26, tracked_only=tracked_only)
+    hour_dow = _metrics.activity_by_hour_dow_all(days=90, tracked_only=tracked_only)
     calendar_svg = _metrics.calendar_heatmap_svg(calendar, weeks=26)
     hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
     peaks = []
@@ -268,6 +269,7 @@ def metrics_all(request: Request):
         "hour_dow_svg": hour_dow_svg,
         "peaks": peaks,
         "per_project": per_project,
+        "tracked_only": tracked_only,
     })
 
 
