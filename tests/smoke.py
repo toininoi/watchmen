@@ -660,6 +660,65 @@ def test_only_input_tools_are_recorded():
     assert "append_curation_log" not in INPUT_TOOLS
 
 
+# ─── Session filtering tests ────────────────────────────────────────────────
+
+
+def test_substantive_filter_drops_trivial_sessions():
+    """The filter keeps sessions with any tool use OR with ≥4 messages and ≥2
+    user prompts. Trivial aborts (3-message, 0-tool, single-prompt) get dropped.
+    Calibration on kai-hooks-mvp showed this drops 15% of main sessions, all
+    aborts. If this regression-tests the SQL drift, the boundary cases below
+    will catch it."""
+    import tempfile
+    import sqlite3
+    from corpus_filters import substantive_filter
+    with tempfile.TemporaryDirectory() as td:
+        db = Path(td) / "test.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("""CREATE TABLE sessions (
+            id INTEGER PRIMARY KEY,
+            label TEXT,
+            tool_use_count INTEGER,
+            message_count INTEGER,
+            user_prompt_count INTEGER,
+            is_subagent INTEGER DEFAULT 0
+        )""")
+        # (label, tools, msgs, prompts, expected_substantive)
+        cases = [
+            ("aborted-3msg-notools",    0, 3, 3, False),  # the typical filter target
+            ("single-prompt-no-tools",  0, 2, 1, False),
+            ("two-prompt-short-chat",   0, 3, 2, False),  # below 4-msg threshold
+            ("4msg-2prompt-no-tools",   0, 4, 2, True),   # boundary — keeps
+            ("one-tool-only",           1, 2, 1, True),   # tool fires → substantive
+            ("realistic-work",         15, 30, 5, True),
+            ("zero-msg",                0, 0, 0, False),
+        ]
+        for i, (label, tools, msgs, prompts, _) in enumerate(cases):
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, 0)",
+                         (i, label, tools, msgs, prompts))
+        conn.commit()
+        sub = substantive_filter("s")
+        rows = conn.execute(
+            f"SELECT label FROM sessions s WHERE {sub} ORDER BY id"
+        ).fetchall()
+        got = {r[0] for r in rows}
+        expected = {label for label, _, _, _, want in cases if want}
+        assert got == expected, f"filter mismatch.\n  got: {got}\n  want: {expected}"
+        conn.close()
+
+
+def test_substantive_filter_handles_alias_choices():
+    """The filter accepts an alias string for the sessions table. Default 's'
+    matches the existing JOIN convention in analyze.py + state.py. Empty alias
+    works for unqualified column queries."""
+    from corpus_filters import substantive_filter
+    s = substantive_filter("s")
+    assert "s.tool_use_count" in s
+    assert "s.message_count" in s
+    bare = substantive_filter("")
+    assert "tool_use_count" in bare and ".tool_use_count" not in bare
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -730,6 +789,10 @@ def main() -> int:
     check("invalidate_all clears every cache file",   test_invalidate_all_clears_every_cache_file)
     check("only input tools are recorded",            test_only_input_tools_are_recorded)
     check("stage 2 parallel dispatcher runs concurrently", test_stage_2_parallel_dispatcher_preserves_order_independence)
+    print()
+    print("Session filtering:")
+    check("substantive filter drops trivial sessions",  test_substantive_filter_drops_trivial_sessions)
+    check("substantive filter accepts alias choices",   test_substantive_filter_handles_alias_choices)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)

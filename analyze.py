@@ -22,6 +22,8 @@ from textwrap import dedent
 
 import httpx
 
+from corpus_filters import substantive_filter
+
 ROOT = Path(__file__).parent
 CORPUS_DB = ROOT / "corpus.db"
 ANALYSES_DIR = ROOT / "analyses"
@@ -41,7 +43,7 @@ def load_api_key() -> str:
 def tool_list_activity_on(date: str, project_substr: str | None = None):
     conn = sqlite3.connect(CORPUS_DB)
     conn.row_factory = sqlite3.Row
-    where = ["substr(p.timestamp, 1, 10) = ?", "s.is_subagent = 0"]
+    where = ["substr(p.timestamp, 1, 10) = ?", "s.is_subagent = 0", substantive_filter("s")]
     params: list = [date]
     if project_substr:
         where.append("s.project_dir LIKE ?")
@@ -368,7 +370,7 @@ def main() -> None:
 
     conn = sqlite3.connect(CORPUS_DB)
     conn.row_factory = sqlite3.Row
-    where = ["s.is_subagent = 0"]
+    where = ["s.is_subagent = 0", substantive_filter("s")]
     params: list = []
     if args.project:
         where.append("s.project_dir LIKE ?")

@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from corpus_filters import substantive_filter
+
 ROOT = Path(__file__).parent
 STATE_DB = ROOT / "state.db"
 
@@ -171,10 +173,11 @@ def get_project_progress(project_key: str) -> dict:
     cc = sqlite3.connect(corpus_db)
     cc.row_factory = sqlite3.Row
 
+    sub = substantive_filter("s")
     last_corpus_day = cc.execute(
-        """SELECT MAX(substr(p.timestamp, 1, 10)) AS d
+        f"""SELECT MAX(substr(p.timestamp, 1, 10)) AS d
            FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-           WHERE s.project_dir LIKE ? AND s.is_subagent = 0""",
+           WHERE s.project_dir LIKE ? AND s.is_subagent = 0 AND {sub}""",
         (f"%{project_key}%",),
     ).fetchone()["d"]
 
@@ -182,17 +185,17 @@ def get_project_progress(project_key: str) -> dict:
     new_prompts = 0
     if last_analyst_day:
         new_prompts = cc.execute(
-            """SELECT COUNT(*) AS n
+            f"""SELECT COUNT(*) AS n
                FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.project_dir LIKE ? AND s.is_subagent = 0
+               WHERE s.project_dir LIKE ? AND s.is_subagent = 0 AND {sub}
                  AND substr(p.timestamp, 1, 10) > ?""",
             (f"%{project_key}%", last_analyst_day),
         ).fetchone()["n"]
     else:
         new_prompts = cc.execute(
-            """SELECT COUNT(*) AS n
+            f"""SELECT COUNT(*) AS n
                FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.project_dir LIKE ? AND s.is_subagent = 0""",
+               WHERE s.project_dir LIKE ? AND s.is_subagent = 0 AND {sub}""",
             (f"%{project_key}%",),
         ).fetchone()["n"]
     cc.close()
