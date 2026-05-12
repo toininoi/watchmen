@@ -78,13 +78,13 @@
 </div>
 
 <h2 class="text-lg font-semibold mb-3">When you work</h2>
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-  <div class="stat-card overflow-x-auto">
+<div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-6">
+  <div class="stat-card overflow-x-auto lg:col-span-2">
     <div class="label">Last 26 weeks (all projects)</div>
     <div class="sub mb-2">Prompt activity per day</div>
     {{ calendar_svg|safe }}
   </div>
-  <div class="stat-card overflow-x-auto">
+  <div class="stat-card overflow-x-auto lg:col-span-3">
     <div class="label">Day × hour (last 90 days)</div>
     <div class="sub mb-2">
       {% if peaks %}
