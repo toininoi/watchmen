@@ -29,6 +29,7 @@ from textwrap import dedent
 import httpx
 
 from agent import Agent, load_api_key
+from cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers
 from tools_lib import make_tools
 
 ROOT = Path(__file__).parent
@@ -299,11 +300,13 @@ def make_critic_runner(client: httpx.Client, model: str, project_key: str, log_p
 
 # ─── Stage builders ─────────────────────────────────────────────────────────
 
-def build_finder_agent(client, model, project_key, source_repo, log_path):
+def build_finder_agent(client, model, project_key, source_repo, log_path, recorder: ReadRecorder | None = None):
     specs, handlers = make_tools(source_repo=source_repo, project_key=project_key)
     keep = ["query_corpus", "read_thesis_section", "list_repo_files", "read_repo_file"]
     finder_specs = [s for s in specs if s["function"]["name"] in keep]
     finder_handlers = {k: handlers[k] for k in keep}
+    if recorder is not None:
+        finder_handlers = wrap_handlers(finder_handlers, recorder)
     finder_specs.append({"type": "function", "function": {
         "name": "finish_candidates",
         "description": "Submit the filtered list of skill candidates.",
@@ -337,7 +340,7 @@ def build_finder_agent(client, model, project_key, source_repo, log_path):
     )
 
 
-def build_skill_curator(client, model, project_key, source_repo, candidate, log_path, run_critic):
+def build_skill_curator(client, model, project_key, source_repo, candidate, log_path, run_critic, recorder: ReadRecorder | None = None):
     specs, handlers = make_tools(source_repo=source_repo, project_key=project_key)
     slug = candidate["slug"]
     expected_prefix = f"skills/{slug}/"
@@ -400,6 +403,9 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
 
     handlers["run_critic"] = run_critic
 
+    if recorder is not None:
+        handlers = wrap_handlers(handlers, recorder)
+
     sys_prompt = SKILL_CURATOR_PROMPT_TEMPLATE.format(
         skill_name=candidate["name"],
         skill_description=candidate["description"],
@@ -421,7 +427,7 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
     )
 
 
-def build_claude_md_author(client, model, project_key, source_repo, log_path, run_critic):
+def build_claude_md_author(client, model, project_key, source_repo, log_path, run_critic, recorder: ReadRecorder | None = None):
     specs, handlers = make_tools(source_repo=source_repo, project_key=project_key)
     specs = list(specs)
     specs.append({"type": "function", "function": {
@@ -441,6 +447,9 @@ def build_claude_md_author(client, model, project_key, source_repo, log_path, ru
     }})
     handlers = dict(handlers)
     handlers["run_critic"] = run_critic
+
+    if recorder is not None:
+        handlers = wrap_handlers(handlers, recorder)
 
     return Agent(
         name="claude_md_author",
@@ -773,6 +782,7 @@ def main():
     parser.add_argument("--max-skills", type=int, default=8)
     parser.add_argument("--skip-finder", action="store_true", help="reuse existing _candidates.json")
     parser.add_argument("--skip-skills", action="store_true", help="skip stage 2 — assume kai_claude/<project>/skills/* is already populated")
+    parser.add_argument("--regen-all", action="store_true", help="invalidate every input cache for this project, forcing full re-curation")
     args = parser.parse_args()
 
     api_key = load_api_key()
@@ -780,6 +790,15 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "_run.log"
     log_path.write_text("", encoding="utf-8")  # truncate
+
+    if args.regen_all:
+        removed = invalidate_all(out_dir)
+        print(f"   --regen-all: invalidated {removed} cache file(s)", flush=True)
+
+    # Build a separate, un-instrumented handler set for cache replay. We rebuild
+    # it lazily per stage (Stage 2 has per-skill scoped handlers) — but for
+    # Stages 1 and 3 the shared set is enough.
+    _, replay_handlers = make_tools(source_repo=args.repo, project_key=args.project)
 
     print(f"== curate {args.project} (repo={args.repo}, model={args.model})", flush=True)
     print(f"   output → kai_claude/{args.project}/  log → {log_path.name}", flush=True)
@@ -789,13 +808,19 @@ def main():
 
         # ─── Stage 1: candidate-finder ────────────────────────────────────────
         candidates_path = out_dir / "_candidates.json"
+        candidates_cache = out_dir / ".candidates.inputs.json"
+        finder_recorder = ReadRecorder()
+
         if args.skip_finder and candidates_path.exists():
             print("[1/4] skipping finder, reusing _candidates.json", flush=True)
+            candidates = json.loads(candidates_path.read_text())
+        elif candidates_path.exists() and cache_hit(candidates_cache, replay_handlers):
+            print("[1/4] candidate-finder: cache hit — reusing _candidates.json", flush=True)
             candidates = json.loads(candidates_path.read_text())
         else:
             print("[1/4] candidate-finder...", flush=True)
             t0 = time.time()
-            finder = build_finder_agent(client, args.model, args.project, args.repo, log_path)
+            finder = build_finder_agent(client, args.model, args.project, args.repo, log_path, finder_recorder)
             result, _ = finder.run(
                 f"Identify the strongest procedural skill candidates for project '{args.project}' "
                 f"located at '{args.repo}'. Verify each has artifacts. Cap at {args.max_skills}.",
@@ -803,6 +828,10 @@ def main():
             )
             candidates = (result or {}).get("candidates", [])[: args.max_skills]
             candidates_path.write_text(json.dumps(candidates, indent=2))
+            # Persist read-log only on successful candidate emission (terminal tool fired).
+            if candidates:
+                from cache import write_cache
+                write_cache(candidates_cache, finder_recorder)
             print(f"      → {len(candidates)} candidates in {time.time()-t0:.1f}s", flush=True)
             for c in candidates:
                 print(f"         - {c.get('slug', '?'):<35} {c.get('description', '')[:80]}", flush=True)
@@ -812,7 +841,9 @@ def main():
             return
 
         # ─── Stage 2: per-skill curator ───────────────────────────────────────
+        from cache import write_cache
         completed: list[str] = []
+        cache_hits = 0
         if args.skip_skills:
             existing_skills_dir = out_dir / "skills"
             if existing_skills_dir.exists():
@@ -827,34 +858,54 @@ def main():
             if not slug:
                 print(f"      [{i}] skipping — no slug", flush=True)
                 continue
+            skill_dir = out_dir / "skills" / slug
+            skill_cache = skill_dir / ".inputs.json"
+            # Cache hit only if the bundle exists AND all recorded reads still match.
+            if (skill_dir / "SKILL.md").exists() and cache_hit(skill_cache, replay_handlers):
+                completed.append(slug)
+                cache_hits += 1
+                print(f"      [{i}/{len(candidates)}] {slug}... cache hit", flush=True)
+                continue
             print(f"      [{i}/{len(candidates)}] {slug}...", end=" ", flush=True)
             t0 = time.time()
             try:
-                curator = build_skill_curator(client, args.model, args.project, args.repo, cand, log_path, run_critic)
+                skill_recorder = ReadRecorder()
+                curator = build_skill_curator(client, args.model, args.project, args.repo, cand, log_path, run_critic, skill_recorder)
                 result, _ = curator.run(
                     f"Author the skill bundle for '{cand['name']}'. Investigate, draft, run the critic, refine, finish.",
                     max_iter=45,
                 )
                 if result:
                     completed.append(slug)
+                    write_cache(skill_cache, skill_recorder)
                     print(f"done in {time.time()-t0:.1f}s — {result.get('summary', '')[:80]}", flush=True)
                 else:
                     print(f"no finish call in {time.time()-t0:.1f}s", flush=True)
             except Exception as e:
                 print(f"FAILED: {type(e).__name__}: {e}", flush=True)
+        if not args.skip_skills and cache_hits:
+            print(f"      stage 2 cache: {cache_hits}/{len(candidates)} skills reused", flush=True)
 
         # ─── Stage 3: claude.md author ────────────────────────────────────────
-        print("[3/4] claude.md author...", flush=True)
-        t0 = time.time()
-        try:
-            author = build_claude_md_author(client, args.model, args.project, args.repo, log_path, run_critic)
-            result, _ = author.run(
-                f"Author CLAUDE.md for '{args.project}'. {len(completed)} skills generated: {', '.join(completed)}.",
-                max_iter=30,
-            )
-            print(f"      done in {time.time()-t0:.1f}s — {(result or {}).get('summary', '')[:80]}", flush=True)
-        except Exception as e:
-            print(f"      FAILED: {type(e).__name__}: {e}", flush=True)
+        claude_md_path = out_dir / "CLAUDE.md"
+        claude_md_cache = out_dir / ".claude_md.inputs.json"
+        if claude_md_path.exists() and cache_hit(claude_md_cache, replay_handlers):
+            print("[3/4] claude.md author: cache hit — reusing CLAUDE.md", flush=True)
+        else:
+            print("[3/4] claude.md author...", flush=True)
+            t0 = time.time()
+            try:
+                claude_md_recorder = ReadRecorder()
+                author = build_claude_md_author(client, args.model, args.project, args.repo, log_path, run_critic, claude_md_recorder)
+                result, _ = author.run(
+                    f"Author CLAUDE.md for '{args.project}'. {len(completed)} skills generated: {', '.join(completed)}.",
+                    max_iter=30,
+                )
+                if result:
+                    write_cache(claude_md_cache, claude_md_recorder)
+                print(f"      done in {time.time()-t0:.1f}s — {(result or {}).get('summary', '')[:80]}", flush=True)
+            except Exception as e:
+                print(f"      FAILED: {type(e).__name__}: {e}", flush=True)
 
         # ─── Stage 4: write _index.md ─────────────────────────────────────────
         print("[4/4] writing _index.md...", flush=True)
