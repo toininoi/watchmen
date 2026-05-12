@@ -230,6 +230,47 @@ def runs_page(request: Request):
     })
 
 
+@app.get("/metrics", response_class=HTMLResponse)
+def metrics_all(request: Request):
+    import metrics as _metrics
+
+    rows = _metrics.daily_metrics_all(days=30)
+    last7 = _metrics.summarize_window(rows, 7)
+    last30 = _metrics.summarize_window(rows, 30)
+    series = list(reversed(rows))
+    sparks = {
+        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
+        "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
+        "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
+        "tool_errors":  _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
+        "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
+        "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
+    }
+    calendar = _metrics.activity_calendar_all(weeks=26)
+    hour_dow = _metrics.activity_by_hour_dow_all(days=90)
+    calendar_svg = _metrics.calendar_heatmap_svg(calendar, weeks=26)
+    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+    peaks = []
+    flat = [(dow, hr, hour_dow[dow][hr]) for dow in range(7) for hr in range(24)]
+    flat.sort(key=lambda t: t[2], reverse=True)
+    if flat and flat[0][2] > 0:
+        peak_dow, peak_hr, peak_n = flat[0]
+        peaks = [["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][peak_dow], f"{peak_hr:02d}:00", peak_n]
+    per_project = _metrics.per_project_totals(days=30)
+
+    return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
+        "rows": rows,
+        "last7": last7,
+        "last30": last30,
+        "sparks": sparks,
+        "calendar_svg": calendar_svg,
+        "hour_dow_svg": hour_dow_svg,
+        "peaks": peaks,
+        "per_project": per_project,
+    })
+
+
 @app.get("/p/{project_key}/metrics", response_class=HTMLResponse)
 def project_metrics(request: Request, project_key: str):
     import metrics as _metrics

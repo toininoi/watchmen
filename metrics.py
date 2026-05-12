@@ -282,6 +282,152 @@ def summarize_window(rows: list[dict], days: int) -> dict:
     }
 
 
+def daily_metrics_all(days: int = 30) -> list[dict]:
+    """Aggregated daily metrics across every is_subagent=0 session in the corpus
+    (not just tracked projects). Suggestions come from the log (which only has
+    entries for tracked projects, but the aggregate counter is fine either way)."""
+    today = date.today()
+    cutoff = today - timedelta(days=days - 1)
+    by_day: dict[str, dict] = {}
+    for i in range(days):
+        d_str = (cutoff + timedelta(days=i)).isoformat()
+        by_day[d_str] = _empty_bucket(d_str)
+
+    if CORPUS_DB.exists():
+        with sqlite3.connect(str(CORPUS_DB)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT session_id, started_at, user_prompt_count, tool_error_count,
+                          input_tokens, cache_creation_tokens, cache_read_tokens,
+                          output_tokens, model_dominant
+                   FROM sessions
+                   WHERE is_subagent = 0
+                     AND date(started_at, 'localtime') >= ?"""
+                , (cutoff.isoformat(),),
+            ).fetchall()
+        for r in rows:
+            d_str = _local_date(r["started_at"])
+            if not d_str or d_str not in by_day:
+                continue
+            b = by_day[d_str]
+            b["sessions"] += 1
+            b["prompts"] += r["user_prompt_count"] or 0
+            b["tool_errors"] += r["tool_error_count"] or 0
+            b["input_tokens"] += r["input_tokens"] or 0
+            b["cache_creation_tokens"] += r["cache_creation_tokens"] or 0
+            b["cache_read_tokens"] += r["cache_read_tokens"] or 0
+            b["output_tokens"] += r["output_tokens"] or 0
+            b["cost_usd"] += session_cost_usd(
+                r["model_dominant"],
+                r["input_tokens"] or 0,
+                r["cache_creation_tokens"] or 0,
+                r["cache_read_tokens"] or 0,
+                r["output_tokens"] or 0,
+            )
+
+    # Suggestions log — already partitioned by project_key, but we sum all.
+    if SUGGESTIONS_LOG.exists():
+        with SUGGESTIONS_LOG.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                d_str = _local_date(rec.get("ts"))
+                if not d_str or d_str not in by_day:
+                    continue
+                by_day[d_str]["suggestions_fired"] += 1
+                by_day[d_str]["_suggestion_records"].append(rec)
+        for b in by_day.values():
+            recs = b.pop("_suggestion_records", [])
+            if recs:
+                b["uptake"] = _count_uptake(recs)
+                b["uptake_rate"] = (
+                    b["uptake"] / b["suggestions_fired"] if b["suggestions_fired"] > 0 else 0.0
+                )
+
+    for b in by_day.values():
+        b.pop("_suggestion_records", None)
+
+    out = list(by_day.values())
+    out.sort(key=lambda b: b["date"], reverse=True)
+    return out
+
+
+def activity_calendar_all(weeks: int = 26) -> list[tuple[str, int]]:
+    """Same shape as activity_calendar but unfiltered — every Claude Code prompt
+    you've submitted across every project, not just tracked ones."""
+    if not CORPUS_DB.exists():
+        return []
+    today = date.today()
+    to_sunday = (today.weekday() + 1) % 7
+    end = today
+    start = today - timedelta(days=(weeks * 7 - 1 - to_sunday))
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT date(p.timestamp, 'localtime') AS d, COUNT(*) AS n
+               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+               WHERE s.is_subagent = 0
+                 AND date(p.timestamp, 'localtime') >= ?
+                 AND date(p.timestamp, 'localtime') <= ?
+               GROUP BY date(p.timestamp, 'localtime')""",
+            (start.isoformat(), end.isoformat()),
+        ).fetchall()
+    counts = {r["d"]: r["n"] for r in rows}
+    out = []
+    for i in range(weeks * 7):
+        d = start + timedelta(days=i)
+        if d > end:
+            break
+        out.append((d.isoformat(), counts.get(d.isoformat(), 0)))
+    return out
+
+
+def activity_by_hour_dow_all(days: int = 90) -> list[list[int]]:
+    """Hour-of-day × day-of-week heatmap across all Claude Code activity."""
+    if not CORPUS_DB.exists():
+        return [[0] * 24 for _ in range(7)]
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT CAST(strftime('%w', p.timestamp, 'localtime') AS INT) AS dow,
+                      CAST(strftime('%H', p.timestamp, 'localtime') AS INT) AS hr,
+                      COUNT(*) AS n
+               FROM prompts p JOIN sessions s ON p.session_id = s.session_id
+               WHERE s.is_subagent = 0
+                 AND date(p.timestamp, 'localtime') >= ?
+               GROUP BY dow, hr""",
+            (cutoff,),
+        ).fetchall()
+    m = [[0] * 24 for _ in range(7)]
+    for r in rows:
+        if r["dow"] is None or r["hr"] is None:
+            continue
+        m[r["dow"]][r["hr"]] = r["n"]
+    return m
+
+
+def per_project_totals(days: int = 30) -> list[dict]:
+    """Per-project rollup over the window, sorted by cost descending.
+    Used in the aggregated metrics page to show which projects drive the totals."""
+    import state as _state
+    out = []
+    for p in _state.list_projects():
+        rows = daily_metrics(p["project_key"], days=days)
+        total = summarize_window(rows, days)
+        total["project_key"] = p["project_key"]
+        out.append(total)
+    out.sort(key=lambda r: r["cost_usd"], reverse=True)
+    return out
+
+
 def activity_calendar(project_key: str, weeks: int = 26) -> list[tuple[str, int]]:
     """Per-day prompt counts for the last `weeks` weeks (Sunday-aligned).
     Returns [(date_iso, prompt_count)] in chronological order."""
