@@ -11,13 +11,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 HOOK_SCRIPT = (ROOT / "hooks" / "watchmen_observe.sh").resolve()
-BRIEF_SCRIPT = (ROOT / "hooks" / "watchmen_brief.sh").resolve()
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
 # All hook scripts watchmen installs. Keys used internally; values are absolute paths.
 WATCHMEN_SCRIPTS: dict[str, Path] = {
     "observe": HOOK_SCRIPT,
-    "brief": BRIEF_SCRIPT,
 }
 
 # Per-event: list of (script_key, matcher_or_None). matcher=None omits the matcher key
@@ -26,13 +24,22 @@ WATCHMEN_SCRIPTS: dict[str, Path] = {
 WATCHMEN_HOOKS: dict[str, list[tuple[str, str | None]]] = {
     "PreToolUse":       [("observe", "")],
     "PostToolUse":      [("observe", "")],
-    "SessionStart":     [("observe", None), ("brief", None)],
+    "SessionStart":     [("observe", None)],
     "SessionEnd":       [("observe", None)],
     "UserPromptSubmit": [("observe", None)],
     "Stop":             [("observe", None)],
     "SubagentStop":     [("observe", None)],
     "Notification":     [("observe", None)],
     "PreCompact":       [("observe", None)],
+}
+
+# Paths watchmen used to install but no longer ships. install/uninstall scrub
+# any stale entries here from the user's settings.json so a pull + reinstall
+# cleanly removes deprecated hooks without manual JSON editing.
+# Each entry is the absolute path the older release used to wire in.
+_LEGACY_HOOK_PATHS: set[str] = {
+    # Removed in 0.2.0 — macOS notification briefs.
+    str((ROOT / "hooks" / "watchmen_brief.sh").resolve()),
 }
 
 
@@ -54,6 +61,33 @@ def _backup() -> Path:
     return backup
 
 
+def _scrub_legacy_hooks(hooks: dict) -> int:
+    """Remove entries pointing at scripts watchmen no longer ships. Mutates
+    `hooks` in place. Returns the number of entries removed. Lets a
+    routine `watchmen hooks install` clean up after a retired script
+    (e.g., watchmen_brief.sh in 0.2.0) without the user needing to know."""
+    removed = 0
+    for event, entries in list(hooks.items()):
+        new_entries = []
+        for e in entries:
+            inner = [
+                h for h in e.get("hooks", [])
+                if h.get("command") not in _LEGACY_HOOK_PATHS
+            ]
+            if len(inner) != len(e.get("hooks", [])):
+                removed += (len(e.get("hooks", [])) - len(inner))
+            if inner:
+                new_e = dict(e)
+                new_e["hooks"] = inner
+                new_entries.append(new_e)
+            # else: drop the entry entirely if its only command was legacy
+        if new_entries:
+            hooks[event] = new_entries
+        else:
+            hooks.pop(event, None)
+    return removed
+
+
 def install() -> int:
     missing = [str(p) for p in WATCHMEN_SCRIPTS.values() if not p.exists()]
     if missing:
@@ -68,6 +102,12 @@ def install() -> int:
     backup_path = _backup()
     if backup_path.exists():
         print(f"backed up existing settings → {backup_path}")
+
+    # Scrub stale entries for hooks we used to ship but no longer do. Lets a
+    # pull + `watchmen hooks install` cleanly retire deprecated scripts.
+    legacy_removed = _scrub_legacy_hooks(hooks)
+    if legacy_removed:
+        print(f"removed {legacy_removed} stale hook entr(ies) for retired scripts")
 
     added = 0
     for event, scripts in WATCHMEN_HOOKS.items():
@@ -108,7 +148,11 @@ def uninstall() -> int:
     backup_path = _backup()
     print(f"backed up existing settings → {backup_path}")
 
-    watchmen_cmds = {str(p) for p in WATCHMEN_SCRIPTS.values()}
+    # Scrub both current scripts AND retired-but-still-referenced ones, so
+    # uninstall fully cleans up after older releases.
+    watchmen_cmds = (
+        {str(p) for p in WATCHMEN_SCRIPTS.values()} | _LEGACY_HOOK_PATHS
+    )
     removed = 0
     for event, entries in list(hooks.items()):
         new_entries = []

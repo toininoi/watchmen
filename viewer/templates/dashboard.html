@@ -2,6 +2,43 @@
 {% block title %}watchmen dashboard{% endblock %}
 {% block content %}
 
+{% if changelog_version and changelog_body_html %}
+<div id="watchmen-changelog-banner"
+     data-version="{{ changelog_version }}"
+     class="hidden mb-6 rounded-lg border border-amber-300 bg-amber-50 px-5 py-4 shadow-sm">
+  <div class="flex items-start justify-between gap-4">
+    <div class="text-sm text-amber-900">
+      <div class="font-semibold mb-1">◷ watchmen updated to v{{ changelog_version }}</div>
+      <div class="prose prose-sm prose-amber max-w-none">
+        {{ changelog_body_html | safe }}
+      </div>
+    </div>
+    <button id="watchmen-changelog-dismiss"
+            class="shrink-0 text-amber-700 hover:text-amber-900 text-sm font-medium">
+      Got it ✕
+    </button>
+  </div>
+</div>
+<script>
+  (function () {
+    var banner = document.getElementById('watchmen-changelog-banner');
+    if (!banner) return;
+    var v = banner.dataset.version;
+    var key = 'watchmen.lastSeenVersion';
+    if (localStorage.getItem(key) !== v) {
+      banner.classList.remove('hidden');
+    }
+    var btn = document.getElementById('watchmen-changelog-dismiss');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        localStorage.setItem(key, v);
+        banner.classList.add('hidden');
+      });
+    }
+  })();
+</script>
+{% endif %}
+
 <div class="mb-8">
   <h1 class="text-2xl font-semibold mb-2">Tracked projects</h1>
   <p class="text-sm text-gray-600">Run <code class="bg-gray-200 px-1 rounded">watchmen track &lt;key&gt; --repo &lt;path&gt;</code> from the terminal to add more.</p>
