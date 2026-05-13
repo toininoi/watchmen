@@ -750,6 +750,53 @@ def streak_stats(
     return {"current": current, "longest": longest, "longest_end": longest_end}
 
 
+def hbar_chart_svg(
+    rows: list[tuple[str, float]],
+    width: int = 360,
+    bar_height: int = 18,
+    gap: int = 4,
+    color: str = "#4f46e5",
+    label_width: int = 110,
+    value_fmt: str = "{:,.0f}",
+) -> str:
+    """Inline-SVG horizontal bar chart. Each row is (label, value), top-down
+    in the order given. Bar widths are scaled to the row with the largest
+    value. Empty input renders an empty SVG so the template can plug it in
+    without branching. Used for top-tools-per-repo, frustration-per-repo,
+    and similar low-cardinality categorical charts that read better as
+    horizontal bars than as a vertical chart."""
+    if not rows:
+        return f'<svg width="{width}" height="{bar_height + gap}"></svg>'
+    height = (bar_height + gap) * len(rows)
+    bars_width = width - label_width - 60  # leave room for value text on the right
+    max_v = max((v for _, v in rows), default=0) or 1
+    parts = [
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">'
+    ]
+    for i, (label, value) in enumerate(rows):
+        y = i * (bar_height + gap)
+        bar_w = max(2, (value / max_v) * bars_width) if value > 0 else 0
+        # Truncate long labels so the chart never overflows.
+        label_text = (label[: label_width // 7] + "…") if len(label) > label_width // 7 else label
+        parts.append(
+            f'<text x="0" y="{y + bar_height * 0.72:.1f}" font-size="11" fill="#374151">{_xml_escape(label_text)}</text>'
+            f'<rect x="{label_width}" y="{y}" width="{bar_w:.1f}" height="{bar_height}" rx="2" ry="2" fill="{color}" fill-opacity="0.85"/>'
+            f'<text x="{label_width + bar_w + 4:.1f}" y="{y + bar_height * 0.72:.1f}" font-size="11" fill="#6b7280" font-variant-numeric="tabular-nums">{_xml_escape(value_fmt.format(value))}</text>'
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _xml_escape(s) -> str:
+    """Minimal escaper for label/value text inside SVG <text> nodes. Avoids
+    a stdlib `html` import; only need <, >, &, ", '."""
+    s = str(s)
+    return (
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;").replace("'", "&#39;")
+    )
+
+
 def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, color: str = "#4f46e5") -> str:
     """Tiny inline-SVG line/area sparkline. Zero-deps, renders in any browser."""
     vals = list(values)

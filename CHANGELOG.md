@@ -4,6 +4,36 @@ All notable changes to watchmen are listed here. The CLI surfaces the latest
 release notes once per version bump (CLI + web viewer) so a `git pull` is
 never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0] — 2026-05-13
+
+### Added — HTML insights viewer page (`/insights`)
+- New page at `http://127.0.0.1:8979/insights` mirroring `watchmen
+  insights` with the richer stats + charts that don't fit a terminal:
+  - 4 headline tiles (sessions / tool errors / frustration markers /
+    cost, each with a 30-day sparkline).
+  - Adapter mix + skill-bundle coverage at a glance.
+  - Per-repo table with skills, pending bundles, 30-day activity
+    sparkline, adapter pills, tool-error count, frustration count,
+    unanalyzed prompts.
+  - Two horizontal bar charts: tool errors by repo + frustration
+    markers by repo (server-rendered SVG, same aesthetic as the
+    existing metrics page).
+  - Cross-repo patterns table (slug × repos with ✓ curated / · candidate
+    badges) and untapped corpora list.
+  - Collapsible frustration samples — actual quoted prompts per repo,
+    pulled straight from corpus.db.
+  - Hour-of-day × day-of-week heatmap from `metrics.activity_by_hour_dow_all`.
+  - The latest cached deep digest from `~/.watchmen/insights/` rendered
+    as markdown (same content as `watchmen insights --view`).
+- New nav link "Insights" in the viewer header, visible from every page.
+- `metrics.hbar_chart_svg(rows, …)` reusable horizontal-bar SVG helper
+  (XML-escaped labels, empty-input safe).
+
+### Fixed
+- Removed stale hardcoded `127.0.0.1:8888` from `base.html` footer —
+  shows a generic "local viewer" label now (the actual port is whatever
+  `watchmen settings port` is set to).
+
 ## [0.3.0] — 2026-05-13
 
 ### Added — harness-aware curator

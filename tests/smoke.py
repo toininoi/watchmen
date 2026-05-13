@@ -1459,6 +1459,73 @@ def test_cmd_curate_passes_flags_from_db_settings_to_subprocess():
     assert "--approval-required" in cmd, f"setting didn't propagate: {cmd}"
 
 
+def test_metrics_hbar_chart_svg_renders_rows_and_handles_edges():
+    """metrics.hbar_chart_svg powers the per-repo friction charts on the
+    HTML insights page. Must:
+      - emit one <rect> per row (the bar) and one value <text> per row
+      - clamp empty input to an empty SVG (no crash)
+      - escape HTML-sensitive characters in labels (regression: a repo
+        called `kai<>` would otherwise inject markup)"""
+    import metrics
+    out = metrics.hbar_chart_svg([("Bash", 100), ("Edit", 40), ("Read", 5)])
+    assert out.startswith("<svg") and out.endswith("</svg>")
+    # One <rect> per row with a positive value
+    assert out.count("<rect") == 3
+    assert "Bash" in out and "100" in out
+    # Empty input → empty SVG, not a Python error
+    empty = metrics.hbar_chart_svg([])
+    assert empty.startswith("<svg") and empty.endswith("</svg>")
+    # XML-escape the label
+    escaped = metrics.hbar_chart_svg([("kai<>", 1)])
+    assert "kai&lt;&gt;" in escaped
+    assert "<rect" in escaped  # bar still rendered
+
+
+def test_viewer_insights_route_returns_html_with_key_sections():
+    """The /insights route is the user-visible HTML analog of
+    `watchmen insights`. Test that against the actual app:
+      - returns 200
+      - includes the banner, stats tile section, repo table header,
+        cross-repo and untapped sections (when present), and the
+        hour-of-day heatmap container
+    Uses FastAPI's TestClient so we don't need to spin up a real server.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/insights")
+    assert r.status_code == 200, f"/insights returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    # Banner + identity
+    assert "Watchmen — insights" in html
+    # Stats tiles
+    assert "Sessions / 7d" in html and "Tool errors / 7d" in html
+    assert "Adapter mix" in html
+    # Repo table
+    assert "<th class=\"px-4 py-2\">Project</th>" in html
+    # Heatmap container (the SVG renders only when there's data, but the
+    # section header is always present)
+    assert "Activity by hour" in html
+    # Nav link to itself
+    assert "/insights" in html
+
+
+def test_viewer_base_template_exposes_insights_nav_link():
+    """Regression guard for the nav: the Insights link must live in
+    base.html (visible from every viewer page), not just on the insights
+    page itself. Without it, users can land on /metrics or / and have no
+    discovery path to the new page."""
+    base = Path(__file__).resolve().parents[1] / "viewer" / "templates" / "base.html"
+    text = base.read_text()
+    assert 'href="/insights"' in text, "Insights nav link missing from base.html"
+    # And the stale hardcoded port (8888 from before the port-settings PR)
+    # must not be back — base.html now shows a generic "local viewer" label.
+    assert "8888" not in text, "stale port number resurfaced in base.html"
+
+
 def test_corpus_migrate_schema_is_safe_when_db_missing():
     """`cli.main()` calls migrate_schema() before dispatching to every
     handler, including fresh installs where corpus.db doesn't exist yet.
@@ -2570,6 +2637,11 @@ def main() -> int:
     check("state.init_db migrates approval columns",           test_state_init_db_migrates_approval_columns_on_legacy_db)
     check("settings parser accepts approval/skip_overlap",     test_cli_settings_parser_accepts_approval_required_and_skip_overlap)
     check("cmd_curate forwards DB settings to subprocess",     test_cmd_curate_passes_flags_from_db_settings_to_subprocess)
+    print()
+    print("HTML insights viewer (0.4.0):")
+    check("hbar_chart_svg renders rows + handles edges",       test_metrics_hbar_chart_svg_renders_rows_and_handles_edges)
+    check("/insights route returns 200 with key sections",     test_viewer_insights_route_returns_html_with_key_sections)
+    check("Insights nav link wired up in base.html",           test_viewer_base_template_exposes_insights_nav_link)
     print()
     print("Launchd plist sanity:")
     check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)

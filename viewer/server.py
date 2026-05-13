@@ -254,6 +254,163 @@ def runs_page(request: Request):
     })
 
 
+@app.get("/insights", response_class=HTMLResponse)
+def insights_page(request: Request):
+    """HTML version of `watchmen insights`. Same static aggregation +
+    cached deep digest as the CLI, but with richer charts (per-repo
+    activity sparklines, top erroring tools, frustration markers,
+    aggregate hour-of-day heatmap) that don't fit a terminal."""
+    import json as _json
+    import sys as _sys
+    import metrics as _metrics
+
+    # Reach into cli.py for the friction-signal + adapter helpers + the
+    # digest cache reader. Keeps the viewer thin without duplicating those
+    # SQL queries / parser helpers.
+    _sys.path.insert(0, str(ROOT))
+    import cli as _cli  # type: ignore
+
+    state_init = getattr(__import__("state"), "init_db", None)
+    if state_init:
+        state_init()
+    import state as _state
+
+    projects = _state.list_projects()
+    base = KAI_CLAUDE
+
+    # Adapter totals across the whole corpus.
+    adapter_totals: dict[str, int] = {}
+    corpus_db = ROOT / "corpus.db"
+    if corpus_db.exists():
+        cc = sqlite3.connect(str(corpus_db))
+        for agent, n in cc.execute(
+            "SELECT agent, COUNT(*) FROM sessions WHERE is_subagent = 0 GROUP BY agent ORDER BY 2 DESC"
+        ).fetchall():
+            adapter_totals[agent] = n
+        cc.close()
+
+    # Per-repo rows with sparklines + friction signals.
+    repos: list[dict] = []
+    for p in projects:
+        key = p["project_key"]
+        skills_dir = base / key / "skills"
+        skills_n = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
+        pending_dir = base / key / "_pending"
+        pending_n = sum(1 for d in pending_dir.iterdir() if d.is_dir()) if pending_dir.exists() else 0
+        adapter = _cli._adapter_breakdown(key)
+        tool_errors, top_error_tools, frust_count, frust_samples = _cli._repo_friction_signals(key)
+        daily = _metrics.daily_metrics(key, days=30) or []
+        sess_series = [r["sessions"] for r in reversed(daily)]
+        try:
+            prog = _state.get_project_progress(key)
+            pending_prompts = prog.get("new_prompts_since_last_analysis", 0) or 0
+        except Exception:
+            pending_prompts = 0
+        repos.append({
+            "key": key,
+            "skills_n": skills_n,
+            "pending_n": pending_n,
+            "adapter": adapter,
+            "tool_errors": tool_errors,
+            "top_error_tools": top_error_tools,
+            "frust_count": frust_count,
+            "frust_samples": frust_samples,
+            "sess_spark": _metrics.sparkline_svg(sess_series, color="#4f46e5", width=140, height=30),
+            "pending_prompts": pending_prompts,
+            "total_sess": sum(adapter.values()),
+            "tool_chart": _metrics.hbar_chart_svg(
+                [(t, n) for t, n in top_error_tools],
+                color="#dc2626", label_width=110, width=340,
+            ) if top_error_tools else "",
+        })
+    repos.sort(key=lambda r: (-r["skills_n"], -r["total_sess"]))
+
+    # Cross-repo candidate-slug overlaps.
+    pattern_idx: dict[str, list[tuple[str, str]]] = {}
+    for p in projects:
+        key = p["project_key"]
+        cand_path = base / key / "_candidates.json"
+        skills_dir = base / key / "skills"
+        existing = {d.name for d in skills_dir.iterdir() if d.is_dir()} if skills_dir.exists() else set()
+        if not cand_path.exists():
+            continue
+        try:
+            cands = _json.loads(cand_path.read_text())
+        except Exception:
+            continue
+        for c in cands:
+            slug = c.get("slug")
+            if not slug:
+                continue
+            status = "curated" if slug in existing else "candidate"
+            pattern_idx.setdefault(slug, []).append((key, status))
+    cross = [(slug, hits) for slug, hits in pattern_idx.items() if len(hits) >= 2]
+    cross.sort(key=lambda x: (-len(x[1]), x[0]))
+
+    untapped = [(r["key"], r["total_sess"]) for r in repos if r["skills_n"] == 0 and r["total_sess"] > 0]
+    untapped.sort(key=lambda x: -x[1])
+
+    # Aggregate per-repo chart for cross-repo comparison (frustration totals).
+    frust_chart = _metrics.hbar_chart_svg(
+        sorted([(r["key"], r["frust_count"]) for r in repos if r["frust_count"] > 0],
+               key=lambda x: -x[1])[:8],
+        color="#eab308", label_width=140, width=440,
+    )
+    errors_chart = _metrics.hbar_chart_svg(
+        sorted([(r["key"], r["tool_errors"]) for r in repos if r["tool_errors"] > 0],
+               key=lambda x: -x[1])[:8],
+        color="#dc2626", label_width=140, width=440,
+    )
+
+    # Aggregate metrics (rollup window + heatmap) — reuse what /metrics builds.
+    aggregate_rows = _metrics.daily_metrics_all(days=30, tracked_only=False)
+    last7 = _metrics.summarize_window(aggregate_rows, 7)
+    last30 = _metrics.summarize_window(aggregate_rows, 30)
+    series = list(reversed(aggregate_rows))
+    sparks = {
+        "sessions":    _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "prompts":     _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
+        "tool_errors": _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
+        "cost_usd":    _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
+    }
+    hour_dow = _metrics.activity_by_hour_dow_all(days=90, tracked_only=False)
+    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+
+    # Latest cached deep digest from ~/.watchmen/insights/.
+    digest_html = None
+    digest_meta: dict = {}
+    try:
+        latest = _cli._latest_digest_path()
+        if latest is not None:
+            meta, body = _cli._read_digest_metadata(latest)
+            digest_meta = meta
+            digest_html = render_md(body)
+    except Exception:
+        digest_html = None
+
+    return TEMPLATES.TemplateResponse(request, "insights.html", {
+        "adapter_totals": adapter_totals,
+        "total_sessions": sum(adapter_totals.values()),
+        "repos": repos,
+        "cross": cross,
+        "untapped": untapped,
+        "frust_chart": frust_chart,
+        "errors_chart": errors_chart,
+        "last7": last7,
+        "last30": last30,
+        "sparks": sparks,
+        "hour_dow_svg": hour_dow_svg,
+        "digest_html": digest_html,
+        "digest_meta": digest_meta,
+        "curated_count": sum(1 for r in repos if r["skills_n"] > 0),
+        "n_projects": len(projects),
+        "total_skills": sum(r["skills_n"] for r in repos),
+        "total_pending": sum(r["pending_n"] for r in repos),
+        "total_errors": sum(r["tool_errors"] for r in repos),
+        "total_frustration": sum(r["frust_count"] for r in repos),
+    })
+
+
 @app.get("/metrics", response_class=HTMLResponse)
 def metrics_all(request: Request, tracked: int = 0):
     import metrics as _metrics
