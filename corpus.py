@@ -79,18 +79,66 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
 
 def init_db(*, full: bool = False) -> sqlite3.Connection:
     """Open corpus.db. If full=True, DROP and recreate all tables (forced full
-    rebuild). If full=False, idempotent CREATE IF NOT EXISTS + lightweight
-    migration to add the file_mtime column on legacy DBs."""
+    rebuild). If full=False, idempotent CREATE IF NOT EXISTS + run any
+    pending column migrations on the existing schema."""
     conn = sqlite3.connect(DB_PATH)
     if full:
         conn.executescript("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS prompts; DROP TABLE IF EXISTS tool_calls;")
     conn.executescript(_CREATE_TABLES)
-    # Migration for legacy DBs that have `sessions` without the file_mtime column.
+    _migrate_sessions_columns(conn)
+    conn.commit()
+    return conn
+
+
+def _migrate_sessions_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent column-level migrations for the `sessions` table. Each
+    entry is a no-op when the column already exists, so the function is
+    safe to call repeatedly (and on every CLI startup — see `migrate_schema`).
+
+    History:
+      - `file_mtime` added with the incremental-scan optimization
+      - `agent` added with multi-adapter support (Codex + pi.dev). Legacy DBs
+        built before this fail with `OperationalError: no such column: agent`
+        on `watchmen insights` and other read paths — that's the regression
+        this migration fixes."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "file_mtime" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN file_mtime REAL")
-    conn.commit()
-    return conn
+    if "agent" not in cols:
+        # NOT NULL DEFAULT 'claude_code' matches the canonical CREATE TABLE
+        # so existing rows get tagged as Claude Code sessions (true for any
+        # corpus built before adapter support landed).
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude_code'"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent)")
+
+
+def migrate_schema() -> None:
+    """Open corpus.db just to run pending column migrations, then close.
+    Called once from `cli.main()` so every watchmen command auto-applies
+    pending schema migrations without the user having to know about
+    `watchmen ingest --full`. No-op when the DB doesn't exist yet (fresh
+    install) or when the schema is already current. Swallows sqlite errors
+    so a degraded DB can't break CLI startup — the real command will
+    surface the actual problem."""
+    if not DB_PATH.exists():
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            # Only migrate if the sessions table exists — otherwise there's
+            # nothing to alter (fresh corpus.db touched but not populated).
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+            ).fetchone()
+            if row is not None:
+                _migrate_sessions_columns(conn)
+                conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
 
 
 def _known_mtimes(conn: sqlite3.Connection) -> dict[str, float | None]:

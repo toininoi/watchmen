@@ -928,6 +928,113 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
             corpus.DB_PATH = orig_db
 
 
+def test_corpus_migrate_schema_adds_agent_column_to_pre_adapter_db():
+    """Teammates with corpus.db files predating multi-adapter support (Codex
+    + pi.dev) fail with `OperationalError: no such column: agent` on every
+    read path that includes the adapter breakdown — most visibly
+    `watchmen insights`. The fix is `corpus.migrate_schema()`: it's called
+    once from `cli.main()` so any pull + rerun auto-applies pending column
+    migrations. This test exercises the pre-adapter schema specifically
+    (everything except `agent` AND `file_mtime`) and asserts both columns
+    land + are idempotent under repeat calls + the adapter-tagged read
+    `SELECT agent FROM sessions` works afterwards."""
+    import sqlite3
+    import tempfile
+
+    import corpus
+
+    # The genuine pre-adapter schema: no `agent`, no `file_mtime`.
+    pre_adapter_sessions = """
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            project_dir TEXT,
+            transcript_path TEXT,
+            started_at TEXT,
+            ended_at TEXT,
+            duration_seconds REAL,
+            is_subagent INTEGER NOT NULL DEFAULT 0,
+            parent_session_id TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            user_prompt_count INTEGER NOT NULL DEFAULT 0,
+            assistant_text_count INTEGER NOT NULL DEFAULT 0,
+            assistant_thinking_count INTEGER NOT NULL DEFAULT 0,
+            tool_use_count INTEGER NOT NULL DEFAULT 0,
+            tool_error_count INTEGER NOT NULL DEFAULT 0,
+            models TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            model_dominant TEXT,
+            cost_usd REAL NOT NULL DEFAULT 0
+        );
+    """
+    with tempfile.TemporaryDirectory() as td:
+        pre_db = Path(td) / "corpus.db"
+        with sqlite3.connect(str(pre_db)) as c:
+            c.executescript(pre_adapter_sessions)
+            c.execute(
+                "INSERT INTO sessions (session_id, project_dir) VALUES ('legacy-sess', '/some/path/kai-frontend')"
+            )
+
+        orig_db = corpus.DB_PATH
+        corpus.DB_PATH = pre_db
+        try:
+            # 1. migrate_schema must not raise on a pre-adapter DB.
+            corpus.migrate_schema()
+            with sqlite3.connect(str(pre_db)) as c:
+                cols = {r[1] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
+            assert "agent" in cols, "migrate_schema must add the `agent` column"
+            assert "file_mtime" in cols, "migrate_schema must keep adding `file_mtime` too"
+
+            # 2. The existing row defaulted to 'claude_code' — same as canonical schema.
+            with sqlite3.connect(str(pre_db)) as c:
+                agent = c.execute(
+                    "SELECT agent FROM sessions WHERE session_id = 'legacy-sess'"
+                ).fetchone()[0]
+            assert agent == "claude_code", f"default tag wrong: {agent!r}"
+
+            # 3. The exact query that was crashing (`watchmen insights` header)
+            #    now works.
+            with sqlite3.connect(str(pre_db)) as c:
+                rows = c.execute(
+                    """SELECT agent, COUNT(*) FROM sessions
+                       WHERE is_subagent = 0 GROUP BY agent"""
+                ).fetchall()
+            assert rows and rows[0][0] == "claude_code"
+
+            # 4. Calling migrate_schema again is a no-op (idempotent).
+            corpus.migrate_schema()
+            corpus.migrate_schema()
+            with sqlite3.connect(str(pre_db)) as c:
+                # Still one row, still one column set — nothing duplicated.
+                n = c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+                cols_after = {r[1] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
+            assert n == 1
+            assert cols == cols_after, "repeat migrate_schema calls must not change the schema"
+        finally:
+            corpus.DB_PATH = orig_db
+
+
+def test_corpus_migrate_schema_is_safe_when_db_missing():
+    """`cli.main()` calls migrate_schema() before dispatching to every
+    handler, including fresh installs where corpus.db doesn't exist yet.
+    Must be a silent no-op so first-run `watchmen init` / `watchmen --help`
+    don't crash on a missing DB."""
+    import tempfile
+    import corpus
+    with tempfile.TemporaryDirectory() as td:
+        missing = Path(td) / "definitely-not-a-db.db"
+        orig_db = corpus.DB_PATH
+        corpus.DB_PATH = missing
+        try:
+            # Must not raise, must not create the file.
+            corpus.migrate_schema()
+            assert not missing.exists(), "migrate_schema must not touch the disk when DB is absent"
+        finally:
+            corpus.DB_PATH = orig_db
+
+
 # ─── Onboard parallelism ────────────────────────────────────────────────────
 
 
@@ -1999,6 +2106,8 @@ def main() -> int:
     check("scan is incremental + idempotent",           test_corpus_scan_is_incremental_and_idempotent)
     check("--full forces a rebuild",                    test_corpus_full_flag_forces_rebuild)
     check("legacy DB migrates without errors",          test_corpus_migrates_legacy_db_without_file_mtime)
+    check("pre-adapter DB auto-adds `agent` column",    test_corpus_migrate_schema_adds_agent_column_to_pre_adapter_db)
+    check("migrate_schema is safe when corpus.db missing", test_corpus_migrate_schema_is_safe_when_db_missing)
     print()
     print("Launchd plist sanity:")
     check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)
