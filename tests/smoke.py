@@ -1187,6 +1187,73 @@ def test_doomsday_clock_brackets_for_status_command():
     assert cli._doomsday_minutes_to_midnight(0, 0) == 12
 
 
+def test_doomsday_ascii_renders_three_lines_with_correct_word():
+    """`_doomsday_ascii` must return exactly 3 lines (clock face + bar + tagline),
+    embed the spelled-out minute word, and embed a doom-bar whose filled count
+    matches `12 - minutes`. ANSI codes are stripped before assertion so the test
+    works in any terminal."""
+    import re
+    import cli
+
+    def _strip(s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    # 12 to midnight (safe) — bar should be entirely empty (░░░░░░░░░░░░).
+    lines = cli._doomsday_ascii(0, 6)
+    assert len(lines) == 3, f"expected 3 lines, got {len(lines)}: {lines}"
+    plain = "\n".join(_strip(L) for L in lines)
+    assert "twelve minutes to midnight" in plain
+    assert "░" * 12 in plain, "safe state should show an empty doom-bar"
+    assert "█" not in plain, "safe state should have zero doom-bar segments"
+
+    # 5 to midnight (canonical) — 7 doom segments + 5 safe.
+    lines = cli._doomsday_ascii(3, 10)  # 30% stale → 5 minutes
+    plain = "\n".join(_strip(L) for L in lines)
+    assert "five minutes to midnight" in plain
+    assert "█" * 7 in plain and "░" * 5 in plain, f"5-to-midnight bar wrong: {plain!r}"
+
+    # 1 to midnight (critical) — 11 doom, 1 safe, "minute" not "minutes".
+    lines = cli._doomsday_ascii(9, 10)
+    plain = "\n".join(_strip(L) for L in lines)
+    assert "one minute to midnight" in plain
+    assert "█" * 11 in plain
+
+
+def test_manhattan_quote_pools_are_non_empty_and_in_character():
+    """Each severity bucket (OK/WARN/FAIL) must have ≥3 quotes so random.choice
+    has actual rotation. The header text 'Dr. Manhattan' must stay stable
+    across the random-selection rewrite (scripts grep for it; tests use it as
+    a regression anchor)."""
+    import cli
+    assert len(cli._MANHATTAN_QUOTES_OK) >= 3, "OK pool too small — no rotation"
+    assert len(cli._MANHATTAN_QUOTES_WARN) >= 3
+    assert len(cli._MANHATTAN_QUOTES_FAIL) >= 3
+    # Each quote: non-empty string, not duplicated within a pool.
+    for pool in (cli._MANHATTAN_QUOTES_OK, cli._MANHATTAN_QUOTES_WARN, cli._MANHATTAN_QUOTES_FAIL):
+        assert len(pool) == len(set(pool)), f"duplicate quote in pool {pool}"
+        for q in pool:
+            assert q and isinstance(q, str)
+
+
+def test_rorschach_inkblots_are_mirror_symmetric():
+    """Every Rorschach plate in the pool is a real left/right mirror — that's
+    the structural property of the actual psychiatric blots. The pool layout
+    is `<left><gap><right>` where right is the mirror of left under a small
+    character-flip table. We just verify the visual halves match by length and
+    that the pool has enough variety for `random.choice` to feel different."""
+    import cli
+    assert len(cli._RORSCHACH_BLOTS) >= 6, "pool too small for visible rotation"
+    for blot in cli._RORSCHACH_BLOTS:
+        # Each blot is "<half>  <half>" (two halves separated by spaces) — both
+        # halves must be the same length, and at least one cell each.
+        halves = blot.split("  ")
+        assert len(halves) == 2, f"blot {blot!r} should be 'left  right' pair"
+        left, right = halves
+        assert len(left) == len(right) and len(left) >= 2, f"asymmetric blot: {blot!r}"
+    # And the function itself returns something from the pool.
+    assert cli._rorschach_inkblot() in cli._RORSCHACH_BLOTS
+
+
 def test_config_viewer_port_reads_env_then_file_then_default():
     """`config.viewer_port()` resolves in priority order: process env var,
     then the global config file, then the hardcoded default. Regression:
@@ -1341,6 +1408,9 @@ def main() -> int:
     print()
     print("Watchmen aesthetic:")
     check("doomsday clock buckets stale projects correctly", test_doomsday_clock_brackets_for_status_command)
+    check("doomsday ascii renders 3 lines + correct word",   test_doomsday_ascii_renders_three_lines_with_correct_word)
+    check("Manhattan quote pools have variety + structure",  test_manhattan_quote_pools_are_non_empty_and_in_character)
+    check("Rorschach inkblots are mirror-symmetric pairs",   test_rorschach_inkblots_are_mirror_symmetric)
     print()
     print("Curator cache:")
     check("cache hit when results unchanged",         test_cache_hit_when_results_unchanged)

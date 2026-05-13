@@ -25,6 +25,7 @@ Designed to be invoked as `uv run watchmen <subcommand>` or via the script entry
 """
 
 import argparse
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -113,18 +114,126 @@ def _doomsday_minutes_to_midnight(needs_analysis: int, total: int) -> int:
 # the exact phrasing used in the comic.
 _DOOMSDAY_WORD = {12: "twelve", 8: "eight", 5: "five", 2: "two", 1: "one"}
 
+# Hand glyph by minutes-to-midnight. The minute hand rotates *back* from 12
+# toward 11 as we approach doom. We can't capture the rotation precisely in
+# a single character, but the variation gives the clock face a real "look".
+_DOOMSDAY_HAND = {
+    12: "·",   # near 12 — calm dot
+    8:  "╲",   # 24° back from vertical
+    5:  "┘",   # 30° back, the canonical Watchmen position
+    2:  "╲",   # almost vertical again
+    1:  "│",   # essentially at 12, the doom moment
+}
 
-def _doomsday_line(needs: int, total: int) -> str:
-    """Format the Doomsday Clock line printed above `watchmen status`."""
+# Random tick-tock taglines per severity. Pooled so consecutive runs feel
+# different — the comic itself plays variations on "tick tock tick tock".
+_DOOMSDAY_TAGLINES_CLEAR = (
+    "all clear.",
+    "the city sleeps.",
+    "no field activity required.",
+    "midnight is far.",
+)
+_DOOMSDAY_TAGLINES_TICK = (
+    "tick. tock.",
+    "the clock advances.",
+    "minutes are short here.",
+    "tick tock tick tock.",
+)
+_DOOMSDAY_TAGLINES_CRITICAL = (
+    "tick. tock. tick.",
+    "midnight is near.",
+    "the hour grows late.",
+    "no one is watching us watch.",
+)
+
+
+# ─── Dr. Manhattan flavor for `watchmen doctor` ─────────────────────────────
+# A small atom panel + three pools of in-character quotes (one per severity).
+# random.choice rotates the line each run so the doctor command never feels
+# canned. Header text stays stable (tests + scripts can grep "Dr. Manhattan").
+
+_MANHATTAN_QUOTES_OK = (
+    "I see all the body's mechanisms, intact and predictable.",
+    "Nothing here requires my intervention.",
+    "The structure holds. No deviation from expected paths.",
+    "All is precisely as it should be.",
+    "Causality is uninterrupted.",
+    "On Mars, I would call this a peaceful arrangement.",
+)
+_MANHATTAN_QUOTES_WARN = (
+    "A pattern frays — observable, not yet consequential.",
+    "Minor deviations. The mechanism still turns.",
+    "One inconsistency. Time will absorb it.",
+    "A small fault. I leave it for you to mend.",
+)
+_MANHATTAN_QUOTES_FAIL = (
+    "The mechanism is impeded. Correction is necessary.",
+    "Causality is interrupted here. Attend to it.",
+    "I observe a discontinuity.",
+    "Something is broken. I cannot fix what I do not touch.",
+)
+
+
+# ─── Rorschach inkblot pool for `watchmen open` ─────────────────────────────
+# Each entry is mirror-symmetric (a left half + its right-mirror) — that's
+# the actual structural property of Rorschach plates. random.choice rotates
+# the blot every call so opening the viewer feels like flipping cards in
+# Walter Kovacs's journal.
+
+_RORSCHACH_BLOTS = (
+    "▙▟  ▙▟",
+    "⫷⫸  ⫷⫸",
+    "◣◢  ◣◢",
+    "▚▞  ▚▞",
+    "⌬⌬  ⌬⌬",
+    "◤◥  ◤◥",
+    "▜▛  ▜▛",
+    "╱╲  ╱╲",
+)
+
+
+def _rorschach_inkblot() -> str:
+    """Pick a single Rorschach-style mirror-symmetric blot. Tiny — one-line."""
+    return random.choice(_RORSCHACH_BLOTS)
+
+
+def _manhattan_atom_panel() -> list[str]:
+    """3-line atom panel — small enough to sit above the doctor table without
+    consuming the visible terminal. The ⚛ glyph is literally a stylized
+    hydrogen atom, the same one Manhattan wears on his forehead in the comic."""
+    return [
+        "  ┌─────┐",
+        "  │  ⚛  │",
+        "  └─────┘",
+    ]
+
+
+def _doomsday_ascii(needs: int, total: int) -> list[str]:
+    """3-line render: tiny clock face + 12-segment doom-bar + spelled label.
+
+    Each ASCII element is conditional on the calculated minutes-to-midnight,
+    so the visual reads as a real, slightly-different clock each time you
+    invoke `watchmen status`. Doom-bar fills left-to-right as we approach
+    midnight (segments = `12 - minutes_to_midnight`)."""
     n = _doomsday_minutes_to_midnight(needs, total)
+    hand = _DOOMSDAY_HAND[n]
+    filled = max(0, 12 - n)
+    bar = "█" * filled + "░" * (12 - filled)
     word = _DOOMSDAY_WORD[n]
     suffix = "minute" if n == 1 else "minutes"
-    body = f"  🕚  doomsday clock — {word} {suffix} to midnight"
+
     if n == 12:
-        return _yellow(body) + _dim("    all clear.")
-    if n <= 2:
-        return _yellow(body) + _dim("    tick. tock.")
-    return _yellow(body)
+        tagline = random.choice(_DOOMSDAY_TAGLINES_CLEAR)
+    elif n <= 2:
+        tagline = random.choice(_DOOMSDAY_TAGLINES_CRITICAL)
+    else:
+        tagline = random.choice(_DOOMSDAY_TAGLINES_TICK)
+
+    return [
+        _yellow("  ╭─╮"),
+        _yellow(f"  │{hand}│  ") + _yellow(bar) + _yellow(f"  {word} {suffix} to midnight"),
+        _yellow("  ╰─╯  ") + _dim(tagline),
+    ]
 
 
 # ─── Subcommands ────────────────────────────────────────────────────────────
@@ -150,7 +259,8 @@ def cmd_status(args) -> int:
         if progress.get("needs_analysis"):
             needs += 1
 
-    print(_doomsday_line(needs, len(tracked)))
+    for line in _doomsday_ascii(needs, len(tracked)):
+        print(line)
     print()
     print(f"  {'project':<30} {'state':<10} {'last analyst':<22} {'new prompts':>11}  notes")
     print(_dim("  " + "─" * 100))
@@ -636,11 +746,12 @@ def cmd_doctor(args) -> int:
     from rich.table import Table
     console = Console()
 
-    # Manhattan-blue header line — small atom + name + tagline. Punches above
-    # the table without consuming much vertical space.
+    # Manhattan-blue atom panel + header. We pick the closing quote later
+    # (after we know fails/warns) but the panel itself goes up top.
     console.print()
-    console.print(f"[bold bright_blue]            ⚛[/]")
-    console.print(f"[bold bright_blue]   Dr. Manhattan's vitals[/]  [dim italic]— I see all the body's mechanisms, intact and predictable.[/]")
+    for line in _manhattan_atom_panel():
+        console.print(f"[bold bright_blue]{line}[/]")
+    console.print(f"  [bold bright_blue]Dr. Manhattan's vitals[/]")
 
     fails = 0
     warns = 0
@@ -752,13 +863,15 @@ def cmd_doctor(args) -> int:
 
     console.print()
     console.print(table)
+    # Closing quote is randomly drawn from the pool that matches severity —
+    # consecutive runs of `watchmen doctor` feel different even when nothing
+    # has changed. Quote stays in Manhattan's voice (detached, observational).
     if fails == 0 and warns == 0:
-        # Manhattan-detached closing line — neutral, observational.
-        console.print("\n[bright_blue]   Nothing here requires my intervention.[/]")
+        console.print(f"\n  [bright_blue italic]{random.choice(_MANHATTAN_QUOTES_OK)}[/]")
     elif fails == 0:
-        console.print(f"\n[yellow]{warns} warning(s)[/] — non-blocking; fix when convenient.")
+        console.print(f"\n  [yellow italic]{random.choice(_MANHATTAN_QUOTES_WARN)}[/]  [dim]({warns} warning(s))[/]")
     else:
-        console.print(f"\n[red]{fails} failure(s)[/] / [yellow]{warns} warning(s)[/].")
+        console.print(f"\n  [red italic]{random.choice(_MANHATTAN_QUOTES_FAIL)}[/]  [dim]({fails} failure(s) / {warns} warning(s))[/]")
     return 1 if fails else 0
 
 
@@ -782,9 +895,10 @@ def cmd_open(args) -> int:
     if not up:
         print(_yellow(f"warning: viewer at {base} isn't responding — start with `watchmen viewer run` or `watchmen viewer install`"))
 
-    # Tiny Rorschach-style inkblot prefix — the symmetric paired braces
-    # echo his mask. Nothing wider than two cells so it stays subtle.
-    print(_dim("  ⌗⌗⌗  ") + f"opening {url}")
+    # Rorschach-style inkblot prefix — mirror-symmetric, picked at random
+    # from a small pool so the line "rotates" between invocations like
+    # flipping cards in Walter Kovacs's journal.
+    print(_dim(f"  {_rorschach_inkblot()}  ") + f"opening {url}")
     opened = webbrowser.open(url, new=2)
     if not opened:
         print(_dim("(browser didn't auto-open — copy the URL above)"))
