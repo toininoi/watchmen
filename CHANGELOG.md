@@ -4,6 +4,54 @@ All notable changes to watchmen are listed here. The CLI surfaces the latest
 release notes once per version bump (CLI + web viewer) so a `git pull` is
 never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.0] — 2026-05-13
+
+### Added — harness-aware curator
+- The candidate-finder now reads the user's installed Claude Code skills
+  from `~/.claude/skills/*/SKILL.md` and is instructed to (a) prefer
+  proposing an **enhancement** of an existing skill over a brand-new
+  bundle when the trigger overlaps, and (b) compose existing skills
+  rather than reinventing them. Each candidate may carry an optional
+  `enhancement_of: <slug>` field that flows to Stage 2.
+- New `harness.py` module: `installed_skills()`, `overlaps_existing()`,
+  `format_for_prompt()`. Tiny surface area; tolerant of missing or
+  malformed `SKILL.md` files.
+
+### Added — conservative candidate prompt
+- The finder prompt now requires a **recurring** pattern (within a
+  single session OR across multiple sessions) before promoting any
+  candidate to a skill. No numeric thresholds — the LLM stays in
+  judgment mode, but with a clear "be ruthless, don't ship marginal
+  bundles" instruction.
+
+### Added — approval queue (`approval_required` setting)
+- New per-project setting `approval_required: 0/1` (default 0 = autonomy
+  preserved). When 1, **new** skill bundles route to
+  `kai_claude/<project>/_pending/<slug>/` instead of
+  `kai_claude/<project>/skills/<slug>/`. Already-approved skills in
+  `skills/` keep updating in place — only first-time additions are gated.
+- `watchmen review` now walks the pending queue first with
+  `(a)pprove / (d)rop / (s)kip / (v)iew / (q)uit` semantics before
+  continuing to the existing approved-skills walk. Approving moves
+  `_pending/<slug>/` → `skills/<slug>/` (existing approved bundles are
+  backed up to `<slug>.superseded/` for manual undo).
+- New per-project setting `skip_overlapping_skills: 0/1` (default 0).
+  When 1, candidates that overlap with installed harness skills are
+  dropped entirely (no enhancement proposal).
+
+### Added — CLI surface
+- `watchmen curate <p> --skip-overlap` overrides the per-project setting.
+- `watchmen curate <p> --approval-required` overrides the per-project setting.
+- `watchmen settings set <p> approval_required true|false`
+- `watchmen settings set <p> skip_overlapping_skills true|false`
+- `watchmen settings show <p>` displays both new settings.
+
+### Fixed
+- `state.init_db()` migrates legacy `projects` rows to include the two
+  new boolean columns (`approval_required`, `skip_overlapping_skills`).
+  Pull + rerun applies the migration automatically; no manual ALTER
+  TABLE needed.
+
 ## [0.2.0] — 2026-05-13
 
 ### Added

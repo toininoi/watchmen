@@ -1,6 +1,6 @@
 [project]
 name = "watchmen"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local Claude Code session intelligence — observe, analyze, and generate skills + CLAUDE.md per project, autonomously"
 readme = "README.md"
 license = { text = "MIT" }
@@ -31,6 +31,8 @@ include = [
     "analyze.py", "curate.py", "corpus.py", "onboard.py",
     "view.py", "transcript.py", "server.py",
     "daemon.py", "launchd_setup.py", "hooks_setup.py", "plugin_setup.py",
+    "harness.py",
     "viewer/**/*.py", "viewer/templates/*.html",
     "hooks/*.sh",
+    "CHANGELOG.md",
 ]

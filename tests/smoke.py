@@ -1182,6 +1182,283 @@ def test_brief_artifacts_no_longer_shipped():
         "hooks/watchmen_brief.sh reappeared — 0.2.0 deleted this on purpose"
 
 
+def test_harness_installed_skills_reads_skill_md_frontmatter():
+    """harness.installed_skills() must parse the YAML-style frontmatter
+    block at the top of each ~/.claude/skills/<slug>/SKILL.md and return
+    one record per skill. Skills without a SKILL.md, with malformed
+    frontmatter, or in non-directory entries must be skipped silently
+    so a single broken file can't poison the candidate-finder prompt."""
+    import harness
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        # 1. Well-formed skill with full frontmatter.
+        (base / "craft-plan").mkdir()
+        (base / "craft-plan" / "SKILL.md").write_text(
+            "---\n"
+            "name: craft-plan\n"
+            "description: Compile a plan before any non-trivial implementation.\n"
+            "when_to_use: User asks to plan, design, or scope before coding.\n"
+            "---\n# Craft Plan\nbody...\n"
+        )
+        # 2. Skill with no frontmatter — still indexed, slug falls back to dir name.
+        (base / "stub").mkdir()
+        (base / "stub" / "SKILL.md").write_text("just a body, no frontmatter\n")
+        # 3. Skill missing SKILL.md — must be skipped (not raise).
+        (base / "no-skill-md").mkdir()
+        # 4. Stray file at the harness root — must be skipped.
+        (base / "README.md").write_text("not a skill")
+
+        out = harness.installed_skills(skills_dir=base)
+        slugs = [s["slug"] for s in out]
+        assert "craft-plan" in slugs, f"missing well-formed skill: {slugs}"
+        assert "stub" in slugs, "frontmatter-less skill should still be indexed"
+        assert "no-skill-md" not in slugs, "skill dir without SKILL.md must be skipped"
+        # Frontmatter values land in the right keys.
+        cp = next(s for s in out if s["slug"] == "craft-plan")
+        assert cp["description"].startswith("Compile a plan")
+        assert cp["when_to_use"].startswith("User asks to plan")
+
+
+def test_harness_overlaps_existing_matches_case_insensitive():
+    """overlaps_existing must return the matching installed skill (case-
+    insensitive on slug), or None. Used by --skip-overlap to drop
+    candidates that genuinely duplicate a harness skill."""
+    import harness
+    installed = [{"slug": "craft-plan", "name": "craft-plan"}, {"slug": "implement", "name": "implement"}]
+    assert harness.overlaps_existing("craft-plan", installed)["slug"] == "craft-plan"
+    assert harness.overlaps_existing("CRAFT-PLAN", installed)["slug"] == "craft-plan"
+    assert harness.overlaps_existing("brand-new", installed) is None
+    assert harness.overlaps_existing("", installed) is None
+
+
+def test_curate_finder_prompt_includes_harness_block():
+    """The candidate-finder system prompt must include the user's harness
+    list when one is provided — otherwise the LLM can't propose
+    `enhancement_of` for overlapping candidates. Empty harness → a clear
+    "no harness yet" placeholder so the prompt always parses cleanly."""
+    import curate
+    installed = [
+        {"slug": "craft-plan", "description": "Compile a plan before coding."},
+        {"slug": "implement", "description": "Execute a plan into commits."},
+    ]
+    p = curate._build_finder_prompt(installed)
+    assert "craft-plan" in p and "implement" in p
+    assert "Compile a plan" in p
+    # Empty harness must produce a sensible block, not crash on format().
+    empty = curate._build_finder_prompt([])
+    assert "no skills installed" in empty.lower(), f"empty harness placeholder missing:\n{empty}"
+
+
+def test_curate_finder_schema_accepts_enhancement_of_field():
+    """The finish_candidates tool spec must declare `enhancement_of` as a
+    valid (but optional) field on each candidate. Without it the LLM
+    can't structurally signal 'this is an enhancement of slug X' to
+    Stage 2, and the harness-aware pathway degrades to a no-op."""
+    import agent as _agent
+    import curate
+    import httpx
+    # We only need to introspect the tool specs — no actual API call.
+    # Stub load_api_key so CI (no OPENROUTER_API_KEY) doesn't raise during
+    # Agent.__init__.
+    _orig_load = _agent.load_api_key
+    _agent.load_api_key = lambda: "stub-test-key"
+    try:
+        with httpx.Client() as client:
+            finder = curate.build_finder_agent(
+                client=client, model="x", project_key="p", source_repo="/tmp",
+                log_path=None, recorder=None, installed_skills=[],
+            )
+    finally:
+        _agent.load_api_key = _orig_load
+    finish_spec = next(
+        s for s in finder.tool_specs
+        if s["function"]["name"] == "finish_candidates"
+    )
+    item_props = finish_spec["function"]["parameters"]["properties"]["candidates"]["items"]["properties"]
+    assert "enhancement_of" in item_props, "finder schema must accept enhancement_of"
+    # And it must not be required — only set when there's an actual overlap.
+    item_required = finish_spec["function"]["parameters"]["properties"]["candidates"]["items"].get("required", [])
+    assert "enhancement_of" not in item_required
+
+
+def test_curate_build_skill_curator_respects_out_subdir():
+    """With approval_required, new bundles route to `_pending/<slug>/`
+    instead of `skills/<slug>/`. The write tool spec and its scoping
+    handler must both use the requested subdir — otherwise the agent
+    would still try to write under skills/ and fail/escape the scope."""
+    import agent as _agent
+    import curate
+    import httpx
+    candidate = {
+        "slug": "demo-skill", "name": "Demo", "description": "x",
+        "when_to_use": "y", "source_files": [], "session_ids": [],
+    }
+    _orig_load = _agent.load_api_key
+    _agent.load_api_key = lambda: "stub-test-key"
+    try:
+        with httpx.Client() as client:
+            curator = curate.build_skill_curator(
+                client=client, model="x", project_key="p", source_repo="/tmp",
+                candidate=candidate, log_path=None, run_critic=lambda *a, **k: "",
+                recorder=None, out_subdir="_pending",
+            )
+    finally:
+        _agent.load_api_key = _orig_load
+    write_spec = next(
+        s for s in curator.tool_specs
+        if s["function"]["name"] == "write_kai_claude_file"
+    )
+    desc = write_spec["function"]["description"]
+    assert "_pending/demo-skill/" in desc, f"write tool not scoped to _pending/: {desc!r}"
+    # Calling the scoped handler with a `skills/...` path must be rejected
+    # so the agent can't escape the pending dir.
+    err = curator.tool_handlers["write_kai_claude_file"](file_path="skills/other-skill/SKILL.md", content="x")
+    assert "ERROR" in err and "can only write under '_pending/demo-skill/'" in err
+
+
+def test_curate_build_skill_curator_enhancement_mode_prepends_context():
+    """When `candidate["enhancement_of"]` is set, the per-skill curator's
+    system prompt must lead with an ENHANCEMENT MODE preamble so the
+    agent knows to extend an existing harness skill rather than author
+    one from scratch. Without this, `enhancement_of` is a label without
+    behavior."""
+    import agent as _agent
+    import curate
+    import httpx
+    candidate = {
+        "slug": "demo-extension", "name": "Demo Ext", "description": "x",
+        "when_to_use": "y", "source_files": [], "session_ids": [],
+        "enhancement_of": "craft-plan",
+    }
+    _orig_load = _agent.load_api_key
+    _agent.load_api_key = lambda: "stub-test-key"
+    try:
+        with httpx.Client() as client:
+            curator = curate.build_skill_curator(
+                client=client, model="x", project_key="p", source_repo="/tmp",
+                candidate=candidate, log_path=None, run_critic=lambda *a, **k: "",
+                recorder=None,
+            )
+    finally:
+        _agent.load_api_key = _orig_load
+    assert "ENHANCEMENT MODE" in curator.system_prompt
+    assert "craft-plan" in curator.system_prompt
+
+
+def test_state_init_db_migrates_approval_columns_on_legacy_db():
+    """Existing teammates have state.db rows built before approval_required
+    and skip_overlapping_skills were added. `init_db()` must auto-add
+    both columns (default 0) so reading project settings via
+    `cli.state.get_project()` never raises `no such column` after pull."""
+    import sqlite3
+    import state
+    legacy_projects = """
+        CREATE TABLE projects (
+            project_key TEXT PRIMARY KEY,
+            source_repo TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            threshold_new_prompts INTEGER NOT NULL DEFAULT 30,
+            last_analyst_run TEXT,
+            last_analyst_day TEXT,
+            last_curator_run TEXT,
+            last_curator_skill_count INTEGER,
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """
+    with tempfile.TemporaryDirectory() as td:
+        legacy_db = Path(td) / "state.db"
+        with sqlite3.connect(str(legacy_db)) as c:
+            c.executescript(legacy_projects)
+            c.execute("INSERT INTO projects (project_key, source_repo) VALUES ('p', '/some/repo')")
+
+        orig_db = state.STATE_DB
+        state.STATE_DB = legacy_db
+        try:
+            state.init_db()  # must not raise on legacy schema
+            row = state.get_project("p")
+            assert row is not None
+            assert row.get("approval_required") == 0, \
+                "approval_required missing or wrong default"
+            assert row.get("skip_overlapping_skills") == 0, \
+                "skip_overlapping_skills missing or wrong default"
+            # Idempotency — second init_db must be a no-op.
+            state.init_db()
+            row2 = state.get_project("p")
+            assert row2 == row
+        finally:
+            state.STATE_DB = orig_db
+
+
+def test_cli_settings_parser_accepts_approval_required_and_skip_overlap():
+    """`watchmen settings set <p> approval_required true` and
+    `... skip_overlapping_skills 1` must parse cleanly and produce the
+    right DB column + coerced bool int. These are the user-facing
+    knobs for the harness-aware + approval-mode features."""
+    import cli
+    col, val = cli._parse_setting("approval_required", "true")
+    assert (col, val) == ("approval_required", 1)
+    col, val = cli._parse_setting("approval_required", "0")
+    assert (col, val) == ("approval_required", 0)
+    col, val = cli._parse_setting("skip_overlapping_skills", "yes")
+    assert (col, val) == ("skip_overlapping_skills", 1)
+    # Invalid value → readable ValueError. (Plain try/except — no pytest dep.)
+    try:
+        cli._parse_setting("approval_required", "maybe")
+    except ValueError as e:
+        assert "true/false" in str(e)
+    else:
+        assert False, "expected ValueError for invalid bool"
+
+
+def test_cmd_curate_passes_flags_from_db_settings_to_subprocess():
+    """When per-project settings have approval_required=1 or
+    skip_overlapping_skills=1, `watchmen curate` must add the matching
+    `--approval-required` / `--skip-overlap` flag to the subprocess
+    invocation. Otherwise users would have to remember the flag every
+    run — the setting becomes ornamental."""
+    import argparse as _ap
+    import cli
+
+    captured = {}
+    def fake_run(cmd, cwd=None):
+        captured["cmd"] = cmd
+        # Mimic a successful curator: skills dir empty, exit 0
+        return type("R", (), {"returncode": 0})()
+    orig_run = cli.subprocess.run
+    orig_get = cli.state.get_project
+    orig_init = cli.state.init_db
+    orig_start = cli.state.start_run
+    orig_finish = cli.state.finish_run
+    orig_update = cli.state.update_project
+    cli.subprocess.run = fake_run
+    cli.state.init_db = lambda: None
+    cli.state.start_run = lambda *a, **k: 1
+    cli.state.finish_run = lambda *a, **k: None
+    cli.state.update_project = lambda *a, **k: None
+    cli.state.get_project = lambda key: {
+        "source_repo": "/tmp/repo",
+        "approval_required": 1,
+        "skip_overlapping_skills": 1,
+    }
+    try:
+        cli.cmd_curate(_ap.Namespace(
+            project="p", regen_claude=False, model="x",
+            skip_overlap=False, approval_required=False,
+        ))
+    finally:
+        cli.subprocess.run = orig_run
+        cli.state.get_project = orig_get
+        cli.state.init_db = orig_init
+        cli.state.start_run = orig_start
+        cli.state.finish_run = orig_finish
+        cli.state.update_project = orig_update
+    cmd = captured["cmd"]
+    assert "--skip-overlap" in cmd, f"setting didn't propagate: {cmd}"
+    assert "--approval-required" in cmd, f"setting didn't propagate: {cmd}"
+
+
 def test_corpus_migrate_schema_is_safe_when_db_missing():
     """`cli.main()` calls migrate_schema() before dispatching to every
     handler, including fresh installs where corpus.db doesn't exist yet.
@@ -2282,6 +2559,17 @@ def main() -> int:
     check("release-notes announces on bump, silences after",    test_changelog_show_release_notes_announces_on_bump_then_silences)
     check("hooks scrub legacy paths (install + uninstall)",     test_hooks_scrub_legacy_paths_on_install_and_uninstall)
     check("brief artifacts removed + don't sneak back",         test_brief_artifacts_no_longer_shipped)
+    print()
+    print("Harness-aware curator + approval queue (0.3.0):")
+    check("harness reader parses SKILL.md frontmatter",        test_harness_installed_skills_reads_skill_md_frontmatter)
+    check("harness.overlaps_existing matches case-insensitive", test_harness_overlaps_existing_matches_case_insensitive)
+    check("finder prompt embeds harness block",                test_curate_finder_prompt_includes_harness_block)
+    check("finder schema accepts `enhancement_of`",            test_curate_finder_schema_accepts_enhancement_of_field)
+    check("per-skill curator respects out_subdir",             test_curate_build_skill_curator_respects_out_subdir)
+    check("enhancement mode prepends harness context",         test_curate_build_skill_curator_enhancement_mode_prepends_context)
+    check("state.init_db migrates approval columns",           test_state_init_db_migrates_approval_columns_on_legacy_db)
+    check("settings parser accepts approval/skip_overlap",     test_cli_settings_parser_accepts_approval_required_and_skip_overlap)
+    check("cmd_curate forwards DB settings to subprocess",     test_cmd_curate_passes_flags_from_db_settings_to_subprocess)
     print()
     print("Launchd plist sanity:")
     check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)

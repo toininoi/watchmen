@@ -41,11 +41,15 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 
 # ─── Prompts ────────────────────────────────────────────────────────────────
 
-CANDIDATE_FINDER_PROMPT = dedent("""
+CANDIDATE_FINDER_PROMPT_TEMPLATE = dedent("""
     You are identifying real, packageable skill candidates for a Claude Code workspace.
 
+    {harness_block}
+
     A real skill candidate must satisfy ALL of these:
-      - It is a recurring procedure (the user does it more than once across sessions).
+      - It is a RECURRING procedure. The pattern must recur — either as repeated
+        steps within a single session OR across multiple sessions. A one-off
+        execution is not enough.
       - It has actual artifacts (Python scripts, bash commands, structured prompts, file templates) that
         already exist in the source repo or in session transcripts.
       - It can be triggered by a specific kind of user request — you can describe the trigger.
@@ -54,22 +58,50 @@ CANDIDATE_FINDER_PROMPT = dedent("""
     Reject candidates that are:
       - Behavioral observations only ("task-direct", "low-ceremony communication", "thanks mate") —
         these are about the user, not skills.
-      - One-time exploratory work that didn't repeat.
+      - One-time exploratory work that didn't repeat. If you cannot point at the
+        recurrence (within a session or across sessions), drop it.
       - Stuff that's already a one-line bash command with no procedure around it.
       - About OTHER repos, personal side projects, or non-coding workflows (e.g. investment
         analysis, stock trading, customer projects rooted in other directories), even if the
         thesis mentions them — they would not belong checked into THIS repo's skills/ directory.
         The test: would the artifacts live naturally inside the source repo you're scanning?
 
+    Harness overlap — IMPORTANT when the list above is non-empty:
+      - If a candidate substantially overlaps with one of the user's installed
+        skills (same job, same trigger phrasing), prefer proposing it as an
+        ENHANCEMENT of the existing skill rather than a brand-new bundle.
+        Set the `enhancement_of` field on the candidate to the existing slug.
+        Frame the description as "add X to <slug>" or "fill in missing Y in <slug>".
+      - If a candidate is genuinely the same skill (no enhancement to offer), drop it.
+        Don't ship duplicates — the user already has it.
+      - If a candidate composes two installed skills run in sequence
+        (e.g. the user runs `craft-plan` then `implement`), propose a composed
+        skill that REFERENCES the existing slugs in its body rather than
+        re-implementing their procedure. Still set `enhancement_of` to the more
+        primary of the two slugs.
+
     Process:
       1. Read the thesis sections "Skill candidates" and "Workflow archetypes" via read_thesis_section.
       2. For each plausible candidate, use list_repo_files + read_repo_file to verify the artifacts exist.
       3. Pick session_ids that demonstrate the trigger pattern via query_corpus or by reading the thesis's
          "Notable sessions" section.
-      4. When you have your filtered list, call finish_candidates with a JSON-like structured output.
+      4. Cross-reference against the user's harness list above. Decide for each:
+         genuinely new / enhancement of existing / duplicate-drop.
+      5. When you have your filtered list, call finish_candidates with a JSON-like structured output.
 
-    Be ruthless. Better to ship 4 strong candidates than 12 weak ones.
+    Be ruthless. Better to ship 3 strong, distinct candidates than 10 weak or
+    overlapping ones. The user's harness will get cluttered if you over-propose.
 """).strip()
+
+
+def _build_finder_prompt(installed: list[dict]) -> str:
+    """Compose the candidate-finder system prompt with the harness block.
+    Kept thin so tests can introspect the resulting string easily."""
+    import harness as _harness
+    block = _harness.format_for_prompt(installed)
+    if not block:
+        block = "(The user has no skills installed in their Claude Code harness yet.)"
+    return CANDIDATE_FINDER_PROMPT_TEMPLATE.format(harness_block=block)
 
 
 SKILL_CURATOR_PROMPT_TEMPLATE = dedent("""
@@ -303,7 +335,12 @@ def make_critic_runner(client: httpx.Client, model: str, project_key: str, log_p
 
 # ─── Stage builders ─────────────────────────────────────────────────────────
 
-def build_finder_agent(client, model, project_key, source_repo, log_path, recorder: ReadRecorder | None = None):
+def build_finder_agent(client, model, project_key, source_repo, log_path, recorder: ReadRecorder | None = None, installed_skills: list[dict] | None = None):
+    """Build the candidate-finder agent. `installed_skills` is the user's
+    Claude Code harness (from harness.installed_skills()); when non-empty
+    the candidate finder is instructed to propose enhancements rather
+    than duplicates, and to set `enhancement_of` on overlapping candidates."""
+    import harness as _harness
     specs, handlers = make_tools(source_repo=source_repo, project_key=project_key)
     keep = ["query_corpus", "read_thesis_section", "list_repo_files", "read_repo_file"]
     finder_specs = [s for s in specs if s["function"]["name"] in keep]
@@ -325,16 +362,27 @@ def build_finder_agent(client, model, project_key, source_repo, log_path, record
                         "when_to_use": {"type": "string"},
                         "source_files": {"type": "array", "items": {"type": "string"}},
                         "session_ids": {"type": "array", "items": {"type": "string"}},
+                        "enhancement_of": {
+                            "type": "string",
+                            "description": (
+                                "Optional. If this candidate enhances an existing skill "
+                                "in the user's Claude Code harness rather than being "
+                                "brand-new, set this to that existing skill's slug. "
+                                "Drives the curator's enhancement mode in Stage 2."
+                            ),
+                        },
                     },
                     "required": ["name", "slug", "description", "when_to_use"],
                 },
             },
         }, "required": ["candidates"]},
     }})
+    if installed_skills is None:
+        installed_skills = _harness.installed_skills()
     return Agent(
         name="finder",
         model=model,
-        system_prompt=CANDIDATE_FINDER_PROMPT,
+        system_prompt=_build_finder_prompt(installed_skills),
         tool_specs=finder_specs,
         tool_handlers=finder_handlers,
         terminal_tool="finish_candidates",
@@ -343,10 +391,21 @@ def build_finder_agent(client, model, project_key, source_repo, log_path, record
     )
 
 
-def build_skill_curator(client, model, project_key, source_repo, candidate, log_path, run_critic, recorder: ReadRecorder | None = None):
+def build_skill_curator(client, model, project_key, source_repo, candidate, log_path, run_critic, recorder: ReadRecorder | None = None, out_subdir: str = "skills"):
+    """Build the per-skill curator agent.
+
+    `out_subdir` controls where the bundle lands inside `kai_claude/<project>/`.
+    Default is `skills` (the canonical, harness-installable location). When
+    a project has `approval_required` set, new bundles route to `_pending`
+    instead — the user reviews and approves them via `watchmen review` before
+    they join the harness.
+
+    `candidate["enhancement_of"]` (set by the harness-aware finder) makes
+    this curator generate a SKILL.md framed as a delta to the user's existing
+    harness skill rather than a from-scratch bundle."""
     specs, handlers = make_tools(source_repo=source_repo, project_key=project_key)
     slug = candidate["slug"]
-    expected_prefix = f"skills/{slug}/"
+    expected_prefix = f"{out_subdir}/{slug}/"
     raw_writer = handlers["write_kai_claude_file"]
 
     def write_skill_scoped(file_path: str, content: str) -> str:
@@ -355,13 +414,14 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
             file_path = file_path[len(slug) + 1 :]
         if file_path.startswith(expected_prefix):
             return raw_writer(file_path=file_path, content=content)
-        # Block writes to another skill or absolute paths
-        if file_path.startswith("skills/") or file_path.startswith("/") or ".." in file_path:
+        # Block writes to another skill, the sibling output subdir, or absolute paths
+        forbidden_prefixes = ("skills/", "_pending/", "/")
+        if any(file_path.startswith(p) for p in forbidden_prefixes) or ".." in file_path:
             return (
                 f"ERROR: this skill curator can only write under '{expected_prefix}'. "
                 f"You tried '{file_path}'. Use relative paths like 'SKILL.md', 'scripts/foo.py'."
             )
-        # Auto-scope relative paths under skills/<slug>/
+        # Auto-scope relative paths under <out_subdir>/<slug>/
         clean = file_path.lstrip("./")
         full = expected_prefix + clean
         result = raw_writer(file_path=full, content=content)
@@ -375,12 +435,12 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
     specs.append({"type": "function", "function": {
         "name": "write_kai_claude_file",
         "description": (
-            f"Write a file UNDER skills/{slug}/ (this skill's bundle). Use relative paths: "
+            f"Write a file UNDER {expected_prefix} (this skill's bundle). Use relative paths: "
             f"'SKILL.md', 'scripts/<name>.py', 'references/<name>.md', 'requirements.txt', "
-            f"'.env.example'. Paths are auto-scoped under skills/{slug}/. Cannot write outside this scope."
+            f"'.env.example'. Paths are auto-scoped under {expected_prefix}. Cannot write outside this scope."
         ),
         "parameters": {"type": "object", "properties": {
-            "file_path": {"type": "string", "description": f"Relative path under skills/{slug}/"},
+            "file_path": {"type": "string", "description": f"Relative path under {expected_prefix}"},
             "content": {"type": "string"},
         }, "required": ["file_path", "content"]},
     }})
@@ -417,6 +477,42 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
         session_ids=", ".join(candidate.get("session_ids", [])) or "(use query_corpus + thesis to find)",
         skill_slug=candidate["slug"],
     )
+
+    # Enhancement mode: prepend a contextual block so the curator knows it's
+    # extending an existing harness skill rather than authoring a new one.
+    # When the harness skill's SKILL.md is readable, embed its content so
+    # the curator can frame additions in terms of what's already covered.
+    enh_slug = candidate.get("enhancement_of")
+    if enh_slug:
+        harness_path = Path.home() / ".claude" / "skills" / enh_slug / "SKILL.md"
+        if harness_path.exists():
+            try:
+                # 2k char ceiling — enough for frontmatter + procedure outline
+                # without overwhelming the prompt budget.
+                excerpt = harness_path.read_text(encoding="utf-8")[:2000]
+            except OSError:
+                excerpt = "(could not read harness skill file)"
+            sys_prompt = (
+                f"## ENHANCEMENT MODE — extending an installed harness skill\n\n"
+                f"This candidate enhances the user's existing skill `{enh_slug}`. "
+                f"Their installed SKILL.md (first 2000 chars):\n\n"
+                f"```markdown\n{excerpt}\n```\n\n"
+                f"Your job is to ADD value to that skill — a new section, a "
+                f"missing script, refined triggers — NOT to reproduce its "
+                f"behavior. In your SKILL.md, explicitly note that this bundle "
+                f"complements `{enh_slug}` and indicate which parts of the "
+                f"existing skill you build on.\n\n"
+                + sys_prompt
+            )
+        else:
+            sys_prompt = (
+                f"## ENHANCEMENT MODE — extending an installed harness skill\n\n"
+                f"This candidate enhances the user's existing skill `{enh_slug}` "
+                f"(SKILL.md not readable at runtime). Frame the bundle as an "
+                f"enhancement, not from-scratch. Reference `{enh_slug}` in your "
+                f"SKILL.md and indicate what you're adding on top.\n\n"
+                + sys_prompt
+            )
 
     return Agent(
         name=f"curator[{candidate['slug']}]",
@@ -827,6 +923,12 @@ def main():
     parser.add_argument("--skip-skills", action="store_true", help="skip stage 2 — assume kai_claude/<project>/skills/* is already populated")
     parser.add_argument("--regen-all", action="store_true", help="invalidate every input cache for this project, forcing full re-curation")
     parser.add_argument("--curator-concurrency", type=int, default=4, help="parallel per-skill curator agents in stage 2 (default 4)")
+    parser.add_argument("--skip-overlap", action="store_true",
+        help="drop candidates that overlap with the user's already-installed harness skills "
+             "(default: propose them as enhancements via the `enhancement_of` field)")
+    parser.add_argument("--approval-required", action="store_true",
+        help="route newly-curated skill bundles to kai_claude/<project>/_pending/<slug>/ "
+             "for user review instead of dropping straight into skills/")
     args = parser.parse_args()
 
     api_key = load_api_key()
@@ -850,6 +952,15 @@ def main():
     with httpx.Client(timeout=300.0) as client:
         run_critic = make_critic_runner(client, args.model, args.project, log_path)
 
+        # Read the user's installed Claude Code harness once per run. Powers
+        # both the prompt injection (so the finder knows what already exists)
+        # and the --skip-overlap filter (post-finder, drops candidates that
+        # duplicate an installed skill outright).
+        import harness as _harness
+        installed = _harness.installed_skills()
+        if installed:
+            print(f"   harness: {len(installed)} installed skill(s) — finder will consider overlaps", flush=True)
+
         # ─── Stage 1: candidate-finder ────────────────────────────────────────
         candidates_path = out_dir / "_candidates.json"
         candidates_cache = out_dir / ".candidates.inputs.json"
@@ -864,7 +975,7 @@ def main():
         else:
             print("[1/4] candidate-finder...", flush=True)
             t0 = time.time()
-            finder = build_finder_agent(client, args.model, args.project, args.repo, log_path, finder_recorder)
+            finder = build_finder_agent(client, args.model, args.project, args.repo, log_path, finder_recorder, installed_skills=installed)
             result, _ = finder.run(
                 f"Identify the strongest procedural skill candidates for project '{args.project}' "
                 f"located at '{args.repo}'. Verify each has artifacts. Cap at {args.max_skills}.",
@@ -878,7 +989,26 @@ def main():
                 write_cache(candidates_cache, finder_recorder)
             print(f"      → {len(candidates)} candidates in {time.time()-t0:.1f}s", flush=True)
             for c in candidates:
-                print(f"         - {c.get('slug', '?'):<35} {c.get('description', '')[:80]}", flush=True)
+                eflag = f"  [enhancement of {c['enhancement_of']}]" if c.get("enhancement_of") else ""
+                print(f"         - {c.get('slug', '?'):<35} {c.get('description', '')[:80]}{eflag}", flush=True)
+
+        # --skip-overlap: drop candidates whose slug matches an installed skill.
+        # The prompt-side path proposes them as enhancements; this is the harder
+        # opt-out the user can flip when they explicitly don't want anything
+        # near their existing harness skills touched.
+        if args.skip_overlap and installed and candidates:
+            pre = len(candidates)
+            candidates = [
+                c for c in candidates
+                if not _harness.overlaps_existing(c.get("slug", ""), installed)
+            ]
+            if pre != len(candidates):
+                print(
+                    f"      --skip-overlap: dropped {pre - len(candidates)} candidate(s) "
+                    f"overlapping with installed harness skills",
+                    flush=True,
+                )
+            candidates_path.write_text(json.dumps(candidates, indent=2))
 
         # Apply user-controlled blocklist before continuing. Logged out so the
         # curator run record makes the filter visible.
@@ -907,26 +1037,32 @@ def main():
             print(f"[2/4] skipping stage 2 — found {len(completed)} existing skills: {', '.join(completed)}", flush=True)
         else:
             # Phase 2a: sequential cache scan — cheap (~ms per skill), determines
-            # which candidates need the expensive agent run.
+            # which candidates need the expensive agent run. With approval mode,
+            # we also check _pending/<slug>/ — an already-pending bundle counts
+            # as "has bundle" so we don't re-curate it on every run.
             cache_hits: list[str] = []
             pinned_hits: list[str] = []
-            miss_list: list[dict] = []
+            miss_list: list[tuple[dict, str]] = []  # (candidate, out_subdir)
             for cand in candidates:
                 slug = cand.get("slug")
                 if not slug:
                     continue
-                skill_dir = out_dir / "skills" / slug
-                has_bundle = (skill_dir / "SKILL.md").exists()
-                # A pinned slug with an existing bundle is a forced cache hit.
-                # If a pinned slug somehow has no bundle on disk (user deleted
-                # it manually), fall through to the normal cache-or-curate path
-                # so the user isn't stuck without that skill.
+                approved_dir = out_dir / "skills" / slug
+                pending_dir = out_dir / "_pending" / slug
+                approved_has = (approved_dir / "SKILL.md").exists()
+                pending_has = (pending_dir / "SKILL.md").exists()
+                has_bundle = approved_has or pending_has
+                # Pick the live bundle dir for cache + pin checks.
+                live_dir = approved_dir if approved_has else pending_dir
+                # Approval routing: new bundles go to _pending if approval_required,
+                # already-approved skills keep updating in skills/ (trusted).
+                target_subdir = "skills" if (approved_has or not args.approval_required) else "_pending"
                 if slug in pinned and has_bundle:
                     pinned_hits.append(slug)
-                elif has_bundle and cache_hit(skill_dir / ".inputs.json", replay_handlers):
+                elif has_bundle and cache_hit(live_dir / ".inputs.json", replay_handlers):
                     cache_hits.append(slug)
                 else:
-                    miss_list.append(cand)
+                    miss_list.append((cand, target_subdir))
             completed.extend(cache_hits)
             completed.extend(pinned_hits)
             for slug in pinned_hits:
@@ -944,37 +1080,41 @@ def main():
             # Phase 2b: parallel agent runs for cache misses. Each skill is
             # independent — separate Agent instance, separate output directory,
             # separate cache file. httpx.Client is thread-safe and shared.
-            def _curate_one(cand: dict) -> tuple[str, str | None, ReadRecorder, float]:
-                """Run one skill curator. Returns (slug, summary, recorder, elapsed_seconds).
-                summary=None means the agent didn't fire its terminal tool."""
+            def _curate_one(cand: dict, target_subdir: str) -> tuple[str, str, str | None, ReadRecorder, float]:
+                """Run one skill curator. Returns (slug, subdir, summary, recorder, elapsed_seconds).
+                summary=None means the agent didn't fire its terminal tool. subdir
+                is echoed back so the result-handling code knows where to write
+                the cache file (skills/ vs _pending/)."""
                 slug = cand["slug"]
                 t0 = time.time()
                 rec = ReadRecorder()
                 curator = build_skill_curator(
-                    client, args.model, args.project, args.repo, cand, log_path, run_critic, rec
+                    client, args.model, args.project, args.repo, cand, log_path, run_critic, rec,
+                    out_subdir=target_subdir,
                 )
                 result, _ = curator.run(
                     f"Author the skill bundle for '{cand['name']}'. Investigate, draft, run the critic, refine, finish.",
                     max_iter=45,
                 )
                 summary = (result or {}).get("summary") if result else None
-                return slug, summary, rec, time.time() - t0
+                return slug, target_subdir, summary, rec, time.time() - t0
 
             concurrency = max(1, args.curator_concurrency)
             done_count = 0
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                futures = {pool.submit(_curate_one, c): c for c in miss_list}
+                futures = {pool.submit(_curate_one, c, sub): (c, sub) for c, sub in miss_list}
                 for fut in as_completed(futures):
-                    cand = futures[fut]
+                    cand, _sub = futures[fut]
                     slug = cand.get("slug", "?")
                     done_count += 1
                     try:
-                        slug, summary, rec, elapsed = fut.result()
+                        slug, subdir, summary, rec, elapsed = fut.result()
                         if summary is not None:
                             completed.append(slug)
-                            write_cache(out_dir / "skills" / slug / ".inputs.json", rec)
+                            write_cache(out_dir / subdir / slug / ".inputs.json", rec)
+                            tag = " → _pending" if subdir == "_pending" else ""
                             print(
-                                f"      [{done_count}/{len(miss_list)}] {slug} done in {elapsed:.1f}s — {(summary or '')[:80]}",
+                                f"      [{done_count}/{len(miss_list)}] {slug} done in {elapsed:.1f}s{tag} — {(summary or '')[:80]}",
                                 flush=True,
                             )
                         else:
