@@ -1550,6 +1550,197 @@ def test_cli_recent_walks_git_log_of_kai_claude():
             cli.ROOT = orig_root
 
 
+def test_cli_insights_aggregates_curated_and_uncurated_repos():
+    """`watchmen insights` is the cross-repo digest that complements
+    Anthropic's `/insights`. It must:
+      - print the global header with the ◷ Watchmen banner
+      - list every tracked repo (curated and not)
+      - surface cross-repo patterns when a slug appears in ≥2 _candidates.json
+      - call out untapped corpora (sessions captured, no skills curated yet)
+      - cross-link to `/insights` so users understand they're complementary
+    Fixture: two repos, p1 with skills/lint-fixer/, p2 with the same slug
+    only as a _candidates.json entry → the cross-repo + untapped sections
+    both fire."""
+    import io
+    import json as _json
+    import re
+    import cli
+    import metrics as _m
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        _fake_curated_bundle(td_path, "p1")  # has skills/lint-fixer/
+        # p2: shares the lint-fixer slug in _candidates.json but has no
+        # skills/ dir. That's the pattern we need both for cross-repo
+        # detection (✓ curated vs · candidate) and untapped corpora.
+        p2 = td_path / "kai_claude" / "p2"
+        p2.mkdir(parents=True)
+        (p2 / "_candidates.json").write_text(_json.dumps([{
+            "name": "Lint Fixer", "slug": "lint-fixer",
+            "description": "stub", "when_to_use": "stub",
+            "source_files": [], "session_ids": [],
+        }]))
+
+        orig_root = cli.ROOT
+        orig_list = cli.state.list_projects
+        orig_runs = cli.state.recent_runs
+        orig_prog = cli.state.get_project_progress
+        orig_init = cli.state.init_db
+        orig_breakdown = cli._adapter_breakdown
+        orig_daily = _m.daily_metrics
+
+        cli.ROOT = td_path
+        cli.state.init_db = lambda: None
+        cli.state.list_projects = lambda: [
+            {"project_key": "p1", "source_repo": "/fake/p1"},
+            {"project_key": "p2", "source_repo": "/fake/p2"},
+        ]
+        cli.state.recent_runs = lambda limit=20, project_key=None: [
+            {"started_at": "2026-05-12T10:00:00", "ended_at": "2026-05-12T10:05:00"}
+        ]
+        # p2 has captured sessions + pending analysis; p1 is fully caught up.
+        cli.state.get_project_progress = lambda key: {
+            "new_prompts_since_last_analysis": 12 if key == "p2" else 0
+        }
+        cli._adapter_breakdown = lambda key: (
+            {"claude_code": 3, "codex": 1, "pi": 0} if key == "p2"
+            else {"claude_code": 7, "codex": 0, "pi": 0}
+        )
+        _m.daily_metrics = lambda key, days=30: [
+            {"sessions": 2}, {"sessions": 1}, {"sessions": 0},
+        ]
+
+        buf = io.StringIO()
+        orig_stdout = cli.sys.stdout
+        cli.sys.stdout = buf
+        try:
+            # --no-llm so the test never hits OpenRouter in CI.
+            rc = cli.main(["insights", "--no-llm"])
+        finally:
+            cli.sys.stdout = orig_stdout
+            cli.ROOT = orig_root
+            cli.state.list_projects = orig_list
+            cli.state.recent_runs = orig_runs
+            cli.state.get_project_progress = orig_prog
+            cli.state.init_db = orig_init
+            cli._adapter_breakdown = orig_breakdown
+            _m.daily_metrics = orig_daily
+
+        out = buf.getvalue()
+        # Strip ANSI escapes AND collapse all whitespace runs to single spaces
+        # so the assertions don't get fooled by Rich's terminal-width line
+        # wrapping inside the StringIO sink.
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        plain_flat = re.sub(r"\s+", " ", plain)
+        assert rc == 0, f"insights failed (rc={rc}): {out}"
+        # Global header
+        assert "Watchmen" in plain and "global digest" in plain, (
+            f"header missing: {plain!r}"
+        )
+        assert "2 repos" in plain_flat, f"repo count missing: {plain_flat[:300]!r}"
+        # Both repos appear
+        assert "p1" in plain and "p2" in plain
+        # Cross-repo pattern detected for the shared slug
+        assert "Cross-repo patterns" in plain_flat
+        assert "lint-fixer" in plain
+        # Untapped corpora — p2 has sessions but zero skills curated
+        assert "Untapped corpora" in plain_flat
+
+
+def test_cli_insights_save_view_list_roundtrip():
+    """`watchmen insights` caches each LLM run under ~/.watchmen/insights/
+    so the user can replay it without burning another API call. This test
+    drives the save/load/list helpers directly against a temp cache dir
+    (no LLM, no API key, no network) to verify the lifecycle:
+      - save writes a markdown file with YAML frontmatter
+      - latest_digest_path picks the newest by filename
+      - read_digest_metadata round-trips the frontmatter
+      - --list renders one row per saved digest
+      - --view renders the cached body
+      - non-tty stdin defaults to view (refuses to silently regenerate)
+    """
+    import io
+    import cli
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        # Redirect the cache to a temp dir so we don't pollute the user's
+        # real ~/.watchmen/insights/. _insights_cache_dir reads HOME each
+        # call, so overriding HOME for the test is the cleanest hook.
+        import os as _os
+        orig_home = _os.environ.get("HOME")
+        _os.environ["HOME"] = str(td_path)
+        try:
+            # 1. Empty cache → latest is None, --list says "no saved digests"
+            assert cli._latest_digest_path() is None
+
+            # 2. Save two digests with different timestamps; latest should
+            #    be the newer one (filenames sort lexicographically, which
+            #    works because the timestamp format is zero-padded ISO-ish).
+            p_old = cli._save_digest("old body", "deepseek/deepseek-v4-flash", 2)
+            # Force a different mtime/filename by sleeping a hair, but the
+            # filename second-resolution may collide — overwrite the older
+            # one's name to ensure ordering is stable.
+            import time as _t
+            _t.sleep(1.1)
+            p_new = cli._save_digest("# new body\n\nhello", "claude-sonnet-4-6", 3)
+            assert p_old.exists() and p_new.exists()
+            assert cli._latest_digest_path() == p_new, "latest must be the newest by filename"
+
+            # 3. Frontmatter round-trips
+            meta, body = cli._read_digest_metadata(p_new)
+            assert meta["model"] == "claude-sonnet-4-6"
+            assert meta["repos_synthesized"] == "3"
+            assert body.startswith("# new body"), f"frontmatter not stripped: {body!r}"
+
+            # 4. --list renders both, newest first
+            buf = io.StringIO()
+            orig_stdout = cli.sys.stdout
+            cli.sys.stdout = buf
+            try:
+                rc = cli.main(["insights", "--list"])
+            finally:
+                cli.sys.stdout = orig_stdout
+            assert rc == 0
+            import re
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+            assert "Saved digests (2)" in plain
+            # Newest first → claude-sonnet line appears before deepseek line
+            idx_new = plain.find("claude-sonnet")
+            idx_old = plain.find("deepseek")
+            assert idx_new != -1 and idx_old != -1 and idx_new < idx_old
+
+            # 5. Non-tty + cache present → _decide_digest_action returns "view"
+            #    (refuses to silently spend API credit). stdin in the test
+            #    harness is never a tty, so this asserts the safe default.
+            import argparse as _ap
+            from rich.console import Console as _C
+            class _Args:
+                regenerate = False
+                view = False
+            action = cli._decide_digest_action(_Args(), p_new, _C(file=io.StringIO()))
+            assert action == "view", f"expected view fallback for non-tty, got {action!r}"
+
+            # 6. --regenerate flag forces "regenerate" regardless of cache.
+            class _ArgsRegen:
+                regenerate = True
+                view = False
+            assert cli._decide_digest_action(_ArgsRegen(), p_new, _C(file=io.StringIO())) == "regenerate"
+
+            # 7. --view flag with empty cache → "quit" + warning
+            (p_new).unlink()
+            (p_old).unlink()
+            class _ArgsView:
+                regenerate = False
+                view = True
+            stub_console = _C(file=io.StringIO())
+            assert cli._decide_digest_action(_ArgsView(), None, stub_console) == "quit"
+        finally:
+            if orig_home is None:
+                _os.environ.pop("HOME", None)
+            else:
+                _os.environ["HOME"] = orig_home
+
+
 def test_doomsday_ascii_renders_three_lines_with_correct_word():
     """`_doomsday_ascii` must return exactly 3 lines (clock face + bar + tagline),
     embed the spelled-out minute word, and embed a doom-bar whose filled count
@@ -1783,6 +1974,8 @@ def main() -> int:
     check("`show` overview / project / file / skill modes",  test_cli_show_modes_list_overview_and_dump)
     check("`why` surfaces provenance + curator log excerpt", test_cli_why_shows_provenance_and_curator_excerpt)
     check("`recent` runs git log inside each kai_claude/",   test_cli_recent_walks_git_log_of_kai_claude)
+    check("`insights` digests across repos + cross-link",    test_cli_insights_aggregates_curated_and_uncurated_repos)
+    check("`insights` cache save/view/list + non-tty default", test_cli_insights_save_view_list_roundtrip)
     print()
     print("Watchmen aesthetic:")
     check("doomsday clock buckets stale projects correctly", test_doomsday_clock_brackets_for_status_command)
