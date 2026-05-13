@@ -1232,6 +1232,29 @@ def _fake_curated_bundle(td: Path, project_key: str = "fakeproj") -> Path:
     return proj
 
 
+def test_sparkline_and_bar_edge_cases():
+    """The TUI helpers must degrade gracefully on degenerate inputs (empty
+    series, all-zero series, zero max for bars). A regression here would mean
+    the metrics command crashes for projects with no spend yet — exactly the
+    state new users land in for their first hour."""
+    import cli
+    # Sparkline: empty → empty
+    assert cli._sparkline([]) == ""
+    # Sparkline: all zeros → all-low block (length preserved)
+    s = cli._sparkline([0, 0, 0, 0])
+    assert len(s) == 4 and all(c == "▁" for c in s)
+    # Sparkline: ascending series renders ascending blocks
+    s = cli._sparkline([1, 2, 4, 8, 16])
+    assert s[0] < s[-1]  # blocks are sortable: ▁ < ▂ < … < █
+    # Bar: zero max → empty (no division explosion)
+    assert cli._bar(5, 0, width=10) == ""
+    # Bar: full value vs max → full-width string of full blocks
+    assert cli._bar(10, 10, width=10) == "█" * 10
+    # Bar: half-block precision for half-position values
+    half = cli._bar(0.55, 1.0, width=10)
+    assert "▌" in half, f"half-block missing: {half!r}"
+
+
 def test_cli_show_modes_list_overview_and_dump():
     """`watchmen show` has three modes; each must produce output that contains
     a stable identifying string. Mode 1: 'Curated projects:'. Mode 2: the
@@ -1577,6 +1600,7 @@ def main() -> int:
     check("`settings port` get/set + validates input",     test_cli_settings_port_get_and_set_with_validation)
     print()
     print("Round 1 — inspection commands:")
+    check("sparkline + bar handle empty / all-zero series",  test_sparkline_and_bar_edge_cases)
     check("`show` overview / project / file / skill modes",  test_cli_show_modes_list_overview_and_dump)
     check("`why` surfaces provenance + curator log excerpt", test_cli_why_shows_provenance_and_curator_excerpt)
     check("`recent` runs git log inside each kai_claude/",   test_cli_recent_walks_git_log_of_kai_claude)

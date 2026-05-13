@@ -81,6 +81,41 @@ def _cyan(s: str) -> str:
     return f"\033[36m{s}\033[0m"
 
 
+# ─── TUI visualization helpers ──────────────────────────────────────────────
+# Unicode block characters used for compact bar charts + sparklines. No
+# external chart deps — we just print sized strings inside Rich Tables /
+# plain stdout. Both helpers degrade gracefully when their input is empty
+# or all-zero, returning empty strings rather than ZeroDivisionError.
+
+
+_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: list[float]) -> str:
+    """Compact one-character-per-data-point trend line. Auto-scales to the
+    max value in the series — useful for showing daily cost or session counts
+    over a 30-day window in 30 visible characters."""
+    if not values:
+        return ""
+    peak = max(values)
+    if peak <= 0:
+        return _SPARK_BLOCKS[0] * len(values)
+    return "".join(_SPARK_BLOCKS[min(7, int((v / peak) * 7))] for v in values)
+
+
+def _bar(value: float, max_value: float, width: int = 30) -> str:
+    """Horizontal bar with half-block precision. Empty when value or max ≤ 0
+    so projects with no spend render cleanly as an empty cell instead of `0`
+    pixels of bar."""
+    if max_value <= 0 or value <= 0:
+        return ""
+    ratio = max(0.0, min(1.0, value / max_value))
+    cells = ratio * width
+    full = int(cells)
+    half = "▌" if (cells - full) >= 0.5 else ""
+    return "█" * full + half
+
+
 # ─── Watchmen aesthetic helpers ─────────────────────────────────────────────
 # Small thematic touches keyed to each character: Manhattan blue for `doctor`,
 # Doomsday Clock yellow for `status`, mission-log framing for `runs`. Kept
@@ -262,33 +297,60 @@ def cmd_status(args) -> int:
     for line in _doomsday_ascii(needs, len(tracked)):
         print(line)
     print()
-    print(f"  {'project':<28} {'state':<8} {'last analyst':<12} {'new':>5}  {'sessions (cc·cd·pi)':<24} notes")
-    print(_dim("  " + "─" * 110))
-    for p, progress in rows:
-        last_day = (p["last_analyst_day"] or "—")[:12]
-        new_n = progress.get("new_prompts_since_last_analysis", "?")
-        st = "enabled" if p["enabled"] else "paused"
-        flag = ""
-        if progress.get("needs_analysis"):
-            flag = _yellow("● needs analysis")
-        elif p["last_analyst_day"]:
-            flag = _green("● up to date")
-        # Per-adapter breakdown — surfaces the Codex/pi.dev sessions that were
-        # previously invisible in the CLI dashboard.
-        adapters = _format_adapter_count(_adapter_breakdown(p["project_key"]))
-        print(f"  {p['project_key'][:28]:<28} {st:<8} {last_day:<12} {str(new_n):>5}  {adapters:<24} {flag}")
 
-    print()
+    # Rich Table auto-sizes columns to widest cell — fixes the printf
+    # alignment drift we used to have when the adapter-counts column overflowed
+    # its header. Headers + separators rendered consistently with `doctor`
+    # and `metrics`.
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+    table = Table(show_header=True, header_style="bold", expand=False)
+    table.add_column("project")
+    table.add_column("state")
+    table.add_column("last analyst")
+    table.add_column("new", justify="right")
+    table.add_column("cc", justify="right")
+    table.add_column("cd", justify="right")
+    table.add_column("pi", justify="right")
+    table.add_column("notes")
+    for p, progress in rows:
+        last_day = p["last_analyst_day"] or "—"
+        new_n = progress.get("new_prompts_since_last_analysis", "?")
+        st = "enabled" if p["enabled"] else "[yellow]paused[/]"
+        if progress.get("needs_analysis"):
+            flag = "[yellow]● needs analysis[/]"
+        elif p["last_analyst_day"]:
+            flag = "[green]● up to date[/]"
+        else:
+            flag = ""
+        bd = _adapter_breakdown(p["project_key"])
+        table.add_row(
+            p["project_key"], st, last_day, str(new_n),
+            str(bd.get("claude_code", 0)),
+            str(bd.get("codex", 0)),
+            str(bd.get("pi", 0)),
+            flag,
+        )
+    console.print(table)
+
     runs = state.recent_runs(limit=5)
     if runs:
         # "Mission log" framing borrows from the comic's Crimebusters/Minutemen
         # tradition of recording field activity in a shared journal.
-        print(_bold("Mission log:"))
+        console.print()
+        console.print("[bold]Mission log:[/]")
+        log = Table(show_header=False, box=None, padding=(0, 1, 0, 1))
+        log.add_column("when")
+        log.add_column("project")
+        log.add_column("kind")
+        log.add_column("status")
         for r in runs:
-            t = r["started_at"][:19]
+            t = (r["started_at"] or "")[:19]
             status = r["status"]
-            color = _green if status == "ok" else _yellow if status == "running" else _dim
-            print(f"  {t}  {r['project_key']:<25} {r['kind']:<22} {color(status)}")
+            tag = {"ok": "[green]ok[/]", "running": "[yellow]running[/]"}.get(status, f"[dim]{status}[/]")
+            log.add_row(t, r["project_key"], r["kind"], tag)
+        console.print(log)
     return 0
 
 
@@ -865,8 +927,7 @@ def cmd_show(args) -> int:
         if not path.exists():
             print(_yellow(f"file not found: {path}"))
             return 1
-        print(_dim(f"# {path}\n"))
-        sys.stdout.write(path.read_text())
+        _render_file(path, raw=args.raw)
         return 0
 
     skill_dir = proj_dir / "skills" / target
@@ -877,9 +938,7 @@ def cmd_show(args) -> int:
         if candidates:
             print(_dim(f"  available: {', '.join(candidates)}"))
         return 1
-    print(_dim(f"# {skill_md}\n"))
-    sys.stdout.write(skill_md.read_text())
-    print()
+    _render_file(skill_md, raw=args.raw)
     files = sorted(p for p in skill_dir.rglob("*") if p.is_file() and p != skill_md)
     if files:
         print()
@@ -888,6 +947,34 @@ def cmd_show(args) -> int:
             rel = f.relative_to(skill_dir)
             print(f"  {rel}  {_dim(f'({f.stat().st_size:,}B)')}")
     return 0
+
+
+def _render_file(path: Path, raw: bool = False) -> None:
+    """Pretty-print a file based on extension. `.md` → Rich Markdown render
+    (headers/code/tables stylized). `.json` → Rich JSON with syntax colors.
+    Anything else → plain text. `--raw` forces plain text — important when
+    piping output to a file (Rich already strips ANSI when stdout isn't a
+    tty, but `--raw` is the explicit, scriptable opt-out)."""
+    text = path.read_text()
+    if raw:
+        sys.stdout.write(text)
+        return
+    print(_dim(f"# {path.name}\n"))
+    if path.suffix == ".md":
+        # Rich Markdown styles ATX headers, fenced code, lists, blockquotes,
+        # tables. Auto-disables styling when stdout isn't a tty.
+        from rich.console import Console
+        from rich.markdown import Markdown
+        Console().print(Markdown(text))
+    elif path.suffix == ".json":
+        from rich.console import Console
+        from rich.json import JSON
+        try:
+            Console().print(JSON(text))
+        except Exception:
+            sys.stdout.write(text)
+    else:
+        sys.stdout.write(text)
 
 
 def _curation_log_excerpt(proj_dir: Path, skill_slug: str, skill_name: str) -> str:
@@ -1283,6 +1370,20 @@ def cmd_metrics(args) -> int:
     last7 = _metrics.summarize_window(rows, min(7, args.days))
     last30 = _metrics.summarize_window(rows, args.days)
     console = Console()
+
+    # Sparklines for daily cost + prompts — give an at-a-glance shape of the
+    # window. Sparkline width = day count, so it's naturally proportional to
+    # --days. `rows` is ordered most-recent-first by metrics.daily_metrics;
+    # reverse to read left-to-right as time progresses.
+    daily = list(reversed(rows))
+    cost_series = [float(r.get("cost_usd", 0) or 0) for r in daily]
+    prompts_series = [float(r.get("prompts", 0) or 0) for r in daily]
+    if any(cost_series):
+        console.print(f"  [yellow]cost[/]    {_sparkline(cost_series)}  [dim]peak ${max(cost_series):.2f}/d · total ${last30['cost_usd']:.2f}[/]")
+    if any(prompts_series):
+        console.print(f"  [cyan]prompts[/] {_sparkline(prompts_series)}  [dim]peak {int(max(prompts_series))}/d · total {last30['prompts']}[/]")
+    console.print()
+
     rollup = Table(title=f"{args.project} — {args.days}-day rollup", show_header=True, header_style="bold magenta")
     rollup.add_column("Metric")
     rollup.add_column("7d", justify="right")
@@ -1342,42 +1443,66 @@ def _cmd_metrics_global(args) -> int:
             rows.append((key, summary))
     rows.sort(key=lambda r: r[1]["cost_usd"], reverse=True)
 
-    table = Table(title=f"Global rollup — {args.days}d", show_header=True, header_style="bold magenta")
-    table.add_column("project")
-    table.add_column("sessions", justify="right")
-    table.add_column("input tok", justify="right")
-    table.add_column("output tok", justify="right")
-    table.add_column("cost", justify="right")
-    for key, s in rows:
-        table.add_row(
-            key, f"{s['sessions']:,}", f"{s['input_tokens']:,}",
-            f"{s['output_tokens']:,}", f"${s['cost_usd']:.2f}",
-        )
-    table.add_section()
-    table.add_row(
-        "[bold]TOTAL", f"[bold]{totals['sessions']:,}", f"[bold]{totals['input']:,}",
-        f"[bold]{totals['output']:,}", f"[bold]${totals['cost']:.2f}",
+    # Global rollup as a bar chart instead of a flat table — eyes track
+    # relative spend much faster from horizontal bars than from columns of
+    # numbers. Bars sized vs the project with the largest spend so the
+    # heaviest user gets a full-width bar.
+    header = (
+        f"\n[bold]Global rollup — {args.days}d[/]  "
+        f"[dim]{len(rows)} projects · {totals['sessions']:,} sessions · "
+        f"${totals['cost']:.2f}[/]\n"
     )
-    console.print(table)
+    console.print(header)
+    max_cost = max((s["cost_usd"] for _, s in rows), default=0.0)
+    cost_tbl = Table(title="Cost by project", show_header=True, header_style="bold magenta", box=None, padding=(0, 1, 0, 1))
+    cost_tbl.add_column("project", style="bold")
+    cost_tbl.add_column("", width=30)  # the bar
+    cost_tbl.add_column("cost", justify="right")
+    cost_tbl.add_column("share", justify="right")
+    cost_tbl.add_column("sessions", justify="right")
+    for key, s in rows:
+        share = (s["cost_usd"] / totals["cost"] * 100) if totals["cost"] else 0
+        bar = _bar(s["cost_usd"], max_cost, width=30)
+        cost_tbl.add_row(
+            key,
+            f"[yellow]{bar}[/]",
+            f"${s['cost_usd']:>9.2f}",
+            f"{share:>3.0f}%",
+            f"{s['sessions']:,}",
+        )
+    console.print(cost_tbl)
 
-    # Adapter breakdown across all projects.
+    # Adapter breakdown across all projects — also rendered as bars, sized
+    # vs the largest adapter so codex's 88% reads visually at a glance.
     import sqlite3
     corpus_db = ROOT / "corpus.db"
     if corpus_db.exists():
         cc = sqlite3.connect(corpus_db)
-        rows = cc.execute(
+        adapter_rows = cc.execute(
             """SELECT agent, COUNT(*) AS n, COUNT(DISTINCT project_dir) AS projects
                FROM sessions WHERE is_subagent = 0 GROUP BY agent ORDER BY n DESC"""
         ).fetchall()
         cc.close()
-        if rows:
-            adapt = Table(title="Sessions by adapter", show_header=True, header_style="bold cyan", expand=False)
-            adapt.add_column("adapter")
-            adapt.add_column("sessions", justify="right")
-            adapt.add_column("projects", justify="right")
-            for agent, n, projects_n in rows:
-                adapt.add_row(agent, f"{n:,}", str(projects_n))
-            console.print(adapt)
+        if adapter_rows:
+            console.print()
+            max_n = max(n for _, n, _ in adapter_rows) or 1
+            total_n = sum(n for _, n, _ in adapter_rows)
+            atbl = Table(title="Sessions by adapter", show_header=True, header_style="bold cyan", box=None, padding=(0, 1, 0, 1))
+            atbl.add_column("adapter", style="bold")
+            atbl.add_column("", width=28)
+            atbl.add_column("sessions", justify="right")
+            atbl.add_column("share", justify="right")
+            atbl.add_column("projects", justify="right")
+            for agent, n, projects_n in adapter_rows:
+                pct = (n / total_n * 100) if total_n else 0
+                atbl.add_row(
+                    agent,
+                    f"[cyan]{_bar(n, max_n, width=28)}[/]",
+                    f"{n:,}",
+                    f"{pct:>3.0f}%",
+                    str(projects_n),
+                )
+            console.print(atbl)
     return 0
 
 
@@ -1551,6 +1676,7 @@ def main(argv: list[str] | None = None) -> int:
     p_show = sub.add_parser("show", help="list / view curated bundles (no args = all projects)")
     p_show.add_argument("project", nargs="?", help="project key (omit to list all)")
     p_show.add_argument("target", nargs="?", help="skill slug or file name (CLAUDE.md, _curation_log.md, …)")
+    p_show.add_argument("--raw", action="store_true", help="plain text output (skip Markdown/JSON pretty-printing)")
     p_show.set_defaults(func=cmd_show)
 
     p_why = sub.add_parser("why", help="provenance for a skill: source sessions + curator rationale")
