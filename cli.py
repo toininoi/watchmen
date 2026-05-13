@@ -3013,6 +3013,15 @@ def main(argv: list[str] | None = None) -> int:
     p_insights.set_defaults(func=cmd_insights)
 
     args = parser.parse_args(argv)
+    # Auto-apply any pending corpus.db schema migrations before dispatching
+    # to a handler. Idempotent + cheap — a single PRAGMA when the schema
+    # is current. Means users only need to pull + rerun to pick up schema
+    # changes; no separate `watchmen ingest --full` step required.
+    try:
+        import corpus as _corpus
+        _corpus.migrate_schema()
+    except Exception:
+        pass
     if not args.cmd:
         return _bare_default()
     return args.func(args)
