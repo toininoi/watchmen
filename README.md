@@ -191,7 +191,8 @@ watchmen analyze <key> --full    Full re-run (ignores prior thesis)
 watchmen curate <key>            Full curator: candidates → skills → CLAUDE.md
 watchmen curate <key> --regen-claude    Stage 3 only (regenerate CLAUDE.md)
 watchmen runs                    Recent run history
-watchmen metrics <key>           Daily token/cost/uptake rollup
+watchmen metrics                 Global rollup across all projects + adapter breakdown
+watchmen metrics <key>           Daily token/cost/uptake rollup for one project
 
 # Project inventory
 watchmen list                    Auto-detect projects from corpus
@@ -199,7 +200,12 @@ watchmen track <key> --repo <path>
 watchmen ingest                  Re-scan ~/.claude/projects → corpus.db
 watchmen sync                    Bootstrap state from on-disk artifacts (no LLM calls)
 
-# Inspect
+# Inspect (terminal-native — web viewer is optional)
+watchmen show                    List every curated project + skill count
+watchmen show <key>              List a project's artifacts (CLAUDE.md, skills, _curation_log.md)
+watchmen show <key> <skill|file> Dump a single SKILL.md or any project artifact
+watchmen why <key> <skill>       Provenance: source sessions (w/ adapter), curator rationale
+watchmen recent [<key>]          Git log of curator runs (last 7d by default)
 watchmen open [<key>]            Open viewer in browser (jumps to project page)
 watchmen logs [daemon|viewer]    Tail launchd logs (-f to follow)
 
@@ -279,7 +285,8 @@ If you don't want certain repos analyzed, just don't track them — auto-detect 
 |---|---|---|
 | Claude Code **CLI** | ✅ shipped | Hooks + transcript ingest both work |
 | Claude Code **desktop app** (Mac/Windows) | ✅ shipped | Same runtime as the CLI — no changes needed; same `~/.claude/projects/` + `~/.claude/settings.json` |
-| **Codex** (OpenAI CLI / desktop) | 🔜 planned | Needs `corpus.py` adapter for `~/.codex/sessions/` + a `hooks/codex_observe.sh` + `install-hooks --codex` to patch `~/.codex/config.toml`. Schema is close enough that the analyst + curator stages will work unchanged. |
+| **Codex** (OpenAI CLI / desktop) | ✅ shipped | Adapter reads `~/.codex/sessions/`. Sessions show up in `watchmen show`, `watchmen why` (with `cd` adapter tag), and the global `watchmen metrics` adapter breakdown. |
+| **pi.dev** (CLI) | ✅ shipped | Adapter reads pi.dev's session export. Same ingest path as Codex; surfaces under the `pi` adapter tag. |
 | **Cursor** | 🤔 considering | Stores sessions in SQLite (`state.vscdb`) with **no hook system** — only post-session polling is possible. Adapter is doable but realtime observation is impossible. |
 | **OpenCode** | 🤔 considering | File-based sessions with a clean `opencode export` CLI. Straightforward adapter. |
 | **Codex Cloud / Claude.ai web** | ❌ out of scope | No local files, no hooks. Would need an authenticated API that doesn't currently exist. |

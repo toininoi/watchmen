@@ -1187,6 +1187,176 @@ def test_doomsday_clock_brackets_for_status_command():
     assert cli._doomsday_minutes_to_midnight(0, 0) == 12
 
 
+def _fake_curated_bundle(td: Path, project_key: str = "fakeproj") -> Path:
+    """Build a tiny `kai_claude/<project>/` skeleton inside td so the show/why/
+    recent commands have something to read without touching the user's real
+    state. Returns the project dir."""
+    import json as _json
+    proj = td / "kai_claude" / project_key
+    (proj / "skills" / "lint-fixer").mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("# Fake CLAUDE.md\n")
+    (proj / "_candidates.json").write_text(_json.dumps([
+        {
+            "name": "Lint Fixer", "slug": "lint-fixer",
+            "description": "Auto-fixes lint problems before commit.",
+            "when_to_use": "User says `fix lint` or pre-commit hook fails.",
+            "source_files": ["package.json", ".eslintrc"],
+            "session_ids": ["session-aaa", "session-bbb (with note)"],
+        },
+        {
+            "name": "Unused Candidate", "slug": "unused", "description": "stub",
+            "when_to_use": "never", "source_files": [], "session_ids": [],
+        },
+    ]))
+    (proj / "_curation_log.md").write_text(
+        "## 2026-05-12 12:00:00\n"
+        "## lint-fixer — finalized\n\n"
+        "### Decisions\n"
+        "- Picked lint-fixer because user hit this 5 times in 2 weeks.\n"
+        "- Critic round 1 flagged ambiguous trigger phrase; round 2 clean.\n\n"
+        "## 2026-05-12 12:05:00\n"
+        "## other-thing\n\nunrelated noise\n"
+    )
+    (proj / "skills" / "lint-fixer" / "SKILL.md").write_text(
+        "---\nname: lint-fixer\ndescription: stub\n---\n# Lint fixer skill body\n"
+    )
+    (proj / "skills" / "lint-fixer" / "scripts" / "run.sh").parent.mkdir(parents=True, exist_ok=True)
+    (proj / "skills" / "lint-fixer" / "scripts" / "run.sh").write_text("#!/bin/bash\necho lint\n")
+    # Init a git repo + commit so `watchmen recent` has something to read.
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q", "-b", "main", str(proj)], check=True)
+    _sp.run(["git", "-C", str(proj), "config", "user.email", "t@example.com"], check=True)
+    _sp.run(["git", "-C", str(proj), "config", "user.name", "test"], check=True)
+    _sp.run(["git", "-C", str(proj), "add", "-A"], check=True)
+    _sp.run(["git", "-C", str(proj), "commit", "-q", "-m", "fake curator run"], check=True)
+    return proj
+
+
+def test_cli_show_modes_list_overview_and_dump():
+    """`watchmen show` has three modes; each must produce output that contains
+    a stable identifying string. Mode 1: 'Curated projects:'. Mode 2: the
+    project name + its CLAUDE.md row. Mode 3: dumps the requested file."""
+    import io
+    import cli
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        _fake_curated_bundle(td_path, "fakeproj")
+        orig_root = cli.ROOT
+        cli.ROOT = td_path
+        buf = io.StringIO()
+        orig_stdout = cli.sys.stdout
+        cli.sys.stdout = buf
+        try:
+            # Mode 1 — overview
+            rc = cli.main(["show"])
+            assert rc == 0
+            out = buf.getvalue()
+            assert "Curated projects:" in out and "fakeproj" in out
+
+            # Mode 2 — project view
+            buf.truncate(0); buf.seek(0)
+            rc = cli.main(["show", "fakeproj"])
+            assert rc == 0
+            out = buf.getvalue()
+            assert "fakeproj" in out and "CLAUDE.md" in out and "lint-fixer" in out
+
+            # Mode 3 — file dump
+            buf.truncate(0); buf.seek(0)
+            rc = cli.main(["show", "fakeproj", "CLAUDE.md"])
+            assert rc == 0
+            assert "Fake CLAUDE.md" in buf.getvalue()
+
+            # Mode 3 — skill dump
+            buf.truncate(0); buf.seek(0)
+            rc = cli.main(["show", "fakeproj", "lint-fixer"])
+            assert rc == 0
+            assert "Lint fixer skill body" in buf.getvalue()
+
+            # Mode 2 — unknown project gracefully fails with helpful message
+            buf.truncate(0); buf.seek(0)
+            rc = cli.main(["show", "no-such-project"])
+            assert rc == 1
+            assert "no curated bundle" in buf.getvalue()
+        finally:
+            cli.sys.stdout = orig_stdout
+            cli.ROOT = orig_root
+
+
+def test_cli_why_shows_provenance_and_curator_excerpt():
+    """`watchmen why <p> <skill>` must (a) find the skill in _candidates.json,
+    (b) print its when_to_use + source_files, and (c) pull the matching block
+    from _curation_log.md. The third behavior is what makes this command
+    actually trustworthy — the curator's stated rationale comes from the log,
+    not from re-summarizing."""
+    import io
+    import cli
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        _fake_curated_bundle(td_path, "fakeproj")
+        # No corpus.db at all — `why` should fall back to printing the "raw label"
+        # branch for each session_id rather than crashing. Real installs always
+        # have corpus.db; this exercises the "early adopter, no ingest yet" path.
+        orig_root = cli.ROOT
+        cli.ROOT = td_path
+        buf = io.StringIO()
+        orig_stdout = cli.sys.stdout
+        cli.sys.stdout = buf
+        try:
+            rc = cli.main(["why", "fakeproj", "lint-fixer"])
+            out = buf.getvalue()
+        finally:
+            cli.sys.stdout = orig_stdout
+            cli.ROOT = orig_root
+
+        assert rc == 0, f"`why` failed (rc={rc}): {out}"
+        # Description body
+        assert "Auto-fixes lint problems" in out
+        # when_to_use trigger
+        assert "fix lint" in out
+        # source_files listed
+        assert "package.json" in out
+        # Curator log excerpt — the value-add bit.
+        assert "Picked lint-fixer because user hit this 5 times" in out
+
+        # Unknown skill — error + suggestion list
+        buf = io.StringIO()
+        orig_stdout = cli.sys.stdout
+        cli.sys.stdout = buf
+        try:
+            cli.ROOT = td_path
+            rc = cli.main(["why", "fakeproj", "no-such-skill"])
+        finally:
+            cli.sys.stdout = orig_stdout
+            cli.ROOT = orig_root
+        assert rc == 1
+        assert "lint-fixer" in buf.getvalue(), "should suggest available slugs on miss"
+
+
+def test_cli_recent_walks_git_log_of_kai_claude():
+    """`watchmen recent` must run `git log` inside each kai_claude/<project>/
+    and produce one section per project with at least the commit subject."""
+    import io
+    import cli
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        _fake_curated_bundle(td_path, "p1")
+        _fake_curated_bundle(td_path, "p2")
+        orig_root = cli.ROOT
+        cli.ROOT = td_path
+        buf = io.StringIO()
+        orig_stdout = cli.sys.stdout
+        cli.sys.stdout = buf
+        try:
+            rc = cli.main(["recent"])
+            assert rc == 0
+            out = buf.getvalue()
+            assert "p1:" in out and "p2:" in out, f"both project sections missing in:\n{out}"
+            assert "fake curator run" in out, "commit subject missing"
+        finally:
+            cli.sys.stdout = orig_stdout
+            cli.ROOT = orig_root
+
+
 def test_doomsday_ascii_renders_three_lines_with_correct_word():
     """`_doomsday_ascii` must return exactly 3 lines (clock face + bar + tagline),
     embed the spelled-out minute word, and embed a doom-bar whose filled count
@@ -1405,6 +1575,11 @@ def main() -> int:
     print("Viewer port config:")
     check("config.viewer_port respects env→file→default",  test_config_viewer_port_reads_env_then_file_then_default)
     check("`settings port` get/set + validates input",     test_cli_settings_port_get_and_set_with_validation)
+    print()
+    print("Round 1 — inspection commands:")
+    check("`show` overview / project / file / skill modes",  test_cli_show_modes_list_overview_and_dump)
+    check("`why` surfaces provenance + curator log excerpt", test_cli_why_shows_provenance_and_curator_excerpt)
+    check("`recent` runs git log inside each kai_claude/",   test_cli_recent_walks_git_log_of_kai_claude)
     print()
     print("Watchmen aesthetic:")
     check("doomsday clock buckets stale projects correctly", test_doomsday_clock_brackets_for_status_command)

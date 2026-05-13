@@ -262,10 +262,10 @@ def cmd_status(args) -> int:
     for line in _doomsday_ascii(needs, len(tracked)):
         print(line)
     print()
-    print(f"  {'project':<30} {'state':<10} {'last analyst':<22} {'new prompts':>11}  notes")
-    print(_dim("  " + "─" * 100))
+    print(f"  {'project':<28} {'state':<8} {'last analyst':<12} {'new':>5}  {'sessions (cc·cd·pi)':<24} notes")
+    print(_dim("  " + "─" * 110))
     for p, progress in rows:
-        last_day = p["last_analyst_day"] or "—"
+        last_day = (p["last_analyst_day"] or "—")[:12]
         new_n = progress.get("new_prompts_since_last_analysis", "?")
         st = "enabled" if p["enabled"] else "paused"
         flag = ""
@@ -273,7 +273,10 @@ def cmd_status(args) -> int:
             flag = _yellow("● needs analysis")
         elif p["last_analyst_day"]:
             flag = _green("● up to date")
-        print(f"  {p['project_key'][:30]:<30} {st:<10} {last_day:<22} {str(new_n):>11}  {flag}")
+        # Per-adapter breakdown — surfaces the Codex/pi.dev sessions that were
+        # previously invisible in the CLI dashboard.
+        adapters = _format_adapter_count(_adapter_breakdown(p["project_key"]))
+        print(f"  {p['project_key'][:28]:<28} {st:<8} {last_day:<12} {str(new_n):>5}  {adapters:<24} {flag}")
 
     print()
     runs = state.recent_runs(limit=5)
@@ -731,6 +734,332 @@ def cmd_settings_api_key(args) -> int:
     return 0
 
 
+# ─── Round 1: inspection + provenance commands ─────────────────────────────
+
+
+_ADAPTER_SHORT = {"claude_code": "cc", "codex": "cd", "pi": "pi"}
+
+
+def _kai_claude_dir(project_key: str) -> Path:
+    return ROOT / "kai_claude" / project_key
+
+
+def _tracked_project_keys() -> list[str]:
+    """Project keys that have at least a `kai_claude/<key>/` dir on disk —
+    used as the universe for `show` and `recent` without a project arg.
+    Falls back to state.list_projects() when nothing is on disk yet."""
+    base = ROOT / "kai_claude"
+    if base.exists():
+        keys = sorted(d.name for d in base.iterdir() if d.is_dir() and (d / "skills").exists())
+        if keys:
+            return keys
+    return [p["project_key"] for p in state.list_projects()]
+
+
+def _adapter_breakdown(project_key: str) -> dict[str, int]:
+    """Session counts per adapter from corpus.db, filtered to substantive
+    non-subagent sessions matching the project path."""
+    import sqlite3
+    corpus_db = ROOT / "corpus.db"
+    if not corpus_db.exists():
+        return {}
+    cc = sqlite3.connect(corpus_db)
+    rows = cc.execute(
+        """SELECT agent, COUNT(*) FROM sessions
+           WHERE project_dir LIKE ? AND is_subagent = 0
+           GROUP BY agent""",
+        (f"%{project_key}%",),
+    ).fetchall()
+    cc.close()
+    return {agent: n for agent, n in rows}
+
+
+def _format_adapter_count(breakdown: dict[str, int]) -> str:
+    """Compact `2053 cc · 417 cd · 0 pi` style line. Always shows all 3 adapters
+    so the row width is stable, even when projects don't have sessions in
+    every adapter yet."""
+    parts = []
+    for agent in ("claude_code", "codex", "pi"):
+        n = breakdown.get(agent, 0)
+        parts.append(f"{n:>4} {_ADAPTER_SHORT[agent]}")
+    return " · ".join(parts)
+
+
+def cmd_show(args) -> int:
+    """Terminal-native viewer. Three modes:
+
+      watchmen show                          # list every project + skill count
+      watchmen show <project>                # list <project>'s artifacts
+      watchmen show <project> <skill|file>   # dump that skill/file
+
+    Disambiguation: second arg ending in `.md` or `.json` is read as a file
+    path under kai_claude/<project>/; anything else is treated as a skill slug
+    and resolved to kai_claude/<project>/skills/<slug>/SKILL.md."""
+    base = ROOT / "kai_claude"
+    if not args.project:
+        # Mode 1 — overview of every project that has a curated bundle.
+        keys = _tracked_project_keys()
+        if not keys:
+            print(_dim("No projects curated yet. Run `watchmen init` or `watchmen curate <project>`."))
+            return 0
+        print(_bold("\nCurated projects:\n"))
+        print(f"  {'project':<32} {'skills':>7}  {'claude_md':<10}  last commit")
+        print(_dim("  " + "─" * 90))
+        for key in keys:
+            proj_dir = base / key
+            skills_dir = proj_dir / "skills"
+            skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
+            has_claude = (proj_dir / "CLAUDE.md").exists()
+            last_commit = subprocess.run(
+                ["git", "-C", str(proj_dir), "log", "-1", "--pretty=%ai %s"],
+                capture_output=True, text=True,
+            ).stdout.strip() or "—"
+            print(f"  {key[:32]:<32} {skill_count:>7}  {('✓' if has_claude else '·'):<10}  {last_commit[:60]}")
+        print()
+        print(_dim("Drill in with `watchmen show <project>` or `watchmen show <project> <skill>`."))
+        return 0
+
+    proj_dir = base / args.project
+    if not proj_dir.exists():
+        print(_yellow(f"no curated bundle for '{args.project}' at {proj_dir}"))
+        print(_dim("  run `watchmen curate " + args.project + "` first, or check `watchmen show` for valid keys"))
+        return 1
+
+    if not args.target:
+        # Mode 2 — project overview: artifacts + skills + last commit.
+        print(_bold(f"\n{args.project}\n"))
+        # Artifacts at the top level.
+        for name in ("CLAUDE.md", "_index.md", "_changelog.md", "_curation_log.md", "_candidates.json", "_manifest.json"):
+            p = proj_dir / name
+            if p.exists():
+                size = p.stat().st_size
+                print(f"  {_green('●')} {name:<24} {size:>7,}B")
+            else:
+                print(f"  {_dim('·')} {_dim(name)}")
+        # Skills
+        skills_dir = proj_dir / "skills"
+        if skills_dir.exists():
+            skills = sorted(d for d in skills_dir.iterdir() if d.is_dir())
+            print()
+            print(_bold(f"  Skills ({len(skills)}):"))
+            for s in skills:
+                file_count = sum(1 for _ in s.rglob("*") if _.is_file())
+                desc = ""
+                skill_md = s / "SKILL.md"
+                if skill_md.exists():
+                    for line in skill_md.read_text().splitlines():
+                        if line.startswith("description:"):
+                            desc = line.split(":", 1)[1].strip().strip('"').strip("'")[:80]
+                            break
+                print(f"    {s.name:<32} {file_count:>3} files  {_dim(desc)}")
+        print()
+        print(_dim("View a file: `watchmen show " + args.project + " CLAUDE.md`"))
+        print(_dim("View a skill: `watchmen show " + args.project + " <skill-slug>`"))
+        print(_dim("Provenance:   `watchmen why " + args.project + " <skill-slug>`"))
+        return 0
+
+    # Mode 3 — dump a single artifact (file or skill bundle).
+    target = args.target
+    if target.endswith(".md") or target.endswith(".json") or target.endswith(".log"):
+        path = proj_dir / target
+        if not path.exists():
+            print(_yellow(f"file not found: {path}"))
+            return 1
+        print(_dim(f"# {path}\n"))
+        sys.stdout.write(path.read_text())
+        return 0
+
+    skill_dir = proj_dir / "skills" / target
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        print(_yellow(f"no skill '{target}' in {args.project} (looked at {skill_dir})"))
+        candidates = sorted(d.name for d in (proj_dir / "skills").iterdir() if d.is_dir()) if (proj_dir / "skills").exists() else []
+        if candidates:
+            print(_dim(f"  available: {', '.join(candidates)}"))
+        return 1
+    print(_dim(f"# {skill_md}\n"))
+    sys.stdout.write(skill_md.read_text())
+    print()
+    files = sorted(p for p in skill_dir.rglob("*") if p.is_file() and p != skill_md)
+    if files:
+        print()
+        print(_bold(f"Bundle ({len(files)} other file(s)):"))
+        for f in files:
+            rel = f.relative_to(skill_dir)
+            print(f"  {rel}  {_dim(f'({f.stat().st_size:,}B)')}")
+    return 0
+
+
+def _curation_log_excerpt(proj_dir: Path, skill_slug: str, skill_name: str) -> str:
+    """Pull the relevant block from _curation_log.md for a given skill. The
+    log alternates timestamp headers (`## 2026-...`) and skill headers
+    (`## <slug>` or `## <Name>`) — we grep for the skill identifier and
+    return everything until the next `## ` line."""
+    log = proj_dir / "_curation_log.md"
+    if not log.exists():
+        return ""
+    text = log.read_text()
+    lines = text.splitlines()
+    needles = (skill_slug.lower(), skill_name.lower())
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and any(n in line.lower() for n in needles):
+            # Collect until the next "## " or EOF, max 30 lines for terseness.
+            body = [line]
+            for j in range(i + 1, min(len(lines), i + 30)):
+                if lines[j].startswith("## "):
+                    break
+                body.append(lines[j])
+            return "\n".join(body).strip()
+    return ""
+
+
+def cmd_why(args) -> int:
+    """Provenance for a curated skill: source sessions (with adapter), the
+    `when_to_use` triggers, source_files, and the curator's stated rationale
+    excerpted from _curation_log.md.
+
+    This is the trust-building command — without it, every skill is "trust me,
+    this is from your data" with no way to verify."""
+    import sqlite3, json as _json
+    proj_dir = _kai_claude_dir(args.project)
+    candidates_path = proj_dir / "_candidates.json"
+    if not candidates_path.exists():
+        print(_yellow(f"no candidates file at {candidates_path} — has the curator run for this project?"))
+        return 1
+
+    cands = _json.loads(candidates_path.read_text())
+    match = next((c for c in cands if c.get("slug") == args.skill or c.get("name", "").lower() == args.skill.lower()), None)
+    if not match:
+        slugs = [c.get("slug", "?") for c in cands]
+        print(_yellow(f"no candidate matches '{args.skill}'"))
+        print(_dim(f"  available slugs: {', '.join(slugs)}"))
+        return 1
+
+    name = match.get("name", args.skill)
+    slug = match.get("slug", args.skill)
+    description = match.get("description", "")
+    when_to_use = match.get("when_to_use", "")
+    source_files = match.get("source_files") or []
+    session_ids = match.get("session_ids") or []
+
+    print(_bold(f"\n{name}") + _dim(f"  ({slug})\n"))
+    if description:
+        print(_dim("description:"))
+        print(f"  {description}")
+        print()
+    if when_to_use:
+        print(_dim("when_to_use:"))
+        # `when_to_use` may be string or list-of-strings.
+        triggers = when_to_use if isinstance(when_to_use, list) else [when_to_use]
+        for t in triggers[:6]:
+            print(f"  • {t}")
+        if len(triggers) > 6:
+            print(_dim(f"  … {len(triggers) - 6} more"))
+        print()
+    if source_files:
+        print(_dim(f"source_files ({len(source_files)}):"))
+        for f in source_files[:10]:
+            exists = (Path(f).exists() or (ROOT / f).exists())
+            marker = _green("✓") if exists else _yellow("?")
+            print(f"  {marker} {f}")
+        if len(source_files) > 10:
+            print(_dim(f"  … {len(source_files) - 10} more"))
+        print()
+
+    # Cross-reference session_ids with corpus.db to surface adapter + first prompt.
+    corpus_db = ROOT / "corpus.db"
+    has_corpus = corpus_db.exists()
+    if has_corpus:
+        try:
+            cc = sqlite3.connect(corpus_db)
+            cc.execute("SELECT 1 FROM sessions LIMIT 1")
+        except sqlite3.OperationalError:
+            # corpus.db exists but has no schema (fresh init, never ingested).
+            # Skip the rich lookup and fall back to plain labels.
+            cc.close()
+            has_corpus = False
+    if session_ids and has_corpus:
+        cc.row_factory = sqlite3.Row
+        print(_dim(f"sessions ({len(session_ids)}):"))
+        print(f"  {'session_id':<14} {'agent':<11} {'date':<11}  first prompt")
+        print(_dim("  " + "─" * 90))
+        for sid in session_ids:
+            # session_ids stored in candidates may be free-form labels (especially
+            # for codex/pi where the analyst quoted them with annotations). Match
+            # by prefix to be tolerant.
+            short = sid.split()[0].split("(")[0].strip() if isinstance(sid, str) else sid
+            row = cc.execute(
+                """SELECT s.session_id, s.agent, s.started_at,
+                          (SELECT text FROM prompts WHERE session_id = s.session_id ORDER BY rowid LIMIT 1) AS first_prompt
+                   FROM sessions s WHERE s.session_id LIKE ? || '%' LIMIT 1""",
+                (short,),
+            ).fetchone()
+            if row:
+                adapter = _ADAPTER_SHORT.get(row["agent"], row["agent"])
+                date = (row["started_at"] or "")[:10]
+                snippet = (row["first_prompt"] or "").replace("\n", " ")[:60]
+                print(f"  {short[:14]:<14} {adapter:<11} {date:<11}  {_dim(snippet)}")
+            else:
+                # Show the raw label — useful when the analyst cited a session
+                # by content rather than ID (common with codex/pi early on).
+                print(f"  {short[:14]:<14} {_dim('(not in corpus)')}        {_dim(str(sid)[:60])}")
+        cc.close()
+        print()
+
+    excerpt = _curation_log_excerpt(proj_dir, slug, name)
+    if excerpt:
+        print(_dim("curator log excerpt:"))
+        for line in excerpt.splitlines()[:30]:
+            print(f"  {line}")
+        print()
+    return 0
+
+
+def cmd_recent(args) -> int:
+    """Git log of kai_claude/ artifact commits in the last N days. Every curator
+    run lands as a commit, so this is a fast 'what changed lately' view that
+    doesn't require the web viewer."""
+    days = args.days
+    keys = [args.project] if args.project else _tracked_project_keys()
+    base = ROOT / "kai_claude"
+    if not keys:
+        print(_dim("no curated projects yet."))
+        return 0
+    print(_bold(f"\nRecent curator activity (last {days}d):\n"))
+    any_found = False
+    for key in keys:
+        proj_dir = base / key
+        if not proj_dir.exists():
+            continue
+        # `--name-status` would be ideal but is noisy. `--shortstat` gives one
+        # extra line per commit which is digestible.
+        r = subprocess.run(
+            ["git", "-C", str(proj_dir), "log", f"--since={days} days ago",
+             "--pretty=format:%h|%ai|%s", "--shortstat"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            continue
+        any_found = True
+        # Output is paired lines: "hash|date|subject" then "1 file changed, 5 insertions(+)" then blank.
+        chunks = [c.strip() for c in r.stdout.strip().split("\n\n")]
+        print(_bold(f"  {key}:"))
+        for chunk in chunks[:args.limit]:
+            parts = chunk.split("\n", 1)
+            head = parts[0].split("|", 2)
+            if len(head) < 3:
+                continue
+            sha, when, subject = head
+            stat = (parts[1] if len(parts) > 1 else "").strip()
+            print(f"    {sha}  {when[:10]}  {subject}")
+            if stat:
+                print(f"             {_dim(stat)}")
+        print()
+    if not any_found:
+        print(_dim(f"  no curator commits in the last {days}d."))
+    return 0
+
+
 def cmd_doctor(args) -> int:
     """Health check: API key, OpenRouter reachability, corpus, tracked projects,
     daemon/viewer state, hooks, latest run age, disk free.
@@ -944,6 +1273,9 @@ def cmd_metrics(args) -> int:
     from rich.console import Console
     from rich.table import Table
 
+    if not args.project:
+        return _cmd_metrics_global(args)
+
     rows = _metrics.daily_metrics(args.project, days=args.days)
     if not rows:
         print(f"No data for project '{args.project}'. Run `watchmen ingest` first?")
@@ -964,7 +1296,88 @@ def cmd_metrics(args) -> int:
     rollup.add_row("Suggestions fired", str(last7["suggestions_fired"]), str(last30["suggestions_fired"]))
     rollup.add_row("Uptake", str(last7["uptake"]), str(last30["uptake"]))
     console.print(rollup)
+    # Per-adapter breakdown — gives quick visibility into where this project's
+    # sessions came from (claude_code vs codex vs pi). Pulled from corpus.db
+    # directly since `metrics.daily_metrics` doesn't track adapter today.
+    breakdown = _adapter_breakdown(args.project)
+    if breakdown:
+        adapt = Table(show_header=True, header_style="bold cyan", expand=False)
+        adapt.add_column("adapter")
+        adapt.add_column("sessions", justify="right")
+        for agent in ("claude_code", "codex", "pi"):
+            adapt.add_row(agent, str(breakdown.get(agent, 0)))
+        console.print(adapt)
     console.print(f"\n  full daily breakdown: {config.viewer_base_url()}/p/{args.project}/metrics")
+    return 0
+
+
+def _cmd_metrics_global(args) -> int:
+    """Global rollup across all tracked projects. Aggregates tokens/cost from
+    metrics.daily_metrics per project + adapter session counts from corpus.db.
+    Shown when `watchmen metrics` is invoked without a project arg."""
+    import metrics as _metrics
+    from rich.console import Console
+    from rich.table import Table
+    state.init_db()
+    projects = state.list_projects()
+    if not projects:
+        print(_dim("No projects tracked yet — run `watchmen init`."))
+        return 1
+    console = Console()
+
+    # Per-project summary table. Sorted by cost descending so the biggest
+    # spenders are at the top.
+    rows = []
+    totals = {"sessions": 0, "prompts": 0, "input": 0, "output": 0, "cost": 0.0}
+    for p in projects:
+        key = p["project_key"]
+        daily = _metrics.daily_metrics(key, days=args.days)
+        summary = _metrics.summarize_window(daily, args.days) if daily else None
+        if summary:
+            totals["sessions"] += summary["sessions"]
+            totals["prompts"]  += summary["prompts"]
+            totals["input"]    += summary["input_tokens"]
+            totals["output"]   += summary["output_tokens"]
+            totals["cost"]     += summary["cost_usd"]
+            rows.append((key, summary))
+    rows.sort(key=lambda r: r[1]["cost_usd"], reverse=True)
+
+    table = Table(title=f"Global rollup — {args.days}d", show_header=True, header_style="bold magenta")
+    table.add_column("project")
+    table.add_column("sessions", justify="right")
+    table.add_column("input tok", justify="right")
+    table.add_column("output tok", justify="right")
+    table.add_column("cost", justify="right")
+    for key, s in rows:
+        table.add_row(
+            key, f"{s['sessions']:,}", f"{s['input_tokens']:,}",
+            f"{s['output_tokens']:,}", f"${s['cost_usd']:.2f}",
+        )
+    table.add_section()
+    table.add_row(
+        "[bold]TOTAL", f"[bold]{totals['sessions']:,}", f"[bold]{totals['input']:,}",
+        f"[bold]{totals['output']:,}", f"[bold]${totals['cost']:.2f}",
+    )
+    console.print(table)
+
+    # Adapter breakdown across all projects.
+    import sqlite3
+    corpus_db = ROOT / "corpus.db"
+    if corpus_db.exists():
+        cc = sqlite3.connect(corpus_db)
+        rows = cc.execute(
+            """SELECT agent, COUNT(*) AS n, COUNT(DISTINCT project_dir) AS projects
+               FROM sessions WHERE is_subagent = 0 GROUP BY agent ORDER BY n DESC"""
+        ).fetchall()
+        cc.close()
+        if rows:
+            adapt = Table(title="Sessions by adapter", show_header=True, header_style="bold cyan", expand=False)
+            adapt.add_column("adapter")
+            adapt.add_column("sessions", justify="right")
+            adapt.add_column("projects", justify="right")
+            for agent, n, projects_n in rows:
+                adapt.add_row(agent, f"{n:,}", str(projects_n))
+            console.print(adapt)
     return 0
 
 
@@ -1048,6 +1461,9 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("launchd",    "inspect installed launchd agents"),
     ]),
     ("Inspect", [
+        ("show",       "list / view curated bundles (project, skill, file)"),
+        ("why",        "provenance for a skill: source sessions + curator rationale"),
+        ("recent",     "git log of curator artifact changes (last N days)"),
         ("open",       "open the viewer in your browser"),
         ("logs",       "tail launchd logs (daemon | viewer | all)"),
     ]),
@@ -1131,6 +1547,22 @@ def main(argv: list[str] | None = None) -> int:
     p_logs.add_argument("-f", "--follow", action="store_true", help="tail -F (follow appended lines)")
     p_logs.add_argument("-n", "--lines", type=int, default=50, help="initial lines to print (default 50)")
     p_logs.set_defaults(func=cmd_logs)
+
+    p_show = sub.add_parser("show", help="list / view curated bundles (no args = all projects)")
+    p_show.add_argument("project", nargs="?", help="project key (omit to list all)")
+    p_show.add_argument("target", nargs="?", help="skill slug or file name (CLAUDE.md, _curation_log.md, …)")
+    p_show.set_defaults(func=cmd_show)
+
+    p_why = sub.add_parser("why", help="provenance for a skill: source sessions + curator rationale")
+    p_why.add_argument("project")
+    p_why.add_argument("skill", help="skill slug (kebab-case) or display name")
+    p_why.set_defaults(func=cmd_why)
+
+    p_recent = sub.add_parser("recent", help="git log of curator artifact changes (no project = all)")
+    p_recent.add_argument("project", nargs="?", help="project key (omit for all curated projects)")
+    p_recent.add_argument("--days", type=int, default=7, help="lookback window in days (default 7)")
+    p_recent.add_argument("--limit", type=int, default=10, help="max commits per project (default 10)")
+    p_recent.set_defaults(func=cmd_recent)
 
     sub.add_parser("status", help="dashboard view").set_defaults(func=cmd_status)
     sub.add_parser("list", help="auto-detect projects from corpus").set_defaults(func=cmd_list)
@@ -1284,8 +1716,8 @@ def main(argv: list[str] | None = None) -> int:
     p_port.set_defaults(func=cmd_settings_port)
     p_settings.set_defaults(func=lambda a: (p_settings.print_help() or 1))
 
-    p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (sessions, tokens, cost, suggestion uptake)")
-    p_metrics.add_argument("project", help="project key")
+    p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (no project = global rollup)")
+    p_metrics.add_argument("project", nargs="?", help="project key (omit for global rollup across all projects)")
     p_metrics.add_argument("--days", type=int, default=30, help="window length (default 30)")
     p_metrics.set_defaults(func=cmd_metrics)
 
