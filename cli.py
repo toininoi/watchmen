@@ -588,6 +588,13 @@ def cmd_curate(args) -> int:
            "--project", args.project, "--repo", proj["source_repo"], "--model", args.model]
     if args.regen_claude:
         cmd.extend(["--skip-finder", "--skip-skills"])
+    # Pass through harness-awareness + approval-mode settings. CLI flags
+    # always win; per-project DB settings are the fallback so a user can
+    # set "approval_required" once and forget about it.
+    if getattr(args, "skip_overlap", False) or proj.get("skip_overlapping_skills"):
+        cmd.append("--skip-overlap")
+    if getattr(args, "approval_required", False) or proj.get("approval_required"):
+        cmd.append("--approval-required")
 
     kind = "curator-claude-only" if args.regen_claude else "curator-full"
     run_id = state.start_run(args.project, kind)
@@ -713,7 +720,10 @@ def cmd_reonboard(args) -> int:
 # ─── Settings ───────────────────────────────────────────────────────────────
 
 
-_SETTABLE_KEYS = ("enabled", "threshold", "repo", "notes")
+_SETTABLE_KEYS = (
+    "enabled", "threshold", "repo", "notes",
+    "approval_required", "skip_overlapping_skills",
+)
 
 
 def _parse_setting(key: str, value: str) -> tuple[str, object]:
@@ -741,6 +751,15 @@ def _parse_setting(key: str, value: str) -> tuple[str, object]:
         return "source_repo", str(path)
     if key == "notes":
         return "notes", value
+    # Boolean settings: approval_required + skip_overlapping_skills both
+    # default 0 and accept the same true/false vocabulary as `enabled`.
+    if key in ("approval_required", "skip_overlapping_skills"):
+        v = value.strip().lower()
+        if v in ("true", "yes", "y", "on", "1"):
+            return key, 1
+        if v in ("false", "no", "n", "off", "0"):
+            return key, 0
+        raise ValueError(f"{key} must be true/false (got {value!r})")
     raise ValueError(f"unknown setting {key!r}. valid: {', '.join(_SETTABLE_KEYS)}")
 
 
@@ -768,6 +787,7 @@ def cmd_settings_show(args) -> int:
         return 1
     print(_bold(f"\n{args.project}\n"))
     for k in ("source_repo", "enabled", "threshold_new_prompts", "notes",
+              "approval_required", "skip_overlapping_skills",
               "last_analyst_day", "last_analyst_run",
               "last_curator_run", "last_curator_skill_count",
               "created_at", "updated_at"):
@@ -1514,18 +1534,94 @@ def cmd_review(args) -> int:
         print(_yellow(f"no curated bundle for '{args.project}'"))
         return 1
     skills_dir = proj_dir / "skills"
+    pending_dir = proj_dir / "_pending"
     skills = sorted(d for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else []
-    if not skills:
-        print(_yellow(f"no skills to review in {args.project}"))
+    pending = sorted(d for d in pending_dir.iterdir() if d.is_dir()) if pending_dir.exists() else []
+    if not skills and not pending:
+        print(_yellow(f"no skills or pending candidates to review in {args.project}"))
         return 1
 
     console = Console()
     pinned_already = _read_skill_list(args.project, _PINNED_FILE)
-    console.print(f"\n[bold]Review {args.project}[/] — walking {len(skills)} skill(s)")
-    console.print("[dim]Actions: (k)eep · (d)rop · (p)in · (s)kip · (v)iew · (q)uit[/]")
+    if pending:
+        console.print(
+            f"\n[bold yellow]Pending review — {len(pending)} candidate(s) "
+            f"awaiting approval[/]"
+        )
+        console.print("[dim]Actions: (a)pprove · (d)rop · (s)kip · (v)iew · (q)uit[/]")
+    if skills:
+        console.print(
+            f"\n[bold]Approved skills — {args.project} "
+            f"({len(skills)} bundle(s))[/]"
+        )
+        console.print("[dim]Actions: (k)eep · (d)rop · (p)in · (s)kip · (v)iew · (q)uit[/]")
 
     decisions: list[tuple[str, str]] = []
     quit_early = False
+
+    # ── First walk: pending queue (approve/drop/skip) ─────────────────────
+    for i, pend_dir in enumerate(pending, 1):
+        if quit_early:
+            break
+        slug = pend_dir.name
+        sk = pend_dir / "SKILL.md"
+        desc = ""
+        if sk.exists():
+            for line in sk.read_text().splitlines():
+                if line.startswith("description:"):
+                    desc = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    break
+        file_count = sum(1 for _ in pend_dir.rglob("*") if _.is_file())
+        while True:
+            console.print(f"\n[bold yellow][pending {i}/{len(pending)}][/] [bold]{slug}[/]")
+            if desc:
+                console.print(f"  [dim]{desc[:200]}[/]")
+            console.print(f"  [dim]{file_count} files · _pending/{slug}/[/]")
+            choice = Prompt.ask(
+                "  Action",
+                choices=["a", "d", "s", "v", "q"],
+                default="s",
+                show_choices=False,
+            )
+            if choice == "v":
+                if sk.exists():
+                    console.print()
+                    console.print(Markdown(sk.read_text()))
+                continue
+            if choice == "a":
+                # Approve: move _pending/<slug>/ → skills/<slug>/. If a
+                # previously-approved skill exists at the destination,
+                # back it up to .superseded so the user has a manual undo.
+                import shutil as _shutil
+                dest = skills_dir / slug
+                skills_dir.mkdir(parents=True, exist_ok=True)
+                if dest.exists():
+                    backup = skills_dir / f"{slug}.superseded"
+                    if backup.exists():
+                        _shutil.rmtree(backup)
+                    _shutil.move(str(dest), str(backup))
+                    console.print(f"  [dim]existing bundle backed up → {backup.name}[/]")
+                _shutil.move(str(pend_dir), str(dest))
+                console.print(f"  [green]→ approved (moved to skills/{slug}/)[/]")
+                decisions.append((slug, "approved"))
+            elif choice == "d":
+                cmd_drop(argparse.Namespace(project=args.project, skill=slug))
+                # _drop above targets skills/<slug>/; for a pending bundle
+                # we additionally rm the _pending/<slug>/ dir.
+                import shutil as _shutil
+                if pend_dir.exists():
+                    _shutil.rmtree(pend_dir)
+                    console.print(f"  [dim]removed _pending/{slug}/[/]")
+                decisions.append((slug, "dropped-pending"))
+            elif choice == "s":
+                decisions.append((slug, "skipped-pending"))
+                console.print("  [dim]→ left in _pending/[/]")
+            elif choice == "q":
+                quit_early = True
+                console.print("  [yellow]→ quit; remaining items not reviewed[/]")
+            break
+
+    # ── Second walk: approved skills (keep/drop/pin/skip) ──────────────────
 
     for i, skill_dir in enumerate(skills, 1):
         if quit_early:
@@ -1582,7 +1678,9 @@ def cmd_review(args) -> int:
     for _, action in decisions:
         summary[action] = summary.get(action, 0) + 1
     console.print("[bold]Summary[/]")
-    for action in ("kept", "pinned", "dropped", "skipped"):
+    for action in ("approved", "kept", "pinned",
+                   "dropped", "dropped-pending",
+                   "skipped", "skipped-pending"):
         if summary.get(action):
             console.print(f"  {action}: {summary[action]}")
     if quit_early:
@@ -2972,6 +3070,14 @@ def main(argv: list[str] | None = None) -> int:
     p_cu.add_argument("project")
     p_cu.add_argument("--regen-claude", action="store_true", help="rerun stage 3 only (use existing skills)")
     p_cu.add_argument("--model", default=DEFAULT_MODEL)
+    p_cu.add_argument("--skip-overlap", action="store_true",
+        help="drop candidates that duplicate installed harness skills entirely "
+             "(default: propose them as enhancements). Per-project alternative: "
+             "`watchmen settings set <p> skip_overlapping_skills true`")
+    p_cu.add_argument("--approval-required", dest="approval_required", action="store_true",
+        help="route new bundles to kai_claude/<p>/_pending/ for review via "
+             "`watchmen review`. Per-project alternative: "
+             "`watchmen settings set <p> approval_required true`")
     p_cu.set_defaults(func=cmd_curate)
 
     p_runs = sub.add_parser("runs", help="recent run history")

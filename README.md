@@ -254,9 +254,13 @@ watchmen pin <key> <skill>       Freeze a skill — next curator run skips it
 watchmen unpin <key> <skill>     Remove a skill from the pin list
 watchmen drop <key> <skill>      Remove bundle + blocklist the slug
 watchmen restore <key> <skill>   Allow a blocked slug to be re-proposed
+watchmen curate <key> --skip-overlap        Drop candidates that overlap with installed harness skills
+watchmen curate <key> --approval-required   Route new bundles to _pending/ for review
+watchmen settings set <key> approval_required true       Default new bundles to _pending/
+watchmen settings set <key> skip_overlapping_skills true Default --skip-overlap on
 watchmen learn <key>             Fast cycle: analyze + CLAUDE.md refresh (~$0.50)
 watchmen learn <key> --full      Same, but with full curator (Stage 1+2+3)
-watchmen review <key>            Interactive walk: k(eep)/d(rop)/p(in)/s(kip)/v(iew)/q(uit)
+watchmen review <key>            Interactive walk: pending (a/d/s/v/q) then approved (k/d/p/s/v/q)
 
 # Background services
 watchmen daemon run              Run scheduling loop in foreground
@@ -275,6 +279,37 @@ The curator is autonomous by default — every 12 hours it re-proposes and re-cu
 - **`watchmen unpin` / `watchmen restore`** — reverse either decision.
 
 State lives in `kai_claude/<project>/_pinned.json` and `_blocklist.json` — JSON lists of slugs. Empty lists delete the file. Both are git-tracked inside the project bundle, so pin/drop state survives across machines if you sync `kai_claude/` somewhere.
+
+### Harness awareness
+
+By default the candidate finder reads `~/.claude/skills/*/SKILL.md` and is instructed to (a) prefer proposing an **enhancement** of an existing harness skill when the trigger overlaps, and (b) compose existing skills rather than reinventing them. Each candidate may carry an optional `enhancement_of: <slug>` field — when set, Stage 2 prepends an ENHANCEMENT MODE preamble (with the existing SKILL.md content) to the per-skill curator's prompt so the new bundle is framed as a delta, not a duplicate.
+
+If you'd rather drop overlapping candidates entirely (no enhancement, no proposal), set `skip_overlapping_skills` or pass `--skip-overlap` to a one-off run:
+
+```bash
+watchmen settings set kai-frontend skip_overlapping_skills true
+# or one-off:
+watchmen curate kai-frontend --skip-overlap
+```
+
+### Approval mode
+
+The curator is autonomous by default. When you want a review gate before new bundles join the harness:
+
+```bash
+watchmen settings set kai-frontend approval_required true
+# or one-off:
+watchmen curate kai-frontend --approval-required
+```
+
+With `approval_required` on, **new** skill bundles route to `kai_claude/<project>/_pending/<slug>/` instead of `skills/<slug>/`. Already-approved skills keep updating in place — only first-time additions are gated. To review the queue:
+
+```bash
+watchmen review <project>      # walks _pending/ first (a)pprove / (d)rop / (s)kip / (v)iew / (q)uit,
+                               # then the existing skills/ walk
+```
+
+Approving moves `_pending/<slug>/` → `skills/<slug>/`. If a previously-approved bundle exists at the destination, it's backed up to `<slug>.superseded/` for manual undo. Dropping removes the pending bundle and adds the slug to the blocklist so the finder doesn't re-propose it.
 
 `watchmen show <project>` indicates pinned skills with 🔒 and lists blocked slugs in a separate section.
 

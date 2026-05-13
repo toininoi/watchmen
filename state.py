@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS projects (
     last_curator_run TEXT,
     last_curator_skill_count INTEGER,
     notes TEXT,
+    approval_required INTEGER NOT NULL DEFAULT 0,
+    skip_overlapping_skills INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -63,7 +65,27 @@ def conn():
 def init_db() -> None:
     with conn() as c:
         c.executescript(SCHEMA)
+        _migrate_project_columns(c)
         c.commit()
+
+
+def _migrate_project_columns(c) -> None:
+    """Idempotent column-level migrations for the `projects` table. Same
+    pattern as corpus.py's _migrate_sessions_columns — pre-existing
+    state.db files built before a new setting was added still work after
+    a pull, no `watchmen ingest --full` needed.
+
+    History:
+      - `approval_required`: gates new bundles to kai_claude/<repo>/_pending/
+        until reviewed via `watchmen review`. Default 0 (autonomy preserved).
+      - `skip_overlapping_skills`: makes `watchmen curate` drop candidates
+        that overlap with installed harness skills entirely, rather than
+        proposing them as enhancements (the default). Default 0."""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(projects)").fetchall()}
+    if "approval_required" not in cols:
+        c.execute("ALTER TABLE projects ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 0")
+    if "skip_overlapping_skills" not in cols:
+        c.execute("ALTER TABLE projects ADD COLUMN skip_overlapping_skills INTEGER NOT NULL DEFAULT 0")
 
 
 def now_iso() -> str:
