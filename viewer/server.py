@@ -128,9 +128,33 @@ def dashboard(request: Request):
             "claude_md_size": claude_md.stat().st_size if claude_md.exists() else 0,
         })
     runs = list_recent_runs(limit=10)
+
+    # Read the latest CHANGELOG.md entry + current version so dashboard.html
+    # can render a "What's new in vX.Y" banner. JS dismisses + remembers in
+    # localStorage so each new release announces itself exactly once per
+    # user-browser. Falls back to no banner when the file is missing.
+    changelog_version: str | None = None
+    changelog_body_html: str | None = None
+    try:
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import cli as _cli  # type: ignore
+        changelog_version = _cli._version()
+        changelog_path = ROOT / "CHANGELOG.md"
+        if changelog_path.exists():
+            entries = _cli._parse_changelog(changelog_path.read_text())
+            for v, body in entries:
+                if v == changelog_version:
+                    changelog_body_html = md.markdown(body, extensions=["fenced_code"])
+                    break
+    except Exception:
+        pass
+
     return TEMPLATES.TemplateResponse(request, "dashboard.html", {
         "projects": summaries,
         "runs": runs,
+        "changelog_version": changelog_version,
+        "changelog_body_html": changelog_body_html,
     })
 
 

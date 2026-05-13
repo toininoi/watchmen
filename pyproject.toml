@@ -1,6 +1,6 @@
 [project]
 name = "watchmen"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local Claude Code session intelligence — observe, analyze, and generate skills + CLAUDE.md per project, autonomously"
 readme = "README.md"
 license = { text = "MIT" }

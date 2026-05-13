@@ -251,6 +251,112 @@ _WATCHMEN_INSIGHTS_TAGLINES = (
 )
 
 
+# ─── Release-notes detector ─────────────────────────────────────────────────
+# Compares the installed version (read by `_version()`) against the
+# last-seen version stored in `~/.watchmen/last_seen_version`. On a bump,
+# prints the new CHANGELOG.md entries to stderr so a fresh `git pull` is
+# never silent — and so the CLI can announce the new feature itself.
+# Quiet on fresh installs (no last-seen file → just record current).
+
+_LAST_SEEN_VERSION_FILE = Path.home() / ".watchmen" / "last_seen_version"
+
+
+def _parse_changelog(text: str) -> list[tuple[str, str]]:
+    """Split CHANGELOG.md into [(version, body), …] in file order
+    (top-of-file = newest, the Keep-a-Changelog convention). Each entry's
+    body includes the version's section header so it renders cleanly when
+    handed to Rich Markdown verbatim."""
+    import re as _re
+    out: list[tuple[str, str]] = []
+    header_re = _re.compile(r"^##\s+\[([^\]]+)\]", _re.MULTILINE)
+    matches = list(header_re.finditer(text))
+    for i, m in enumerate(matches):
+        version = m.group(1).strip()
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out.append((version, text[start:end].rstrip()))
+    return out
+
+
+def _version_key(v: str) -> tuple[int, ...]:
+    """Loose semver tuple for ordered comparison. Splits on dots, casts
+    each part to int when possible, falls back to lexical for tags like
+    `0.2.0-rc1`. Good enough for the linear-history versioning watchmen
+    uses; not a full semver spec."""
+    parts = []
+    for chunk in v.replace("-", ".").split("."):
+        try:
+            parts.append((0, int(chunk)))
+        except ValueError:
+            parts.append((1, chunk))
+    return tuple(parts)
+
+
+def _new_changelog_entries(text: str, current: str, last_seen: str | None) -> list[tuple[str, str]]:
+    """Entries strictly newer than `last_seen`, up to and including
+    `current`. When `last_seen` is None (fresh install, no record), just
+    return the entry for `current` so the announcement is concise."""
+    all_entries = _parse_changelog(text)
+    if last_seen is None:
+        return [e for e in all_entries if e[0] == current][:1]
+    last_key = _version_key(last_seen)
+    return [e for e in all_entries if _version_key(e[0]) > last_key]
+
+
+def _show_release_notes_if_bumped() -> None:
+    """If the installed watchmen version is newer than the one this user
+    last saw, print the new CHANGELOG.md entries to stderr. Updates the
+    tracker after display so the announcement appears exactly once per
+    bump. Silently no-ops on errors so changelog parsing can't break CLI
+    startup."""
+    try:
+        current = _version()
+        tracker = _LAST_SEEN_VERSION_FILE
+        tracker.parent.mkdir(parents=True, exist_ok=True)
+        last_seen = tracker.read_text().strip() if tracker.exists() else None
+        if last_seen == current:
+            return  # already announced this version
+        changelog_path = ROOT / "CHANGELOG.md"
+        if not changelog_path.exists():
+            tracker.write_text(current)
+            return
+        entries = _new_changelog_entries(
+            changelog_path.read_text(), current, last_seen
+        )
+        if entries:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            # stderr so changelog output doesn't pollute scripts piping
+            # `watchmen show <foo>` etc. into other tools.
+            err = Console(stderr=True)
+            err.print(
+                f"\n[bold]◷ watchmen updated to v{current}[/]"
+                + (f"  [dim](was v{last_seen})[/]" if last_seen else "  [dim](first run)[/]")
+            )
+            for _v, body in entries:
+                err.print(Markdown(body))
+            err.print("[dim]  · run `watchmen changelog` anytime to re-read[/]\n")
+        tracker.write_text(current)
+    except Exception:
+        # Don't let a changelog formatting blip break any CLI command.
+        pass
+
+
+def cmd_changelog(args) -> int:
+    """`watchmen changelog` — render CHANGELOG.md anytime. Handy when the
+    auto-announcement scrolled off the user's terminal or they want to
+    re-read what landed in an older version."""
+    from rich.console import Console
+    from rich.markdown import Markdown
+    changelog_path = ROOT / "CHANGELOG.md"
+    if not changelog_path.exists():
+        print("CHANGELOG.md not present in this checkout.")
+        return 1
+    console = Console()
+    console.print(Markdown(changelog_path.read_text()))
+    return 0
+
+
 def _manhattan_atom_panel() -> list[str]:
     """3-line atom panel — small enough to sit above the doctor table without
     consuming the visible terminal. The ⚛ glyph is literally a stylized
@@ -2702,6 +2808,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("why",        "provenance for a skill: source sessions + curator rationale"),
         ("recent",     "git log of curator artifact changes (last N days)"),
         ("insights",   "cross-repo digest — sessions, skills, patterns, friction"),
+        ("changelog",  "render the watchmen CHANGELOG.md"),
         ("open",       "open the viewer in your browser"),
         ("logs",       "tail launchd logs (daemon | viewer | all)"),
     ]),
@@ -3012,6 +3119,11 @@ def main(argv: list[str] | None = None) -> int:
         help=f"OpenRouter model for the digest (default: {DEFAULT_MODEL})")
     p_insights.set_defaults(func=cmd_insights)
 
+    sub.add_parser(
+        "changelog",
+        help="render the watchmen CHANGELOG.md (the auto-announcement on version bumps is the inline summary; this is the full list)",
+    ).set_defaults(func=cmd_changelog)
+
     args = parser.parse_args(argv)
     # Auto-apply any pending corpus.db schema migrations before dispatching
     # to a handler. Idempotent + cheap — a single PRAGMA when the schema
@@ -3022,6 +3134,10 @@ def main(argv: list[str] | None = None) -> int:
         _corpus.migrate_schema()
     except Exception:
         pass
+    # Announce release notes on the first run after a version bump. Silent
+    # on subsequent runs of the same version. `watchmen changelog` is the
+    # on-demand alternative if the auto-announcement scrolled off.
+    _show_release_notes_if_bumped()
     if not args.cmd:
         return _bare_default()
     return args.func(args)

@@ -1016,6 +1016,172 @@ def test_corpus_migrate_schema_adds_agent_column_to_pre_adapter_db():
             corpus.DB_PATH = orig_db
 
 
+def test_changelog_parser_extracts_versioned_sections():
+    """`_parse_changelog` must split CHANGELOG.md into ordered
+    (version, body) tuples. Used by both the auto-announcement on
+    version bump and the `watchmen changelog` command — if this parse
+    drops sections, users miss release notes silently."""
+    import cli
+    sample = (
+        "# Changelog\n\n"
+        "## [0.2.0] — 2026-05-13\n\n"
+        "### Added\n- Release notes\n\n"
+        "## [0.1.1] — 2026-05-13\n\n"
+        "### Fixed\n- Schema migration\n"
+    )
+    entries = cli._parse_changelog(sample)
+    assert len(entries) == 2, f"expected 2 entries, got {len(entries)}"
+    assert entries[0][0] == "0.2.0", f"first entry version: {entries[0][0]!r}"
+    assert "Release notes" in entries[0][1]
+    assert entries[1][0] == "0.1.1"
+    assert "Schema migration" in entries[1][1]
+
+
+def test_changelog_new_entries_filters_by_last_seen_version():
+    """`_new_changelog_entries(text, current, last_seen)` decides what to
+    print on bump. Three cases: fresh install (last_seen=None → just the
+    current version), bumped from older (return all newer entries
+    inclusive), same version (empty). Loose semver compare so 0.10.0 >
+    0.2.0 doesn't trip on lex order."""
+    import cli
+    sample = (
+        "## [0.3.0]\nfoo\n\n"
+        "## [0.2.0]\nbar\n\n"
+        "## [0.1.1]\nbaz\n\n"
+        "## [0.1.0]\nqux\n"
+    )
+    # Fresh install: announce only the current version, not the full history.
+    fresh = cli._new_changelog_entries(sample, "0.3.0", last_seen=None)
+    assert [e[0] for e in fresh] == ["0.3.0"], f"fresh install entries: {fresh}"
+
+    # Bumped from 0.1.0 → 0.3.0: should announce 0.3.0, 0.2.0, 0.1.1.
+    bumped = cli._new_changelog_entries(sample, "0.3.0", last_seen="0.1.0")
+    assert [e[0] for e in bumped] == ["0.3.0", "0.2.0", "0.1.1"]
+
+    # Same version: empty list, no announcement.
+    same = cli._new_changelog_entries(sample, "0.3.0", last_seen="0.3.0")
+    assert same == []
+
+    # Lex-vs-semver: 0.10.0 should be NEWER than 0.2.0.
+    lex_safe = (
+        "## [0.10.0]\nnewer\n\n"
+        "## [0.2.0]\nolder\n"
+    )
+    out = cli._new_changelog_entries(lex_safe, "0.10.0", last_seen="0.2.0")
+    assert [e[0] for e in out] == ["0.10.0"], f"semver compare failed: {out}"
+
+
+def test_changelog_show_release_notes_writes_tracker_silently_on_match():
+    """When the installed version equals the user's last-seen version,
+    `_show_release_notes_if_bumped` must be a no-op (no stderr write, no
+    tracker rewrite — quietness is the contract on every-day invocations)."""
+    import cli
+    import io
+    with tempfile.TemporaryDirectory() as td:
+        tracker = Path(td) / "last_seen_version"
+        tracker.write_text(cli._version())  # same as current
+        orig_tracker = cli._LAST_SEEN_VERSION_FILE
+        cli._LAST_SEEN_VERSION_FILE = tracker
+        orig_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            cli._show_release_notes_if_bumped()
+            assert sys.stderr.getvalue() == "", "should be silent when version matches"
+            assert tracker.read_text() == cli._version(), "tracker must not be rewritten"
+        finally:
+            sys.stderr = orig_stderr
+            cli._LAST_SEEN_VERSION_FILE = orig_tracker
+
+
+def test_changelog_show_release_notes_announces_on_bump_then_silences():
+    """Detector must (a) print release notes on first run after a bump,
+    (b) update the tracker, (c) be silent on the very next call. This is
+    the contract that makes "exactly once per bump" possible."""
+    import cli
+    import io
+    with tempfile.TemporaryDirectory() as td:
+        tracker = Path(td) / "last_seen_version"
+        tracker.write_text("0.0.1")  # ancient — every CHANGELOG entry is newer
+        orig_tracker = cli._LAST_SEEN_VERSION_FILE
+        cli._LAST_SEEN_VERSION_FILE = tracker
+        orig_stderr = sys.stderr
+        try:
+            # Run 1: bumped → expect output + tracker update.
+            sys.stderr = buf1 = io.StringIO()
+            cli._show_release_notes_if_bumped()
+            out1 = buf1.getvalue()
+            assert "watchmen updated" in out1, f"no announcement: {out1!r}"
+            assert tracker.read_text().strip() == cli._version()
+
+            # Run 2: tracker now matches current → silent.
+            sys.stderr = buf2 = io.StringIO()
+            cli._show_release_notes_if_bumped()
+            assert buf2.getvalue() == "", "should be silent on second call"
+        finally:
+            sys.stderr = orig_stderr
+            cli._LAST_SEEN_VERSION_FILE = orig_tracker
+
+
+def test_hooks_scrub_legacy_paths_on_install_and_uninstall():
+    """When a release retires a hook script (e.g., watchmen_brief.sh in
+    0.2.0), the user's existing settings.json keeps pointing at the
+    removed path until install/uninstall scrubs it. Both code paths
+    must clean stale _LEGACY_HOOK_PATHS entries — install so a routine
+    `watchmen hooks install` after pulling fixes the harness, uninstall
+    so a user leaving the project gets fully detached."""
+    import hooks_setup
+    legacy = next(iter(hooks_setup._LEGACY_HOOK_PATHS))
+    # Hook block as Claude Code stores it: per-event list of entries, each
+    # containing inner `hooks` arrays with command strings.
+    settings = {
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": legacy}]},
+                {"hooks": [{"type": "command", "command": str(hooks_setup.HOOK_SCRIPT)}]},
+            ],
+            "PreToolUse": [
+                {"matcher": "", "hooks": [
+                    {"type": "command", "command": legacy},
+                    {"type": "command", "command": str(hooks_setup.HOOK_SCRIPT)},
+                ]},
+            ],
+        }
+    }
+    removed = hooks_setup._scrub_legacy_hooks(settings["hooks"])
+    # Two stale references should be removed (one per event).
+    assert removed == 2, f"expected 2 removed, got {removed}"
+    # SessionStart kept the observe entry, dropped the brief entry.
+    ss = settings["hooks"]["SessionStart"]
+    cmds = [h["command"] for e in ss for h in e["hooks"]]
+    assert legacy not in cmds
+    assert str(hooks_setup.HOOK_SCRIPT) in cmds
+    # PreToolUse kept the entry but inner array is now observe-only.
+    pre = settings["hooks"]["PreToolUse"]
+    pre_cmds = [h["command"] for e in pre for h in e["hooks"]]
+    assert legacy not in pre_cmds and str(hooks_setup.HOOK_SCRIPT) in pre_cmds
+
+    # Calling again is idempotent (nothing left to remove).
+    removed_again = hooks_setup._scrub_legacy_hooks(settings["hooks"])
+    assert removed_again == 0
+
+
+def test_brief_artifacts_no_longer_shipped():
+    """Regression guard for the 0.2.0 cleanup: the macOS notification files
+    must not come back, and the hooks dispatcher must not list `brief`.
+    Catches accidental restores via merge or copy-paste."""
+    import hooks_setup
+    assert "brief" not in hooks_setup.WATCHMEN_SCRIPTS, \
+        "brief was removed in 0.2.0 — restoring it brings back the popup"
+    for _event, scripts in hooks_setup.WATCHMEN_HOOKS.items():
+        keys = [k for k, _m in scripts]
+        assert "brief" not in keys, f"`brief` reappeared in WATCHMEN_HOOKS[{_event}]"
+    repo_root = Path(__file__).resolve().parents[1]
+    assert not (repo_root / "brief.py").exists(), \
+        "brief.py reappeared — 0.2.0 deleted this on purpose"
+    assert not (repo_root / "hooks" / "watchmen_brief.sh").exists(), \
+        "hooks/watchmen_brief.sh reappeared — 0.2.0 deleted this on purpose"
+
+
 def test_corpus_migrate_schema_is_safe_when_db_missing():
     """`cli.main()` calls migrate_schema() before dispatching to every
     handler, including fresh installs where corpus.db doesn't exist yet.
@@ -2108,6 +2274,14 @@ def main() -> int:
     check("legacy DB migrates without errors",          test_corpus_migrates_legacy_db_without_file_mtime)
     check("pre-adapter DB auto-adds `agent` column",    test_corpus_migrate_schema_adds_agent_column_to_pre_adapter_db)
     check("migrate_schema is safe when corpus.db missing", test_corpus_migrate_schema_is_safe_when_db_missing)
+    print()
+    print("Release notes + hook cleanup (0.2.0):")
+    check("changelog parser splits versioned sections",         test_changelog_parser_extracts_versioned_sections)
+    check("changelog new-entries filter handles fresh/bump/same", test_changelog_new_entries_filters_by_last_seen_version)
+    check("release-notes silent when version unchanged",        test_changelog_show_release_notes_writes_tracker_silently_on_match)
+    check("release-notes announces on bump, silences after",    test_changelog_show_release_notes_announces_on_bump_then_silences)
+    check("hooks scrub legacy paths (install + uninstall)",     test_hooks_scrub_legacy_paths_on_install_and_uninstall)
+    check("brief artifacts removed + don't sneak back",         test_brief_artifacts_no_longer_shipped)
     print()
     print("Launchd plist sanity:")
     check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)
