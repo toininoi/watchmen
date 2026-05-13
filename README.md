@@ -214,6 +214,9 @@ watchmen pin <key> <skill>       Freeze a skill — next curator run skips it
 watchmen unpin <key> <skill>     Remove a skill from the pin list
 watchmen drop <key> <skill>      Remove bundle + blocklist the slug
 watchmen restore <key> <skill>   Allow a blocked slug to be re-proposed
+watchmen learn <key>             Fast cycle: analyze + CLAUDE.md refresh (~$0.50)
+watchmen learn <key> --full      Same, but with full curator (Stage 1+2+3)
+watchmen review <key>            Interactive walk: k(eep)/d(rop)/p(in)/s(kip)/v(iew)/q(uit)
 
 # Background services
 watchmen daemon run              Run scheduling loop in foreground
@@ -234,6 +237,11 @@ The curator is autonomous by default — every 12 hours it re-proposes and re-cu
 State lives in `kai_claude/<project>/_pinned.json` and `_blocklist.json` — JSON lists of slugs. Empty lists delete the file. Both are git-tracked inside the project bundle, so pin/drop state survives across machines if you sync `kai_claude/` somewhere.
 
 `watchmen show <project>` indicates pinned skills with 🔒 and lists blocked slugs in a separate section.
+
+### Fast-cycle commands
+
+- **`watchmen learn <project>`** closes the "did watchmen catch my latest session?" loop. Runs the analyst incrementally (only days since `last_analyst_day`) then a Stage-3-only curator pass to refresh CLAUDE.md. ~$0.50, 5-10 min. Add `--full` if you want the whole pipeline (Stage 1 finder + Stage 2 per-skill + Stage 3 CLAUDE.md, ~$3-8, 30-60 min) — useful when you expect new skill candidates to surface.
+- **`watchmen review <project>`** walks every skill, prompts `(k)eep / (d)rop / (p)in / (s)kip / (v)iew / (q)uit`, and applies decisions through the same pin/drop helpers. Every walk appends to `kai_claude/<project>/review.md` so there's an audit trail of when each decision was made. Bails cleanly with a hint when stdin isn't a tty (e.g., piped).
 
 ## How it works
 

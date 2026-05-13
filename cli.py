@@ -1229,6 +1229,185 @@ def _available_skills(project: str) -> list[str]:
     return sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
 
 
+# ─── Round 3: fast feedback loop + interactive review ──────────────────────
+
+
+def cmd_learn(args) -> int:
+    """Fast feedback loop: incremental analyze + lightweight curate.
+
+    Default mode runs `analyze` (only new days) then `curate --regen-claude`
+    (Stage 3 only — refreshes CLAUDE.md but keeps existing skills). This is
+    the affordable "did watchmen catch my latest frustration?" loop, costs
+    roughly $0.50, takes 5-10 minutes.
+
+    `--full` runs the whole curator (Stage 1 finder + Stage 2 per-skill +
+    Stage 3 CLAUDE.md). Costs $3-8, takes 30-60 min — only worth it when
+    you expect new skill candidates to surface."""
+    state.init_db()
+    proj = state.get_project(args.project)
+    if not proj:
+        print(_yellow(f"'{args.project}' not tracked. Run `watchmen init` or `watchmen track`."))
+        return 1
+
+    progress = state.get_project_progress(args.project)
+    new_prompts = progress.get("new_prompts_since_last_analysis", 0)
+    last_day = progress.get("last_analyst_day") or "—"
+
+    print(_bold(f"\nwatchmen learn — {args.project}\n"))
+    print(f"  last analyst day: {last_day}")
+    print(f"  new prompts since: {new_prompts}")
+    print()
+
+    # 1. Analyst — incremental by default, so only new days get processed.
+    #    If nothing new and we're not --full, bail cheaply.
+    if new_prompts == 0:
+        print(_dim(f"  no new prompts to analyze."))
+        if not args.full:
+            print(_dim(f"  use --full to refresh CLAUDE.md anyway, or `watchmen show {args.project} CLAUDE.md` to view current."))
+            return 0
+    else:
+        print(_bold(f"[1/2] Analyst (incremental from {last_day})…"))
+        analyze_args = argparse.Namespace(
+            project=args.project, full=False, repo=None, model=args.model,
+        )
+        rc = cmd_analyze(analyze_args)
+        if rc != 0:
+            print(_yellow(f"  analyst failed (rc={rc}); skipping curator"))
+            return rc
+
+    # 2. Curator — Stage 3 only by default (CLAUDE.md refresh).
+    #    --full runs the whole pipeline including per-skill stage.
+    print()
+    mode_label = "full curator" if args.full else "CLAUDE.md refresh only"
+    print(_bold(f"[2/2] Curator — {mode_label}…"))
+    curate_args = argparse.Namespace(
+        project=args.project, regen_claude=not args.full, model=args.model,
+    )
+    rc = cmd_curate(curate_args)
+
+    print()
+    if rc == 0:
+        print(_green(f"  ✓ learn complete"))
+        print(_dim(f"  view: watchmen show {args.project} CLAUDE.md"))
+        if not args.full:
+            print(_dim(f"  for new skills: watchmen learn {args.project} --full"))
+    return rc
+
+
+def cmd_review(args) -> int:
+    """Interactive walk-through of every skill in a project. For each skill,
+    prompts the user with (k)eep / (d)rop / (p)in / (s)kip / (v)iew / (q)uit.
+    Decisions apply through the regular pin/drop helpers and append to
+    review.md so there's an audit trail of every walk.
+
+    Bails cleanly when stdin isn't a tty (e.g., piped input) — interactive
+    review doesn't make sense in that environment, and Rich's Prompt would
+    just block forever otherwise."""
+    import sys as _sys
+    from datetime import datetime
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.prompt import Prompt
+
+    if not _sys.stdin.isatty():
+        print(_yellow("`watchmen review` is interactive — needs a tty for prompts."))
+        print(_dim("  inspect non-interactively with `watchmen show <project>` instead."))
+        return 1
+
+    proj_dir = _kai_claude_dir(args.project)
+    if not proj_dir.exists():
+        print(_yellow(f"no curated bundle for '{args.project}'"))
+        return 1
+    skills_dir = proj_dir / "skills"
+    skills = sorted(d for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else []
+    if not skills:
+        print(_yellow(f"no skills to review in {args.project}"))
+        return 1
+
+    console = Console()
+    pinned_already = _read_skill_list(args.project, _PINNED_FILE)
+    console.print(f"\n[bold]Review {args.project}[/] — walking {len(skills)} skill(s)")
+    console.print("[dim]Actions: (k)eep · (d)rop · (p)in · (s)kip · (v)iew · (q)uit[/]")
+
+    decisions: list[tuple[str, str]] = []
+    quit_early = False
+
+    for i, skill_dir in enumerate(skills, 1):
+        if quit_early:
+            break
+        slug = skill_dir.name
+        skill_md = skill_dir / "SKILL.md"
+        desc = ""
+        if skill_md.exists():
+            for line in skill_md.read_text().splitlines():
+                if line.startswith("description:"):
+                    desc = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    break
+        file_count = sum(1 for _ in skill_dir.rglob("*") if _.is_file())
+        pin_marker = " [bright_blue]🔒 (already pinned)[/]" if slug in pinned_already else ""
+
+        while True:
+            console.print(f"\n[bold cyan][{i}/{len(skills)}][/] [bold]{slug}[/]{pin_marker}")
+            if desc:
+                console.print(f"  [dim]{desc[:200]}[/]")
+            console.print(f"  [dim]{file_count} files[/]")
+            choice = Prompt.ask(
+                "  Action",
+                choices=["k", "d", "p", "s", "v", "q"],
+                default="k",
+                show_choices=False,
+            )
+            if choice == "v":
+                # Render SKILL.md and loop back to prompt — viewing isn't a
+                # decision, just an inspection step.
+                if skill_md.exists():
+                    console.print()
+                    console.print(Markdown(skill_md.read_text()))
+                continue
+            if choice == "k":
+                decisions.append((slug, "kept"))
+                console.print("  [green]→ kept[/]")
+            elif choice == "d":
+                cmd_drop(argparse.Namespace(project=args.project, skill=slug))
+                decisions.append((slug, "dropped"))
+            elif choice == "p":
+                cmd_pin(argparse.Namespace(project=args.project, skill=slug))
+                decisions.append((slug, "pinned"))
+            elif choice == "s":
+                decisions.append((slug, "skipped"))
+                console.print("  [dim]→ skipped[/]")
+            elif choice == "q":
+                quit_early = True
+                console.print("  [yellow]→ quit; remaining skills not reviewed[/]")
+            break
+
+    # Summary + audit log
+    console.print()
+    summary: dict[str, int] = {}
+    for _, action in decisions:
+        summary[action] = summary.get(action, 0) + 1
+    console.print("[bold]Summary[/]")
+    for action in ("kept", "pinned", "dropped", "skipped"):
+        if summary.get(action):
+            console.print(f"  {action}: {summary[action]}")
+    if quit_early:
+        unreviewed = len(skills) - len(decisions)
+        console.print(f"  [dim](quit early — {unreviewed} skill(s) not reviewed)[/]")
+
+    if decisions:
+        review_path = proj_dir / "review.md"
+        ts = datetime.now().isoformat(timespec="seconds")
+        block = [f"## review {ts}", ""]
+        for slug, action in decisions:
+            block.append(f"- {slug}: **{action}**")
+        block.append("")
+        # Append latest at the top so the most recent review is immediately visible.
+        existing = review_path.read_text() if review_path.exists() else ""
+        review_path.write_text("\n".join(block) + ("\n" + existing if existing else ""))
+        console.print(f"\n  [dim]audit log → {review_path}[/]")
+    return 0
+
+
 def cmd_pin(args) -> int:
     """Pin a skill: the next curator run will treat it as a cache hit and
     leave the bundle untouched. Useful when you've hand-edited a SKILL.md
@@ -1759,6 +1938,8 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("unpin",      "remove a skill from the pin list"),
         ("drop",       "remove a skill bundle + add to blocklist"),
         ("restore",    "remove a slug from the blocklist"),
+        ("learn",      "fast cycle: analyze + light curator (~$0.50)"),
+        ("review",     "interactive walk: keep/drop/pin per skill"),
     ]),
 ]
 
@@ -1875,6 +2056,16 @@ def main(argv: list[str] | None = None) -> int:
     p_restore.add_argument("project")
     p_restore.add_argument("skill")
     p_restore.set_defaults(func=cmd_restore)
+
+    p_learn = sub.add_parser("learn", help="fast feedback loop: analyze + light curator")
+    p_learn.add_argument("project")
+    p_learn.add_argument("--full", action="store_true", help="run full curator (Stage 1+2+3) instead of just CLAUDE.md refresh")
+    p_learn.add_argument("--model", default=DEFAULT_MODEL)
+    p_learn.set_defaults(func=cmd_learn)
+
+    p_review = sub.add_parser("review", help="interactive walk: keep/drop/pin every skill")
+    p_review.add_argument("project")
+    p_review.set_defaults(func=cmd_review)
 
     sub.add_parser("status", help="dashboard view").set_defaults(func=cmd_status)
     sub.add_parser("list", help="auto-detect projects from corpus").set_defaults(func=cmd_list)

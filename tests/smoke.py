@@ -1232,6 +1232,88 @@ def _fake_curated_bundle(td: Path, project_key: str = "fakeproj") -> Path:
     return proj
 
 
+def test_cli_learn_short_circuits_when_no_new_prompts():
+    """`watchmen learn <project>` should bail cheaply when there's nothing new
+    to analyze (saves the user a $0.50 mistake). When --full is passed, it
+    should run the curator anyway — that's the documented escape hatch."""
+    import io
+    import cli
+    calls = {"analyze": 0, "curate": 0}
+    orig_analyze = cli.cmd_analyze
+    orig_curate = cli.cmd_curate
+    orig_get = cli.state.get_project
+    orig_progress = cli.state.get_project_progress
+    cli.cmd_analyze = lambda a: (calls.__setitem__("analyze", calls["analyze"] + 1), 0)[1]
+    cli.cmd_curate = lambda a: (calls.__setitem__("curate", calls["curate"] + 1), 0)[1]
+    cli.state.get_project = lambda key: {"project_key": key} if key == "p" else None
+    cli.state.get_project_progress = lambda key: {
+        "last_analyst_day": "2026-05-12",
+        "new_prompts_since_last_analysis": 0,
+    }
+    buf = io.StringIO()
+    orig_stdout = cli.sys.stdout
+    cli.sys.stdout = buf
+    try:
+        import argparse as _ap
+        # No new prompts + no --full → no subprocess calls at all.
+        calls = {"analyze": 0, "curate": 0}
+        rc = cli.cmd_learn(_ap.Namespace(project="p", full=False, model="x"))
+        assert rc == 0
+        assert calls == {"analyze": 0, "curate": 0}, "should short-circuit on no new prompts"
+        assert "no new prompts to analyze" in buf.getvalue()
+
+        # --full → curator runs even with nothing new.
+        buf.truncate(0); buf.seek(0)
+        calls = {"analyze": 0, "curate": 0}
+        rc = cli.cmd_learn(_ap.Namespace(project="p", full=True, model="x"))
+        assert rc == 0
+        assert calls == {"analyze": 0, "curate": 1}, "--full should still run curator"
+
+        # New prompts → both run; learn returns curator's rc.
+        buf.truncate(0); buf.seek(0)
+        cli.state.get_project_progress = lambda key: {
+            "last_analyst_day": "2026-05-12",
+            "new_prompts_since_last_analysis": 42,
+        }
+        calls = {"analyze": 0, "curate": 0}
+        rc = cli.cmd_learn(_ap.Namespace(project="p", full=False, model="x"))
+        assert rc == 0
+        assert calls == {"analyze": 1, "curate": 1}
+
+        # Untracked project → exit 1, no calls.
+        buf.truncate(0); buf.seek(0)
+        calls = {"analyze": 0, "curate": 0}
+        rc = cli.cmd_learn(_ap.Namespace(project="other", full=False, model="x"))
+        assert rc == 1 and calls == {"analyze": 0, "curate": 0}
+    finally:
+        cli.sys.stdout = orig_stdout
+        cli.cmd_analyze = orig_analyze
+        cli.cmd_curate = orig_curate
+        cli.state.get_project = orig_get
+        cli.state.get_project_progress = orig_progress
+
+
+def test_cli_review_bails_when_stdin_not_a_tty():
+    """Piped stdin → review must exit 1 with a hint, NOT block forever waiting
+    for keystrokes. Regression: `echo something | watchmen review foo` used to
+    hang in development."""
+    import cli
+    # sys.stdin is not a tty inside our test harness, so cmd_review should
+    # detect that and bail. Pass a Namespace with no project lookup needed.
+    import argparse as _ap
+    import io
+    buf = io.StringIO()
+    orig_stdout = cli.sys.stdout
+    cli.sys.stdout = buf
+    try:
+        rc = cli.cmd_review(_ap.Namespace(project="anything"))
+    finally:
+        cli.sys.stdout = orig_stdout
+    assert rc == 1
+    out = buf.getvalue()
+    assert "interactive" in out and "tty" in out, f"expected tty hint in: {out!r}"
+
+
 def test_pin_unpin_drop_restore_roundtrip():
     """Pin/unpin and drop/restore must roundtrip cleanly and remove the
     underlying file when the list becomes empty. Drop must also delete the
@@ -1691,6 +1773,10 @@ def main() -> int:
     check("pin/unpin/drop/restore roundtrip + file cleanup", test_pin_unpin_drop_restore_roundtrip)
     check("curate._apply_blocklist filters + sweeps bundles", test_curate_apply_blocklist_filters_and_sweeps_bundles)
     check("curate._load_skill_list tolerates malformed JSON", test_curate_load_skill_list_tolerates_malformed_json)
+    print()
+    print("Round 3 — cycle-time + review:")
+    check("`learn` short-circuits + --full overrides + untracked = 1", test_cli_learn_short_circuits_when_no_new_prompts)
+    check("`review` bails when stdin isn't a tty",                    test_cli_review_bails_when_stdin_not_a_tty)
     print()
     print("Round 1 — inspection commands:")
     check("sparkline + bar handle empty / all-zero series",  test_sparkline_and_bar_edge_cases)
