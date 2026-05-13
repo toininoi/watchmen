@@ -1254,14 +1254,22 @@ def test_curate_finder_schema_accepts_enhancement_of_field():
     valid (but optional) field on each candidate. Without it the LLM
     can't structurally signal 'this is an enhancement of slug X' to
     Stage 2, and the harness-aware pathway degrades to a no-op."""
+    import agent as _agent
     import curate
     import httpx
     # We only need to introspect the tool specs — no actual API call.
-    with httpx.Client() as client:
-        finder = curate.build_finder_agent(
-            client=client, model="x", project_key="p", source_repo="/tmp",
-            log_path=None, recorder=None, installed_skills=[],
-        )
+    # Stub load_api_key so CI (no OPENROUTER_API_KEY) doesn't raise during
+    # Agent.__init__.
+    _orig_load = _agent.load_api_key
+    _agent.load_api_key = lambda: "stub-test-key"
+    try:
+        with httpx.Client() as client:
+            finder = curate.build_finder_agent(
+                client=client, model="x", project_key="p", source_repo="/tmp",
+                log_path=None, recorder=None, installed_skills=[],
+            )
+    finally:
+        _agent.load_api_key = _orig_load
     finish_spec = next(
         s for s in finder.tool_specs
         if s["function"]["name"] == "finish_candidates"
@@ -1278,18 +1286,24 @@ def test_curate_build_skill_curator_respects_out_subdir():
     instead of `skills/<slug>/`. The write tool spec and its scoping
     handler must both use the requested subdir — otherwise the agent
     would still try to write under skills/ and fail/escape the scope."""
+    import agent as _agent
     import curate
     import httpx
     candidate = {
         "slug": "demo-skill", "name": "Demo", "description": "x",
         "when_to_use": "y", "source_files": [], "session_ids": [],
     }
-    with httpx.Client() as client:
-        curator = curate.build_skill_curator(
-            client=client, model="x", project_key="p", source_repo="/tmp",
-            candidate=candidate, log_path=None, run_critic=lambda *a, **k: "",
-            recorder=None, out_subdir="_pending",
-        )
+    _orig_load = _agent.load_api_key
+    _agent.load_api_key = lambda: "stub-test-key"
+    try:
+        with httpx.Client() as client:
+            curator = curate.build_skill_curator(
+                client=client, model="x", project_key="p", source_repo="/tmp",
+                candidate=candidate, log_path=None, run_critic=lambda *a, **k: "",
+                recorder=None, out_subdir="_pending",
+            )
+    finally:
+        _agent.load_api_key = _orig_load
     write_spec = next(
         s for s in curator.tool_specs
         if s["function"]["name"] == "write_kai_claude_file"
@@ -1308,6 +1322,7 @@ def test_curate_build_skill_curator_enhancement_mode_prepends_context():
     agent knows to extend an existing harness skill rather than author
     one from scratch. Without this, `enhancement_of` is a label without
     behavior."""
+    import agent as _agent
     import curate
     import httpx
     candidate = {
@@ -1315,12 +1330,17 @@ def test_curate_build_skill_curator_enhancement_mode_prepends_context():
         "when_to_use": "y", "source_files": [], "session_ids": [],
         "enhancement_of": "craft-plan",
     }
-    with httpx.Client() as client:
-        curator = curate.build_skill_curator(
-            client=client, model="x", project_key="p", source_repo="/tmp",
-            candidate=candidate, log_path=None, run_critic=lambda *a, **k: "",
-            recorder=None,
-        )
+    _orig_load = _agent.load_api_key
+    _agent.load_api_key = lambda: "stub-test-key"
+    try:
+        with httpx.Client() as client:
+            curator = curate.build_skill_curator(
+                client=client, model="x", project_key="p", source_repo="/tmp",
+                candidate=candidate, log_path=None, run_critic=lambda *a, **k: "",
+                recorder=None,
+            )
+    finally:
+        _agent.load_api_key = _orig_load
     assert "ENHANCEMENT MODE" in curator.system_prompt
     assert "craft-plan" in curator.system_prompt
 
