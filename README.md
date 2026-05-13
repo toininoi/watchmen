@@ -60,6 +60,8 @@ watchmen insights --list        # list every cached digest in ~/.watchmen/insigh
 watchmen insights --no-llm      # static aggregation only, no API call (instant)
 ```
 
+The same digest is also available as an HTML page in the local viewer at `http://127.0.0.1:8979/insights` — same data, richer charts (sparklines, horizontal bars, hour-of-day heatmap, deep-digest markdown rendered with code highlighting). The CLI is the regenerate path; the viewer is the read-and-share path.
+
 `watchmen insights` is a two-stage pipeline mirroring the analyst/curator architecture:
 
 1. **Static aggregation** (instant, no LLM): repo table with skills/adapter/pending/activity sparkline, cross-repo candidate-slug overlaps, untapped corpora.
