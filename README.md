@@ -31,6 +31,45 @@ Plus per-project `analyses/<repo>/`:
 _running.md              # latest aggregated thesis
 ```
 
+## vs `/insights` — how watchmen differs
+
+Claude Code shipped a native `/insights` command in v2.1.117 (Apr 2026) that produces an LLM-narrated HTML report from your `~/.claude/projects/` transcripts. It's good. watchmen is **complementary**, not a replacement:
+
+| | `/insights` | watchmen |
+|---|---|---|
+| **Output** | One-shot HTML report (read once, close tab) | Git-tracked skill bundles + CLAUDE.md (load into next session) |
+| **Adapters** | Claude Code transcripts only | cc + cd (Codex) + pi (pi.dev) |
+| **Scope** | Global, flat aggregate | Per-project bundles + cross-repo digest |
+| **Cadence** | On-demand, manual | Cron + statusLine brief on next session |
+| **Provenance** | LLM narrates, no traceable source | `watchmen why <skill>` → source sessions, curator log, adapter tags |
+| **Curation** | LLM proposes ~5 CLAUDE.md rules globally | Rule-based extraction → reusable skill markdown per project |
+| **Privacy** | LLM call to Anthropic on full corpus | Local-only by default (LLM only during scheduled curator runs, via your OpenRouter key) |
+| **Persistence** | Report file (regenerate to refresh) | `_curation_log.md`, `_candidates.json`, diff against `last_commit` |
+| **Coverage view** | "1,108 messages, 41 sessions" globally | Per-repo: skills count, candidates not promoted, stale runs |
+
+**One-line pitch**: `/insights` *narrates your whole history once*; watchmen *operationalizes it across every adapter and every repo, continuously, with traceable artifacts.*
+
+Run both. They cover different jobs:
+
+```bash
+/insights                       # in Claude Code — LLM-narrated overview
+watchmen insights               # static aggregation + view-or-regenerate prompt
+watchmen insights --regenerate  # force a fresh deep digest (skip prompt)
+watchmen insights --view        # render the latest cached digest (skip prompt)
+watchmen insights --list        # list every cached digest in ~/.watchmen/insights/
+watchmen insights --no-llm      # static aggregation only, no API call (instant)
+```
+
+`watchmen insights` is a two-stage pipeline mirroring the analyst/curator architecture:
+
+1. **Static aggregation** (instant, no LLM): repo table with skills/adapter/pending/activity sparkline, cross-repo candidate-slug overlaps, untapped corpora.
+2. **Stage 1 — per-repo synthesis** (parallel): for each repo with a thesis on disk, read `analyses/<repo>/_running.md` + `kai_claude/<repo>/_curation_log.md` + `_candidates.json` and produce a structured per-repo summary (themes / friction / user signals / skill gaps).
+3. **Stage 2 — cross-repo synthesis**: feeds the Stage 1 outputs + static facts into a final markdown digest with 5 sections — themes across your work, friction patterns, skill gaps, underused capabilities (CLAUDE.md rules / hooks / MCP), concrete next moves with copy-pastable commands.
+
+Each run is cached at `~/.watchmen/insights/<timestamp>.md` with YAML frontmatter (model + repos synthesized + timestamp). When a cached digest exists, `watchmen insights` shows the latest run's age and prompts `(v)iew · (r)egenerate · (q)uit`. Non-interactive contexts (piped, CI) default to view so a script can't silently spend API credit.
+
+Cost: ~$0.05-0.10 per regeneration with deepseek-flash. Time: ~30-60s depending on how many repos have a thesis. `--no-llm` skips both stages entirely.
+
 ## Requirements
 
 - macOS
@@ -206,6 +245,7 @@ watchmen show <key>              List a project's artifacts (CLAUDE.md, skills, 
 watchmen show <key> <skill|file> Dump a single SKILL.md or any project artifact
 watchmen why <key> <skill>       Provenance: source sessions (w/ adapter), curator rationale
 watchmen recent [<key>]          Git log of curator runs (last 7d by default)
+watchmen insights                Cross-repo digest — pairs with Anthropic's /insights
 watchmen open [<key>]            Open viewer in browser (jumps to project page)
 watchmen logs [daemon|viewer]    Tail launchd logs (-f to follow)
 
