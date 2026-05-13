@@ -1232,6 +1232,94 @@ def _fake_curated_bundle(td: Path, project_key: str = "fakeproj") -> Path:
     return proj
 
 
+def test_pin_unpin_drop_restore_roundtrip():
+    """Pin/unpin and drop/restore must roundtrip cleanly and remove the
+    underlying file when the list becomes empty. Drop must also delete the
+    bundle dir on disk so `watchmen show` no longer lists the skill."""
+    import cli
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        proj_dir = _fake_curated_bundle(td_path, "fakeproj")
+        orig_root = cli.ROOT
+        cli.ROOT = td_path
+        try:
+            import argparse as _ap
+            # pin: file appears with the slug
+            cli.cmd_pin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
+            pinned_path = proj_dir / "_pinned.json"
+            assert pinned_path.exists()
+            assert cli._read_skill_list("fakeproj", "_pinned.json") == {"lint-fixer"}
+
+            # pin again — idempotent, no error
+            rc = cli.cmd_pin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
+            assert rc == 0
+
+            # pin by display name resolves to slug
+            cli.cmd_unpin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
+            cli.cmd_pin(_ap.Namespace(project="fakeproj", skill="Lint Fixer"))
+            assert cli._read_skill_list("fakeproj", "_pinned.json") == {"lint-fixer"}
+
+            # unpin clears the list → file deleted (no empty `[]` left behind)
+            cli.cmd_unpin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
+            assert not pinned_path.exists(), "empty pin list should delete the file"
+
+            # drop: bundle dir gone, slug recorded in blocklist
+            skill_dir = proj_dir / "skills" / "lint-fixer"
+            assert skill_dir.exists()
+            cli.cmd_drop(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
+            assert not skill_dir.exists(), "drop must remove the bundle dir"
+            assert cli._read_skill_list("fakeproj", "_blocklist.json") == {"lint-fixer"}
+
+            # restore: blocklist cleared, file removed (bundle is NOT recreated
+            # — that's the curator's job on the next run)
+            cli.cmd_restore(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
+            assert not (proj_dir / "_blocklist.json").exists()
+            assert not skill_dir.exists(), "restore must NOT recreate the bundle"
+
+            # unknown skill on pin → exit 1 with helpful suggestion
+            rc = cli.cmd_pin(_ap.Namespace(project="fakeproj", skill="no-such"))
+            assert rc == 1
+        finally:
+            cli.ROOT = orig_root
+
+
+def test_curate_apply_blocklist_filters_and_sweeps_bundles():
+    """`_apply_blocklist` filters by slug AND display name (both lowercased),
+    AND deletes any leftover bundle dirs for blocked slugs. Without the sweep,
+    a user could drop a skill and still see its bundle in `watchmen show`
+    after the next curator run finishes."""
+    import curate
+    with tempfile.TemporaryDirectory() as td:
+        out_dir = Path(td) / "kai_claude" / "fake"
+        (out_dir / "skills" / "lint-fixer").mkdir(parents=True)
+        (out_dir / "skills" / "lint-fixer" / "SKILL.md").write_text("stub")
+        (out_dir / "skills" / "keep-me").mkdir(parents=True)
+        candidates = [
+            {"slug": "lint-fixer", "name": "Lint Fixer"},
+            {"slug": "Other", "name": "Other Name"},
+            {"slug": "keep-me", "name": "Keep me"},
+        ]
+        kept = curate._apply_blocklist(candidates, {"lint-fixer", "Other Name"}, out_dir)
+        # Filtered by both slug ("lint-fixer") and display name ("Other Name").
+        assert [c["slug"] for c in kept] == ["keep-me"]
+        # Stale bundle dir for blocked slug must be swept.
+        assert not (out_dir / "skills" / "lint-fixer").exists()
+        # Non-blocked bundles untouched.
+        assert (out_dir / "skills" / "keep-me").exists()
+
+
+def test_curate_load_skill_list_tolerates_malformed_json():
+    """A malformed _pinned.json or _blocklist.json must NOT abort the curator
+    — an expensive run shouldn't fail because the user fat-fingered an edit."""
+    import curate
+    with tempfile.TemporaryDirectory() as td:
+        out_dir = Path(td)
+        (out_dir / "_pinned.json").write_text("not even close to json")
+        assert curate._load_skill_list(out_dir, "_pinned.json") == set()
+        (out_dir / "_pinned.json").write_text('["valid-slug"]')
+        assert curate._load_skill_list(out_dir, "_pinned.json") == {"valid-slug"}
+
+
 def test_sparkline_and_bar_edge_cases():
     """The TUI helpers must degrade gracefully on degenerate inputs (empty
     series, all-zero series, zero max for bars). A regression here would mean
@@ -1598,6 +1686,11 @@ def main() -> int:
     print("Viewer port config:")
     check("config.viewer_port respects env→file→default",  test_config_viewer_port_reads_env_then_file_then_default)
     check("`settings port` get/set + validates input",     test_cli_settings_port_get_and_set_with_validation)
+    print()
+    print("Round 2 — control commands:")
+    check("pin/unpin/drop/restore roundtrip + file cleanup", test_pin_unpin_drop_restore_roundtrip)
+    check("curate._apply_blocklist filters + sweeps bundles", test_curate_apply_blocklist_filters_and_sweeps_bundles)
+    check("curate._load_skill_list tolerates malformed JSON", test_curate_load_skill_list_tolerates_malformed_json)
     print()
     print("Round 1 — inspection commands:")
     check("sparkline + bar handle empty / all-zero series",  test_sparkline_and_bar_edge_cases)

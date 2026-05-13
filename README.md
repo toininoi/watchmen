@@ -209,6 +209,12 @@ watchmen recent [<key>]          Git log of curator runs (last 7d by default)
 watchmen open [<key>]            Open viewer in browser (jumps to project page)
 watchmen logs [daemon|viewer]    Tail launchd logs (-f to follow)
 
+# Control (steer the curator)
+watchmen pin <key> <skill>       Freeze a skill — next curator run skips it
+watchmen unpin <key> <skill>     Remove a skill from the pin list
+watchmen drop <key> <skill>      Remove bundle + blocklist the slug
+watchmen restore <key> <skill>   Allow a blocked slug to be re-proposed
+
 # Background services
 watchmen daemon run              Run scheduling loop in foreground
 watchmen daemon run --once       Single cycle, then exit (testing)
@@ -216,6 +222,18 @@ watchmen viewer run              FastAPI viewer in foreground
 watchmen {hooks,daemon,viewer,statusline} install
 watchmen {hooks,daemon,viewer,statusline} uninstall
 ```
+
+## Steering the curator
+
+The curator is autonomous by default — every 12 hours it re-proposes and re-curates skill bundles based on the latest analyst thesis. For most users that's fine. When it isn't:
+
+- **`watchmen pin <project> <skill>`** — you've hand-edited a SKILL.md and want it preserved through future runs. The curator treats pinned skills as forced cache hits and skips its per-skill agent for them.
+- **`watchmen drop <project> <skill>`** — the curator keeps proposing a skill you don't want. Drop removes the bundle dir AND adds the slug to `_blocklist.json`. The candidate finder still proposes whatever it wants, but `curate.py` filters its output against the blocklist before Stage 2 — so dropped slugs stay gone.
+- **`watchmen unpin` / `watchmen restore`** — reverse either decision.
+
+State lives in `kai_claude/<project>/_pinned.json` and `_blocklist.json` — JSON lists of slugs. Empty lists delete the file. Both are git-tracked inside the project bundle, so pin/drop state survives across machines if you sync `kai_claude/` somewhere.
+
+`watchmen show <project>` indicates pinned skills with 🔒 and lists blocked slugs in a separate section.
 
 ## How it works
 

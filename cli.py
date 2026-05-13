@@ -898,8 +898,11 @@ def cmd_show(args) -> int:
                 print(f"  {_green('●')} {name:<24} {size:>7,}B")
             else:
                 print(f"  {_dim('·')} {_dim(name)}")
-        # Skills
+        # Skills — with pin/block markers so users see their override state
+        # at the same glance as the skill names.
         skills_dir = proj_dir / "skills"
+        pinned = _read_skill_list(args.project, _PINNED_FILE)
+        blocked = _read_skill_list(args.project, _BLOCKLIST_FILE)
         if skills_dir.exists():
             skills = sorted(d for d in skills_dir.iterdir() if d.is_dir())
             print()
@@ -913,7 +916,14 @@ def cmd_show(args) -> int:
                         if line.startswith("description:"):
                             desc = line.split(":", 1)[1].strip().strip('"').strip("'")[:80]
                             break
-                print(f"    {s.name:<32} {file_count:>3} files  {_dim(desc)}")
+                marker = "🔒 " if s.name in pinned else "   "
+                print(f"    {marker}{s.name:<30} {file_count:>3} files  {_dim(desc)}")
+        if blocked:
+            # Surface the blocklist so users remember they've muted some skills.
+            print()
+            print(_bold(f"  Blocked ({len(blocked)}):") + _dim(" — `watchmen restore <slug>` to allow re-proposal"))
+            for slug in sorted(blocked):
+                print(f"    {_yellow('✗')} {slug}")
         print()
         print(_dim("View a file: `watchmen show " + args.project + " CLAUDE.md`"))
         print(_dim("View a skill: `watchmen show " + args.project + " <skill-slug>`"))
@@ -1144,6 +1154,158 @@ def cmd_recent(args) -> int:
         print()
     if not any_found:
         print(_dim(f"  no curator commits in the last {days}d."))
+    return 0
+
+
+# ─── Round 2: pin / drop control ────────────────────────────────────────────
+# Pinned skills are frozen — the curator skips re-running their per-skill
+# agent on the next run and keeps the existing bundle untouched.
+# Dropped skills are removed AND blocked — the candidate finder still
+# proposes anything (it's an LLM, we can't muzzle it cleanly), but
+# curate.py filters its output against the blocklist before Stage 2 and
+# deletes any leftover bundle dir for the blocked slug.
+
+_PINNED_FILE = "_pinned.json"
+_BLOCKLIST_FILE = "_blocklist.json"
+
+
+def _read_skill_list(project: str, filename: str) -> set[str]:
+    """Load a JSON list of skill slugs from kai_claude/<project>/<filename>.
+    Empty/missing/invalid → empty set."""
+    import json as _json
+    p = _kai_claude_dir(project) / filename
+    if not p.exists():
+        return set()
+    try:
+        return set(_json.loads(p.read_text()))
+    except Exception:
+        return set()
+
+
+def _write_skill_list(project: str, filename: str, values: set[str]) -> Path:
+    """Persist a sorted JSON list of slugs back to the project dir. When the
+    list becomes empty (last unpin or restore), delete the file instead of
+    leaving an empty `[]` behind — keeps the bundle dir tidy."""
+    import json as _json
+    proj_dir = _kai_claude_dir(project)
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    p = proj_dir / filename
+    if not values:
+        if p.exists():
+            p.unlink()
+        return p
+    p.write_text(_json.dumps(sorted(values), indent=2) + "\n")
+    return p
+
+
+def _resolve_skill_slug(project: str, target: str) -> str | None:
+    """Find the canonical slug for a user-supplied skill identifier. Accepts:
+      - exact slug matching kai_claude/<project>/skills/<slug>/
+      - display name from _candidates.json (case-insensitive)
+    Returns None if neither matches — the caller is expected to suggest
+    available slugs in that case."""
+    import json as _json
+    proj_dir = _kai_claude_dir(project)
+    skills_dir = proj_dir / "skills"
+    if skills_dir.exists() and (skills_dir / target).is_dir():
+        return target
+    cands_path = proj_dir / "_candidates.json"
+    if cands_path.exists():
+        try:
+            cands = _json.loads(cands_path.read_text())
+        except Exception:
+            cands = []
+        for c in cands:
+            if c.get("slug") == target or c.get("name", "").lower() == target.lower():
+                return c.get("slug")
+    return None
+
+
+def _available_skills(project: str) -> list[str]:
+    """List slugs present on disk — used to suggest valid options on miss."""
+    skills_dir = _kai_claude_dir(project) / "skills"
+    if not skills_dir.exists():
+        return []
+    return sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
+
+
+def cmd_pin(args) -> int:
+    """Pin a skill: the next curator run will treat it as a cache hit and
+    leave the bundle untouched. Useful when you've hand-edited a SKILL.md
+    or the curator keeps reverting good changes."""
+    slug = _resolve_skill_slug(args.project, args.skill)
+    if not slug:
+        print(_yellow(f"no skill '{args.skill}' in {args.project}"))
+        available = _available_skills(args.project)
+        if available:
+            print(_dim(f"  available: {', '.join(available)}"))
+        return 1
+    pinned = _read_skill_list(args.project, _PINNED_FILE)
+    if slug in pinned:
+        print(_dim(f"already pinned: {slug}"))
+        return 0
+    pinned.add(slug)
+    path = _write_skill_list(args.project, _PINNED_FILE, pinned)
+    print(_green(f"✓ pinned {slug}"))
+    print(_dim(f"  wrote → {path}"))
+    print(_dim(f"  the next curator run will skip re-curating this skill"))
+    return 0
+
+
+def cmd_unpin(args) -> int:
+    """Remove a slug from the pin list. Falls back to the raw input string
+    when _resolve_skill_slug returns None, so users can unpin a slug whose
+    bundle they've already manually deleted."""
+    slug = _resolve_skill_slug(args.project, args.skill) or args.skill
+    pinned = _read_skill_list(args.project, _PINNED_FILE)
+    if slug not in pinned:
+        print(_dim(f"not pinned: {slug}"))
+        if pinned:
+            print(_dim(f"  pinned slugs: {', '.join(sorted(pinned))}"))
+        return 0
+    pinned.discard(slug)
+    _write_skill_list(args.project, _PINNED_FILE, pinned)
+    print(_green(f"✓ unpinned {slug}"))
+    return 0
+
+
+def cmd_drop(args) -> int:
+    """Drop a skill: remove its bundle directory from disk AND add the slug
+    to the blocklist so the curator can't regenerate it. The display name
+    is also stored so candidate-finder output for the same skill (under a
+    different generated slug) gets caught."""
+    slug = _resolve_skill_slug(args.project, args.skill) or args.skill
+    proj_dir = _kai_claude_dir(args.project)
+    skill_dir = proj_dir / "skills" / slug
+    blocklist = _read_skill_list(args.project, _BLOCKLIST_FILE)
+    already_blocked = slug in blocklist
+    blocklist.add(slug)
+    _write_skill_list(args.project, _BLOCKLIST_FILE, blocklist)
+    if skill_dir.exists():
+        import shutil as _sh
+        _sh.rmtree(skill_dir)
+        print(_yellow(f"✓ dropped {slug}") + _dim(" (removed bundle + added to blocklist)"))
+    elif already_blocked:
+        print(_dim(f"already dropped: {slug}"))
+    else:
+        print(_green(f"✓ blocked {slug}") + _dim(" (no bundle to remove; curator won't regenerate)"))
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """Remove a slug from the blocklist so the candidate finder can propose
+    it again next run. Doesn't itself recreate the bundle — the next curator
+    run handles that."""
+    slug = args.skill  # use raw input since the bundle may not exist
+    blocklist = _read_skill_list(args.project, _BLOCKLIST_FILE)
+    if slug not in blocklist:
+        print(_dim(f"not blocked: {slug}"))
+        if blocklist:
+            print(_dim(f"  blocked slugs: {', '.join(sorted(blocklist))}"))
+        return 0
+    blocklist.discard(slug)
+    _write_skill_list(args.project, _BLOCKLIST_FILE, blocklist)
+    print(_green(f"✓ restored {slug}") + _dim(" (curator can re-propose it on next run)"))
     return 0
 
 
@@ -1592,6 +1754,12 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("open",       "open the viewer in your browser"),
         ("logs",       "tail launchd logs (daemon | viewer | all)"),
     ]),
+    ("Control", [
+        ("pin",        "freeze a skill from regeneration (curator skips it)"),
+        ("unpin",      "remove a skill from the pin list"),
+        ("drop",       "remove a skill bundle + add to blocklist"),
+        ("restore",    "remove a slug from the blocklist"),
+    ]),
 ]
 
 
@@ -1689,6 +1857,24 @@ def main(argv: list[str] | None = None) -> int:
     p_recent.add_argument("--days", type=int, default=7, help="lookback window in days (default 7)")
     p_recent.add_argument("--limit", type=int, default=10, help="max commits per project (default 10)")
     p_recent.set_defaults(func=cmd_recent)
+
+    # ── Control commands (Round 2) ─────────────────────────────────────────
+    p_pin = sub.add_parser("pin", help="freeze a skill from regeneration")
+    p_pin.add_argument("project")
+    p_pin.add_argument("skill", help="skill slug or display name")
+    p_pin.set_defaults(func=cmd_pin)
+    p_unpin = sub.add_parser("unpin", help="remove a skill from the pin list")
+    p_unpin.add_argument("project")
+    p_unpin.add_argument("skill")
+    p_unpin.set_defaults(func=cmd_unpin)
+    p_drop = sub.add_parser("drop", help="remove a skill bundle + add to blocklist")
+    p_drop.add_argument("project")
+    p_drop.add_argument("skill", help="skill slug or display name")
+    p_drop.set_defaults(func=cmd_drop)
+    p_restore = sub.add_parser("restore", help="remove a slug from the blocklist")
+    p_restore.add_argument("project")
+    p_restore.add_argument("skill")
+    p_restore.set_defaults(func=cmd_restore)
 
     sub.add_parser("status", help="dashboard view").set_defaults(func=cmd_status)
     sub.add_parser("list", help="auto-detect projects from corpus").set_defaults(func=cmd_list)

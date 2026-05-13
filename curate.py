@@ -466,6 +466,48 @@ def build_claude_md_author(client, model, project_key, source_repo, log_path, ru
     )
 
 
+# ─── Pin / blocklist support (Round 2) ──────────────────────────────────────
+# Two opt-in user-edited files inside kai_claude/<project>/:
+#   _pinned.json     — list of slugs to skip re-curating (forced cache hit)
+#   _blocklist.json  — list of slugs to filter out of candidate-finder output
+# Both are written by `watchmen pin/drop` and read here at run time. If either
+# file is malformed JSON, we treat it as empty rather than failing the run.
+
+
+def _load_skill_list(out_dir: Path, filename: str) -> set[str]:
+    p = out_dir / filename
+    if not p.exists():
+        return set()
+    try:
+        return set(json.loads(p.read_text()))
+    except Exception:
+        # Better to ignore a malformed file than abort an expensive curator run.
+        return set()
+
+
+def _apply_blocklist(candidates: list[dict], blocklist: set[str], out_dir: Path) -> list[dict]:
+    """Filter candidate list against the blocklist (matches slug + display name,
+    both lowercased). Also deletes any leftover bundle dir for blocked slugs
+    — leaving stale `kai_claude/<project>/skills/<dropped>/` around would
+    confuse the user (and break `watchmen show`'s skill list)."""
+    if not blocklist:
+        return candidates
+    block_lower = {b.lower() for b in blocklist}
+    kept = []
+    for c in candidates:
+        slug = (c.get("slug") or "").lower()
+        name = (c.get("name") or "").lower()
+        if slug in block_lower or name in block_lower:
+            continue
+        kept.append(c)
+    # Sweep stale bundle dirs.
+    for slug in blocklist:
+        skill_dir = out_dir / "skills" / slug
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir, ignore_errors=True)
+    return kept
+
+
 # ─── Changelog generation ───────────────────────────────────────────────────
 
 
@@ -838,11 +880,25 @@ def main():
             for c in candidates:
                 print(f"         - {c.get('slug', '?'):<35} {c.get('description', '')[:80]}", flush=True)
 
+        # Apply user-controlled blocklist before continuing. Logged out so the
+        # curator run record makes the filter visible.
+        blocklist = _load_skill_list(out_dir, "_blocklist.json")
+        if blocklist:
+            pre = len(candidates)
+            candidates = _apply_blocklist(candidates, blocklist, out_dir)
+            if pre != len(candidates):
+                print(f"      blocklist filtered {pre - len(candidates)} candidate(s); kept {len(candidates)}", flush=True)
+            else:
+                print(f"      blocklist active ({len(blocklist)} slug(s)) but no candidates matched", flush=True)
+
         if not candidates:
             print("no candidates — stopping.", flush=True)
             return
 
         # ─── Stage 2: per-skill curator ───────────────────────────────────────
+        # Pinned slugs are treated as forced cache hits — the curator skips
+        # them entirely on Stage 2, leaving the existing bundle untouched.
+        pinned = _load_skill_list(out_dir, "_pinned.json")
         completed: list[str] = []
         if args.skip_skills:
             existing_skills_dir = out_dir / "skills"
@@ -853,21 +909,33 @@ def main():
             # Phase 2a: sequential cache scan — cheap (~ms per skill), determines
             # which candidates need the expensive agent run.
             cache_hits: list[str] = []
+            pinned_hits: list[str] = []
             miss_list: list[dict] = []
             for cand in candidates:
                 slug = cand.get("slug")
                 if not slug:
                     continue
                 skill_dir = out_dir / "skills" / slug
-                if (skill_dir / "SKILL.md").exists() and cache_hit(skill_dir / ".inputs.json", replay_handlers):
+                has_bundle = (skill_dir / "SKILL.md").exists()
+                # A pinned slug with an existing bundle is a forced cache hit.
+                # If a pinned slug somehow has no bundle on disk (user deleted
+                # it manually), fall through to the normal cache-or-curate path
+                # so the user isn't stuck without that skill.
+                if slug in pinned and has_bundle:
+                    pinned_hits.append(slug)
+                elif has_bundle and cache_hit(skill_dir / ".inputs.json", replay_handlers):
                     cache_hits.append(slug)
                 else:
                     miss_list.append(cand)
             completed.extend(cache_hits)
+            completed.extend(pinned_hits)
+            for slug in pinned_hits:
+                print(f"      {slug} — pinned (skipped)", flush=True)
 
             print(
                 f"[2/4] per-skill curators ({len(candidates)} skills, {len(cache_hits)} cached, "
-                f"{len(miss_list)} to curate, concurrency={args.curator_concurrency})...",
+                f"{len(pinned_hits)} pinned, {len(miss_list)} to curate, "
+                f"concurrency={args.curator_concurrency})...",
                 flush=True,
             )
             for slug in cache_hits:
