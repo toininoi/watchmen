@@ -968,18 +968,15 @@ def test_api_key_helpers_roundtrip():
     import tempfile
 
     import cli
+    import config
 
     with tempfile.TemporaryDirectory() as td:
-        fake_home = Path(td)
-        env_dir = fake_home / ".config" / "watchmen"
-        env_dir.mkdir(parents=True)
-        env_path = env_dir / ".env"
+        env_path = Path(td) / ".env"
         env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
 
-        orig_home = os.environ.get("HOME")
+        orig_env_path = config.ENV_PATH
         orig_env_key = os.environ.pop("OPENROUTER_API_KEY", None)
-        os.environ["HOME"] = str(fake_home)
-        # Path.home() reads $HOME on POSIX, so the override takes effect immediately.
+        config.ENV_PATH = env_path
         try:
             assert cli._read_current_api_key() == "sk-old"
             cli._write_api_key("sk-new")
@@ -989,8 +986,7 @@ def test_api_key_helpers_roundtrip():
             assert "OTHER_VAR=keep-me" in content, "rotation clobbered an unrelated env line"
             assert content.count("OPENROUTER_API_KEY=") == 1, "duplicate OPENROUTER_API_KEY line after rotation"
         finally:
-            if orig_home is not None:
-                os.environ["HOME"] = orig_home
+            config.ENV_PATH = orig_env_path
             if orig_env_key is not None:
                 os.environ["OPENROUTER_API_KEY"] = orig_env_key
 
@@ -1045,6 +1041,233 @@ def test_no_hardcoded_user_paths():
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 
+def test_cli_version_flag_prints_version():
+    """`watchmen --version` must exit 0 with a line starting `watchmen `. Argparse's
+    'version' action calls sys.exit, so wrap in SystemExit. Regression: ensure the
+    pyproject-based fallback works when the package isn't installed via pip metadata."""
+    import io
+    import cli
+    out = io.StringIO()
+    orig_stdout = cli.sys.stdout
+    cli.sys.stdout = out
+    try:
+        try:
+            cli.main(["--version"])
+        except SystemExit as ex:
+            assert ex.code == 0, f"--version should exit 0, got {ex.code}"
+    finally:
+        cli.sys.stdout = orig_stdout
+    body = out.getvalue()
+    assert body.startswith("watchmen "), f"unexpected --version body: {body!r}"
+    # Version string must look semverish (digits + dots), not the "0.0.0" fallback.
+    version = body.split(" ", 1)[1].strip()
+    parts = version.split(".")
+    assert all(p.isdigit() for p in parts), f"version {version!r} doesn't look like semver"
+    assert version != "0.0.0", "pyproject version lookup fell through to the fallback"
+
+
+def test_cli_init_dispatches_to_onboard_and_onboard_still_works():
+    """`watchmen init` is the canonical name; `watchmen onboard` remains as a hidden
+    alias. Both must invoke onboard.run(). Regression: if `onboard` ever disappears
+    as a subparser, every existing teammate script breaks."""
+    import cli
+    called: list[str] = []
+
+    # Stub onboard.run BEFORE main() imports the module (it's a deferred import).
+    import onboard
+    orig = onboard.run
+    onboard.run = lambda: (called.append("ran"), 0)[1]
+    try:
+        called.clear()
+        rc = cli.main(["init"])
+        assert rc == 0 and called == ["ran"], f"`init` failed to dispatch: rc={rc}, called={called}"
+        called.clear()
+        rc = cli.main(["onboard"])
+        assert rc == 0 and called == ["ran"], f"`onboard` alias broken: rc={rc}, called={called}"
+    finally:
+        onboard.run = orig
+
+
+def test_cli_help_renders_groups_and_hides_deprecated():
+    """`watchmen --help` (a) shows the grouped sections (Get started, Pipeline, …),
+    (b) lists the new commands (init, doctor, open, logs), and (c) does NOT list any
+    of the 13 deprecated hyphenated aliases. If the SUPPRESS slips off, the help
+    screen reverts to the unreadable flat-list."""
+    import io
+    import cli
+    buf = io.StringIO()
+    orig_stdout = cli.sys.stdout
+    cli.sys.stdout = buf
+    try:
+        try:
+            cli.main(["--help"])
+        except SystemExit:
+            pass
+    finally:
+        cli.sys.stdout = orig_stdout
+    body = buf.getvalue()
+    for section in ("Get started", "Pipeline", "Project inventory", "Background services", "Inspect"):
+        assert f"{section}:" in body, f"missing help group: {section}"
+    for cmd in ("init", "doctor", "open", "logs", "status", "analyze"):
+        assert cmd in body, f"missing command in help: {cmd}"
+    for deprecated in ("install-daemon", "install-viewer", "hooks-status", "launchd-status",
+                       "uninstall-daemon", "uninstall-hooks", "install-statusline", "update-plugin"):
+        assert deprecated not in body, f"deprecated alias leaked into --help: {deprecated}"
+
+
+def test_cli_open_constructs_url_and_invokes_webbrowser():
+    """`watchmen open <project>` must build http://host:port/p/<project> and pass
+    it to webbrowser.open. The viewer-down warning must not block the open
+    attempt — open is a 'best effort, give me the URL' command, not a gate."""
+    import cli
+    import webbrowser
+    opened: list[str] = []
+    orig = webbrowser.open
+    webbrowser.open = lambda url, new=0: (opened.append(url), True)[1]
+    try:
+        opened.clear()
+        rc = cli.main(["open", "kai-frontend", "--port", "9999"])  # 9999 unlikely to respond
+        assert rc == 0
+        assert opened == ["http://127.0.0.1:9999/p/kai-frontend"], f"unexpected URL: {opened}"
+        opened.clear()
+        rc = cli.main(["open"])  # no project, just base URL
+        assert rc == 0
+        import config
+        expected_base = f"http://127.0.0.1:{config.VIEWER_DEFAULT_PORT}"
+        assert opened and opened[0].rstrip("/") == expected_base, f"unexpected base URL: {opened}"
+    finally:
+        webbrowser.open = orig
+
+
+def test_cli_logs_resolves_log_files_for_name():
+    """`watchmen logs daemon` must resolve to ~/Library/Logs/watchmen.daemon.{out,err}.log
+    + watchmen.log (3 files). `watchmen logs viewer` → 2 files. If a file doesn't exist
+    on disk it's silently skipped — but if NONE exist, the command exits 1 with a hint."""
+    import io
+    import cli
+    # Run against a guaranteed-missing log dir by monkey-patching Path.home().
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = Path(td)
+        (fake_home / "Library" / "Logs").mkdir(parents=True)
+        orig_home = cli.Path.home
+        cli.Path.home = staticmethod(lambda: fake_home)
+        buf = io.StringIO()
+        orig_stdout = cli.sys.stdout
+        cli.sys.stdout = buf
+        try:
+            rc = cli.main(["logs", "daemon"])
+        finally:
+            cli.sys.stdout = orig_stdout
+            cli.Path.home = orig_home  # type: ignore[method-assign]
+        out = buf.getvalue()
+        assert rc == 1, f"with no log files, should exit 1, got {rc}"
+        assert "no logs found" in out, f"missing hint message in {out!r}"
+
+
+def test_config_viewer_port_reads_env_then_file_then_default():
+    """`config.viewer_port()` resolves in priority order: process env var,
+    then the global config file, then the hardcoded default. Regression:
+    if the precedence flips, a user who sets WATCHMEN_VIEWER_PORT=9999 in
+    their shell will get their saved file value instead — surprising."""
+    import os
+    import config
+
+    # Isolate to a temp env file so we don't clobber the user's real one.
+    with tempfile.TemporaryDirectory() as td:
+        orig_env_path = config.ENV_PATH
+        config.ENV_PATH = Path(td) / ".env"
+        orig_env = os.environ.pop("WATCHMEN_VIEWER_PORT", None)
+        try:
+            # 1. nothing set → default
+            assert config.viewer_port() == config.VIEWER_DEFAULT_PORT
+
+            # 2. file only
+            config.write_env_var("WATCHMEN_VIEWER_PORT", "9111")
+            assert config.viewer_port() == 9111
+
+            # 3. env beats file
+            os.environ["WATCHMEN_VIEWER_PORT"] = "9222"
+            assert config.viewer_port() == 9222
+
+            # 4. unrelated keys preserved across writes
+            config.write_env_var("OPENROUTER_API_KEY", "sk-test")
+            config.write_env_var("WATCHMEN_VIEWER_PORT", "9333")
+            file_body = config.ENV_PATH.read_text()
+            assert "OPENROUTER_API_KEY=sk-test" in file_body
+            assert "WATCHMEN_VIEWER_PORT=9333" in file_body
+            # File chmod is 0600 (config writes secrets and shouldn't leak them).
+            assert (config.ENV_PATH.stat().st_mode & 0o777) == 0o600
+        finally:
+            config.ENV_PATH = orig_env_path
+            if orig_env is None:
+                os.environ.pop("WATCHMEN_VIEWER_PORT", None)
+            else:
+                os.environ["WATCHMEN_VIEWER_PORT"] = orig_env
+
+
+def test_cli_settings_port_get_and_set_with_validation():
+    """`watchmen settings port` prints the current value; `watchmen settings port N`
+    persists it. Invalid ports (non-numeric, out of 1024–65535) get rejected with
+    exit 1 — they'd otherwise crash uvicorn confusingly later."""
+    import io
+    import os
+    import cli
+    import config
+
+    with tempfile.TemporaryDirectory() as td:
+        orig_env_path = config.ENV_PATH
+        config.ENV_PATH = Path(td) / ".env"
+        orig_env = os.environ.pop("WATCHMEN_VIEWER_PORT", None)
+        buf = io.StringIO()
+        orig_stdout = cli.sys.stdout
+        cli.sys.stdout = buf
+        try:
+            # Get (no value): shows default
+            rc = cli.main(["settings", "port"])
+            assert rc == 0
+            out = buf.getvalue()
+            assert str(config.VIEWER_DEFAULT_PORT) in out, f"expected default port in: {out!r}"
+
+            # Set valid
+            buf.truncate(0); buf.seek(0)
+            rc = cli.main(["settings", "port", "9543"])
+            assert rc == 0
+            assert config.viewer_port() == 9543, "value not persisted"
+
+            # Set invalid (string)
+            buf.truncate(0); buf.seek(0)
+            rc = cli.main(["settings", "port", "notaport"])
+            assert rc == 1, f"non-numeric port should exit 1, got {rc}"
+
+            # Set out-of-range
+            buf.truncate(0); buf.seek(0)
+            rc = cli.main(["settings", "port", "70000"])
+            assert rc == 1, f"out-of-range port should exit 1, got {rc}"
+            assert config.viewer_port() == 9543, "invalid set must not clobber valid prior value"
+        finally:
+            cli.sys.stdout = orig_stdout
+            config.ENV_PATH = orig_env_path
+            if orig_env is not None:
+                os.environ["WATCHMEN_VIEWER_PORT"] = orig_env
+
+
+def test_cli_bare_invocation_runs_smart_default():
+    """`watchmen` with no args must run a smart default — for a fresh-state install,
+    print a first-run banner + nudge toward `watchmen init` (exit 0). For a populated
+    install, run `cmd_status`. Regression: the old behavior was `print_help; exit 1`,
+    which surprised every new user."""
+    import cli
+    # Force fresh-state path by stubbing _is_first_run → True. The banner module
+    # is also rendered; we just need to confirm it doesn't crash.
+    orig = cli._is_first_run
+    cli._is_first_run = lambda: True
+    try:
+        rc = cli.main([])
+    finally:
+        cli._is_first_run = orig
+    assert rc == 0, f"bare watchmen on first-run should exit 0, got {rc}"
+
+
 def main() -> int:
     print(f"watchmen smoke tests · python {sys.version.split()[0]}")
     print(f"repo: {ROOT}")
@@ -1080,6 +1303,18 @@ def main() -> int:
     print("CLI noun-verb refactor:")
     check("hooks status new+old forms dispatch",      test_cli_noun_verb_and_deprecated_both_dispatch)
     check("bare noun (`daemon`) prints help, exits 1", test_cli_bare_noun_prints_help_and_exits_1)
+    print()
+    print("CLI OSS polish:")
+    check("--version prints semver, not 0.0.0 fallback", test_cli_version_flag_prints_version)
+    check("`init` dispatches + `onboard` alias works",   test_cli_init_dispatches_to_onboard_and_onboard_still_works)
+    check("--help groups visible, deprecated hidden",    test_cli_help_renders_groups_and_hides_deprecated)
+    check("`open <p>` builds URL + invokes webbrowser",  test_cli_open_constructs_url_and_invokes_webbrowser)
+    check("`logs` resolves files + exits 1 if missing",  test_cli_logs_resolves_log_files_for_name)
+    check("bare `watchmen` runs smart default (exit 0)", test_cli_bare_invocation_runs_smart_default)
+    print()
+    print("Viewer port config:")
+    check("config.viewer_port respects env→file→default",  test_config_viewer_port_reads_env_then_file_then_default)
+    check("`settings port` get/set + validates input",     test_cli_settings_port_get_and_set_with_validation)
     print()
     print("Curator cache:")
     check("cache hit when results unchanged",         test_cache_hit_when_results_unchanged)

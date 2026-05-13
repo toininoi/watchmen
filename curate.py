@@ -25,6 +25,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+import config
 from textwrap import dedent
 
 import httpx
@@ -741,10 +743,8 @@ def _publish_watchmen_state(
         parts.append(f"-{len(removed)} removed")
     summary = ", ".join(parts) or "no changes"
 
-    if last_commit:
-        diff_url = f"http://127.0.0.1:8888/p/{project_key}/diff/{last_commit}"
-    else:
-        diff_url = None
+    base_url = config.viewer_base_url()
+    diff_url = f"{base_url}/p/{project_key}/diff/{last_commit}" if last_commit else None
 
     payload = {
         "schema": 2,
@@ -755,7 +755,7 @@ def _publish_watchmen_state(
         "details": {"added": added, "updated": updated, "removed": removed},
         "suggested_skill": suggested,
         "last_commit": last_commit,
-        "viewer_url": f"http://127.0.0.1:8888/p/{project_key}",
+        "viewer_url": f"{base_url}/p/{project_key}",
         "diff_url": diff_url,
     }
     (state_dir / f"{project_key}.json").write_text(json.dumps(payload, indent=2))

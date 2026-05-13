@@ -17,6 +17,8 @@ import sys
 import webbrowser
 from pathlib import Path
 
+import config
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -410,7 +412,7 @@ def show_plugin_install(console: Console) -> None:
 
 
 def show_summary(console: Console) -> None:
-    viewer_url = "http://127.0.0.1:8888"
+    viewer_url = config.viewer_base_url()
     body = Text.from_markup(
         f"All set. Browse your generated skills + CLAUDE.md + run diffs at:\n\n"
         f"  [bold link]{viewer_url}[/]\n\n"

@@ -131,7 +131,10 @@ def install_daemon(model: str = "deepseek/deepseek-v4-flash", interval: int = 72
     return rc
 
 
-def install_viewer(host: str = "127.0.0.1", port: int = 8888, dry_run: bool = False) -> int:
+def install_viewer(host: str | None = None, port: int | None = None, dry_run: bool = False) -> int:
+    import config
+    host = host or config.VIEWER_DEFAULT_HOST
+    port = port if port is not None else config.viewer_port()
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     uv = _check_uv()

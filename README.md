@@ -4,7 +4,7 @@ Local Claude Code session intelligence. Observes your sessions, analyzes how you
 
 The premise: every Claude Code session leaves a JSONL transcript in `~/.claude/projects/`. Across weeks of work this becomes a corpus of how you actually use the agent. watchmen mines that corpus, runs a longitudinal LLM analyst day by day with a carry-forward thesis, then curates the recurring procedural patterns into runnable skill bundles plus a workspace-level `CLAUDE.md` for each repo.
 
-Runs continuously via a launchd daemon. Comes with a local web viewer at `http://127.0.0.1:8888`.
+Runs continuously via a launchd daemon. Comes with a local web viewer at `http://127.0.0.1:8979` (changeable via `watchmen settings port <N>`).
 
 ## What you get
 
@@ -49,10 +49,12 @@ Three commands and a wizard. Total wall time ~10 min + 30–90 min per project o
 git clone https://github.com/firstbatchxyz/watchmen.git
 cd watchmen
 uv sync && uv tool install --editable .
-watchmen onboard
+watchmen init
 ```
 
 The wizard handles everything: prompts for your `OPENROUTER_API_KEY` (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the launchd daemon + viewer for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
+
+If anything looks wrong afterwards, `watchmen doctor` does a one-screen ✓/✗ check across API key, corpus, daemon, viewer, and hooks.
 
 When the wizard finishes, install the plugin inside any Claude Code session:
 
@@ -118,7 +120,7 @@ watchmen analyze my-project                  # longitudinal LLM analyst, day-by-
 watchmen curate my-project                   # skill bundles + CLAUDE.md
 
 # 6. Browse the output
-watchmen viewer run                          # http://127.0.0.1:8888
+watchmen viewer run                          # http://127.0.0.1:8979
 ```
 
 Outputs land in `kai_claude/my-project/` and `analyses/my-project/`. Both are gitignored — they're your data, not the source.
@@ -130,7 +132,7 @@ Once installed (`/plugin install watchmen@watchmen` after `/plugin marketplace a
 - **`/watchmen:brief`** — pull the latest curator state for your current workspace. Claude reads what changed since the last run (new skills, CLAUDE.md updates), summarizes it, and asks if you want to load a suggested skill. Your decision; nothing auto-loads.
 - **`💡 watchmen` statusLine indicator** — appears bottom-right of the Claude Code TUI when there's something new for the project you're in. Acknowledges itself when you invoke `/watchmen:brief`.
 - **In-flight skill suggestions** — every prompt you submit gets matched against your project's skill index (FTS5, sub-millisecond). If a strong match exists, the statusLine refreshes after the assistant's response with "💡 you could have used /<skill> to save time & tokens on this task". Retrospective hint; no agent context injection.
-- **Diff view in the viewer** — every curator run becomes a git commit in `kai_claude/<project>/`. The viewer (`http://127.0.0.1:8888/p/<project>/runs`) shows a side-by-side diff per run, GitHub-style.
+- **Diff view in the viewer** — every curator run becomes a git commit in `kai_claude/<project>/`. The viewer (`http://127.0.0.1:8979/p/<project>/runs`) shows a side-by-side diff per run, GitHub-style.
 
 The plugin reads `~/.watchmen/state/<project>.json` (written by the engine at end of every curator run) and `~/.watchmen/projects.json` (index of tracked projects). It never reaches into the engine's install dir.
 
@@ -140,7 +142,7 @@ To run watchmen autonomously (incremental analyzer + auto-regen of CLAUDE.md whe
 
 ```bash
 watchmen daemon install                      # launchd agent, autostart on login, keepalive
-watchmen viewer install                      # also autostart the viewer at :8888
+watchmen viewer install                      # also autostart the viewer at :8979
 watchmen launchd status                      # verify
 ```
 
@@ -173,33 +175,40 @@ watchmen hooks uninstall
 
 ## Command reference
 
+Run `watchmen --help` for the grouped overview; `watchmen <command> -h` for per-command flags.
+
 ```
-# Inspection
+# Get started
+watchmen init                    Interactive setup wizard (alias: onboard)
+watchmen doctor                  One-screen ✓/✗ check of API key, corpus, services
+watchmen settings api-key        Set or check the OpenRouter key (live-validated)
+watchmen settings port [N]       Get or set the viewer port (default 8979)
+
+# Pipeline
 watchmen status                  Dashboard view of tracked projects
-watchmen list                    Auto-detect projects from corpus
-watchmen runs                    Recent run history
-watchmen hooks status            Show wired-up hook events
-watchmen launchd status          Show daemon/viewer agent state
-
-# Project lifecycle
-watchmen track <key> --repo <path>
-watchmen sync                    Bootstrap state from on-disk artifacts (no LLM calls)
-
-# Manual operations
-watchmen ingest                  Re-scan ~/.claude/projects → corpus.db
 watchmen analyze <key>           Run analyst (incremental, only new days)
 watchmen analyze <key> --full    Full re-run (ignores prior thesis)
 watchmen curate <key>            Full curator: candidates → skills → CLAUDE.md
 watchmen curate <key> --regen-claude    Stage 3 only (regenerate CLAUDE.md)
+watchmen runs                    Recent run history
+watchmen metrics <key>           Daily token/cost/uptake rollup
 
-# Continuous mode (foreground)
+# Project inventory
+watchmen list                    Auto-detect projects from corpus
+watchmen track <key> --repo <path>
+watchmen ingest                  Re-scan ~/.claude/projects → corpus.db
+watchmen sync                    Bootstrap state from on-disk artifacts (no LLM calls)
+
+# Inspect
+watchmen open [<key>]            Open viewer in browser (jumps to project page)
+watchmen logs [daemon|viewer]    Tail launchd logs (-f to follow)
+
+# Background services
 watchmen daemon run              Run scheduling loop in foreground
 watchmen daemon run --once       Single cycle, then exit (testing)
 watchmen viewer run              FastAPI viewer in foreground
-
-# Autostart (launchd)
-watchmen {hooks,daemon,viewer} install
-watchmen {hooks,daemon,viewer} uninstall
+watchmen {hooks,daemon,viewer,statusline} install
+watchmen {hooks,daemon,viewer,statusline} uninstall
 ```
 
 ## How it works
@@ -241,7 +250,7 @@ watchmen {hooks,daemon,viewer} uninstall
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  Viewer + daemon                                                 │
-│   FastAPI dashboard at 127.0.0.1:8888 renders all artifacts      │
+│   FastAPI dashboard at 127.0.0.1:8979 renders all artifacts      │
 │   launchd daemon wakes every 30 min, runs incremental pipeline   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -282,7 +291,7 @@ Other roadmap items: diff view in the web UI (generated CLAUDE.md vs the repo's 
 - **Hook server must run in a separate terminal.** It's a Python+FastAPI process. If you kill the terminal, hook capture stops. Use `tmux`, `screen`, or a launchd job for it (we don't ship one for the hook server itself, only for the daemon + viewer).
 - **Some skill curators occasionally run long (20+ min)** without calling the `finish_skill` terminal tool. The bundle still lands on disk; just no clean signal. ~15-20% of skills hit this. The artifacts are still usable.
 - **Auto-detection of project_key from `~/.claude/projects/<encoded-dir>/` is heuristic.** Some path-encoded names (e.g., `my-business/marketing` vs `my-business-marketing`) can resolve ambiguously. Use `watchmen track <key> --repo <abs-path>` to be explicit.
-- **No tests yet.** Research-grade codebase. PRs welcome.
+- **macOS-first.** The launchd + log-path conventions assume macOS. Linux support would need a systemd-user equivalent for `watchmen daemon install`; everything else (analyst, curator, viewer, hooks) is portable.
 
 ## Layout
 

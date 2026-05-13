@@ -407,8 +407,13 @@ def project_diff(request: Request, project_key: str, sha: str):
     })
 
 
-def serve(host: str = "127.0.0.1", port: int = 8888):
+def serve(host: str | None = None, port: int | None = None):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import config
     import uvicorn
+    host = host or config.VIEWER_DEFAULT_HOST
+    port = port if port is not None else config.viewer_port()
     print(f"\n  🌐 watchmen viewer running at http://{host}:{port}\n", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="warning")
 

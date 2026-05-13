@@ -12,7 +12,7 @@ Subcommands:
   reonboard                 Re-run the wizard (existing projects survive, new ones added)
   settings list|show|set    View / update per-project settings (threshold, enabled, repo, notes)
   daemon run|install|uninstall      Foreground run / launchd agent lifecycle
-  viewer run|install|uninstall      Foreground run / launchd agent lifecycle (:8888)
+  viewer run|install|uninstall      Foreground run / launchd agent lifecycle (default :8979)
   hooks install|uninstall|status    Claude Code hook lifecycle + inspection
   statusline install|uninstall      💡 watchmen indicator in ~/.claude/settings.json
   plugin update|status              Marketplace clone management
@@ -29,10 +29,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+import config
 import state
 
 ROOT = Path(__file__).parent
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+VIEWER_DEFAULT_HOST = config.VIEWER_DEFAULT_HOST
+VIEWER_DEFAULT_PORT = config.VIEWER_DEFAULT_PORT
+
+
+def _version() -> str:
+    """Read version from package metadata if installed, else parse pyproject.toml."""
+    try:
+        from importlib.metadata import version as _v
+        return _v("watchmen")
+    except Exception:
+        pass
+    try:
+        import tomllib  # 3.11+
+        with (ROOT / "pyproject.toml").open("rb") as fh:
+            return tomllib.load(fh)["project"]["version"]
+    except Exception:
+        return "0.0.0"
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -443,31 +461,51 @@ def _check_openrouter_key(key: str) -> tuple[bool, str]:
 
 
 def _read_current_api_key() -> str | None:
-    """Return the OpenRouter API key from env or ~/.config/watchmen/.env, or
-    None if neither is set."""
-    import os
-    if k := os.environ.get("OPENROUTER_API_KEY"):
-        return k
-    env_path = Path.home() / ".config" / "watchmen" / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return None
+    """Return the OpenRouter API key from env or ~/.config/watchmen/.env."""
+    return config.read_env_var("OPENROUTER_API_KEY")
 
 
 def _write_api_key(key: str) -> Path:
-    """Persist the key to ~/.config/watchmen/.env, preserving other lines.
-    Returns the file path."""
-    env_dir = Path.home() / ".config" / "watchmen"
-    env_dir.mkdir(parents=True, exist_ok=True)
-    env_path = env_dir / ".env"
-    lines = env_path.read_text().splitlines() if env_path.exists() else []
-    new_lines = [ln for ln in lines if not ln.startswith("OPENROUTER_API_KEY=")]
-    new_lines.append(f"OPENROUTER_API_KEY={key}")
-    env_path.write_text("\n".join(new_lines) + "\n")
-    env_path.chmod(0o600)
-    return env_path
+    """Persist the OpenRouter key to ~/.config/watchmen/.env, preserving unrelated lines."""
+    return config.write_env_var("OPENROUTER_API_KEY", key)
+
+
+def cmd_settings_port(args) -> int:
+    """Get or set the viewer port. Writes to ~/.config/watchmen/.env so the
+    setting survives restarts and is honored by every layer (CLI defaults,
+    onboard, curator-generated viewer URLs)."""
+    from rich.console import Console
+    console = Console()
+
+    if args.value is None:
+        current = config.viewer_port()
+        source = "default" if current == config.VIEWER_DEFAULT_PORT and not config.read_env_var("WATCHMEN_VIEWER_PORT") else "config"
+        console.print(f"viewer port: [bold]{current}[/] [dim]({source})[/]")
+        if source == "default":
+            console.print(f"  [dim]set with: watchmen settings port <N>[/]")
+        return 0
+
+    try:
+        port = int(args.value)
+    except ValueError:
+        console.print(f"[red]✗[/] port must be an integer (got {args.value!r})")
+        return 1
+    if not (1024 <= port <= 65535):
+        console.print(f"[red]✗[/] port must be in 1024–65535")
+        return 1
+
+    path = config.write_env_var("WATCHMEN_VIEWER_PORT", str(port))
+    console.print(f"[green]✓[/] viewer port set to [bold]{port}[/]")
+    console.print(f"  [dim]wrote → {path}[/]")
+    # The launchd plist is baked at install time — port changes don't propagate
+    # until reinstall. Make the next step obvious.
+    try:
+        import launchd_setup
+        if launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL):
+            console.print(f"  [yellow]![/] viewer launchd agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
+    except Exception:
+        pass
+    return 0
 
 
 def cmd_settings_api_key(args) -> int:
@@ -515,6 +553,196 @@ def cmd_settings_api_key(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    """Health check: API key, OpenRouter reachability, corpus, tracked projects,
+    daemon/viewer state, hooks, latest run age, disk free.
+
+    Used to self-diagnose a broken install — single screen of ✓/✗ rows. Returns
+    0 if everything is green, 1 if any required check fails."""
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+
+    fails = 0
+    warns = 0
+    table = Table(title="watchmen doctor", show_header=True, header_style="bold cyan", expand=False)
+    table.add_column("check", style="bold")
+    table.add_column("status", justify="center", width=4)
+    table.add_column("detail")
+
+    def row(label: str, ok: bool, detail: str, severity: str = "fail") -> None:
+        nonlocal fails, warns
+        if ok:
+            mark = "[green]✓[/]"
+        elif severity == "warn":
+            mark = "[yellow]![/]"
+            warns += 1
+        else:
+            mark = "[red]✗[/]"
+            fails += 1
+        table.add_row(label, mark, detail)
+
+    # 1. OpenRouter API key
+    current = _read_current_api_key()
+    if not current:
+        row("OpenRouter key", False, "not set — run `watchmen settings api-key`")
+    else:
+        ok, info = _check_openrouter_key(current)
+        row("OpenRouter key", ok, info)
+
+    # 2. corpus.db
+    corpus_db = ROOT / "corpus.db"
+    if not corpus_db.exists():
+        row("corpus.db", False, "missing — run `watchmen ingest`")
+    else:
+        import sqlite3
+        cc = sqlite3.connect(corpus_db)
+        n_sessions = cc.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        n_prompts = cc.execute("SELECT COUNT(*) FROM prompts").fetchone()[0]
+        cc.close()
+        if n_sessions == 0:
+            row("corpus.db", False, "no sessions ingested yet — run `watchmen ingest`")
+        else:
+            row("corpus.db", True, f"{n_sessions:,} sessions / {n_prompts:,} prompts")
+
+    # 3. tracked projects
+    state.init_db()
+    projects = state.list_projects()
+    if not projects:
+        row("tracked projects", False, "0 — run `watchmen init` or `watchmen track`")
+    else:
+        row("tracked projects", True, f"{len(projects)} project(s)")
+
+    # 4. daemon launchd state
+    try:
+        import launchd_setup
+        daemon_loaded = launchd_setup._is_loaded(launchd_setup.DAEMON_LABEL)
+        viewer_loaded = launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL)
+    except Exception:
+        daemon_loaded = viewer_loaded = False
+    row("daemon (launchd)", daemon_loaded, "loaded" if daemon_loaded else "not loaded — `watchmen daemon install`", severity="warn")
+
+    # 5. viewer responding
+    try:
+        import httpx
+        r = httpx.get(f"http://{VIEWER_DEFAULT_HOST}:{VIEWER_DEFAULT_PORT}/", timeout=2.0)
+        viewer_up = r.status_code < 500
+        viewer_detail = f"http://{VIEWER_DEFAULT_HOST}:{VIEWER_DEFAULT_PORT}/ → {r.status_code}"
+    except Exception as e:
+        viewer_up = False
+        viewer_detail = f"not responding ({type(e).__name__}) — `watchmen viewer install`"
+    row("viewer", viewer_up, viewer_detail, severity="warn")
+
+    # 6. hooks installed
+    try:
+        import hooks_setup, json as _json
+        settings = _json.loads(hooks_setup.SETTINGS_FILE.read_text()) if hooks_setup.SETTINGS_FILE.exists() else {}
+        wired = sum(
+            1 for entries in (settings.get("hooks") or {}).values()
+            for e in entries
+            for h in e.get("hooks") or []
+            if "watchmen" in (h.get("command") or "")
+        )
+        row("Claude Code hooks", wired > 0, f"{wired} watchmen entries wired" if wired else "not wired — `watchmen hooks install`", severity="warn")
+    except Exception as e:
+        row("Claude Code hooks", False, f"could not read settings.json ({type(e).__name__})", severity="warn")
+
+    # 7. latest run age
+    runs = state.recent_runs(limit=1)
+    if runs:
+        last = runs[0]
+        from datetime import datetime, timezone
+        try:
+            t = datetime.fromisoformat(last["started_at"])
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - t
+            hours = age.total_seconds() / 3600
+            age_str = f"{hours:.1f}h ago" if hours < 48 else f"{age.days}d ago"
+            row("latest run", True, f"{last['kind']} for {last['project_key']} — {age_str} ({last['status']})")
+        except Exception:
+            row("latest run", True, f"{last['kind']} for {last['project_key']}")
+    else:
+        row("latest run", False, "no runs recorded yet", severity="warn")
+
+    # 8. disk free
+    import shutil
+    free = shutil.disk_usage(ROOT).free
+    free_gb = free / 1024**3
+    row("disk free (cwd)", free_gb > 1.0, f"{free_gb:.1f} GiB")
+
+    console.print()
+    console.print(table)
+    if fails == 0 and warns == 0:
+        console.print("\n[green]all green.[/]")
+    elif fails == 0:
+        console.print(f"\n[yellow]{warns} warning(s)[/] — non-blocking; fix when convenient.")
+    else:
+        console.print(f"\n[red]{fails} failure(s)[/] / [yellow]{warns} warning(s)[/].")
+    return 1 if fails else 0
+
+
+def cmd_open(args) -> int:
+    """Open the viewer in the default browser. Optional project key jumps to its page.
+
+    Prints the URL too so it works under SSH / no-display environments. Soft-warns
+    if the viewer isn't responding rather than refusing to open."""
+    import webbrowser
+    project = args.project
+    base = f"http://{args.host}:{args.port}"
+    url = f"{base}/p/{project}" if project else base
+
+    # Soft preflight — don't block, just warn.
+    try:
+        import httpx
+        r = httpx.get(base + "/", timeout=1.5)
+        up = r.status_code < 500
+    except Exception:
+        up = False
+    if not up:
+        print(_yellow(f"warning: viewer at {base} isn't responding — start with `watchmen viewer run` or `watchmen viewer install`"))
+
+    print(f"opening {url}")
+    opened = webbrowser.open(url, new=2)
+    if not opened:
+        print(_dim("(browser didn't auto-open — copy the URL above)"))
+    return 0
+
+
+def cmd_logs(args) -> int:
+    """Tail launchd logs by name. `daemon|viewer|all`, optional -f to follow."""
+    log_dir = Path.home() / "Library" / "Logs"
+    mapping = {
+        "daemon": [log_dir / "watchmen.daemon.out.log",
+                   log_dir / "watchmen.daemon.err.log",
+                   log_dir / "watchmen.log"],
+        "viewer": [log_dir / "watchmen.viewer.out.log",
+                   log_dir / "watchmen.viewer.err.log"],
+    }
+    if args.name == "all":
+        files = mapping["daemon"] + mapping["viewer"]
+    else:
+        files = mapping[args.name]
+    existing = [str(p) for p in files if p.exists()]
+    if not existing:
+        print(_yellow(f"no logs found for '{args.name}' — has the service been started?"))
+        print(_dim(f"expected at: {log_dir}/watchmen.*"))
+        return 1
+    print(_dim(f"# tailing {len(existing)} file(s): {' '.join(existing)}"), flush=True)
+    flags = ["-F", "-n", str(args.lines)] if args.follow else ["-n", str(args.lines)]
+    try:
+        return subprocess.run(["tail", *flags, *existing]).returncode
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_init(args) -> int:
+    """Alias for onboard — `init` is the discoverable name; `onboard` kept as a
+    hidden alias for muscle memory."""
+    import onboard
+    return onboard.run()
+
+
 def cmd_metrics(args) -> int:
     import metrics as _metrics
     from rich.console import Console
@@ -540,7 +768,7 @@ def cmd_metrics(args) -> int:
     rollup.add_row("Suggestions fired", str(last7["suggestions_fired"]), str(last30["suggestions_fired"]))
     rollup.add_row("Uptake", str(last7["uptake"]), str(last30["uptake"]))
     console.print(rollup)
-    console.print(f"\n  full daily breakdown: http://127.0.0.1:8888/p/{args.project}/metrics")
+    console.print(f"\n  full daily breakdown: {config.viewer_base_url()}/p/{args.project}/metrics")
     return 0
 
 
@@ -580,13 +808,13 @@ def _add_daemon_install_args(p) -> None:
 
 
 def _add_viewer_run_args(p) -> None:
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8888)
+    p.add_argument("--host", default=config.VIEWER_DEFAULT_HOST)
+    p.add_argument("--port", type=int, default=config.viewer_port())
 
 
 def _add_viewer_install_args(p) -> None:
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8888)
+    p.add_argument("--host", default=config.VIEWER_DEFAULT_HOST)
+    p.add_argument("--port", type=int, default=config.viewer_port())
     p.add_argument("--dry-run", action="store_true")
 
 
@@ -594,9 +822,119 @@ def _add_statusline_install_args(p) -> None:
     p.add_argument("--force", action="store_true", help="overwrite a non-watchmen statusLine entry")
 
 
+# Subcommand groupings rendered by _print_grouped_help. Order = display order.
+# Each entry: (subcommand, one-line description). Hidden aliases are NOT listed.
+_HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Get started", [
+        ("init",       "5-minute interactive setup wizard"),
+        ("doctor",     "diagnose your install — API key, corpus, services"),
+        ("settings",   "view / update OpenRouter key + per-project settings"),
+    ]),
+    ("Pipeline", [
+        ("status",     "dashboard: tracked projects + last-run summary"),
+        ("analyze",    "run analyst on a project (incremental by default)"),
+        ("curate",     "run curator (skill bundles + CLAUDE.md)"),
+        ("runs",       "recent run history"),
+        ("metrics",    "daily token / cost / uptake rollup for a project"),
+    ]),
+    ("Project inventory", [
+        ("list",       "auto-detect projects from corpus"),
+        ("track",      "add a project to tracking"),
+        ("ingest",     "re-scan ~/.claude/projects into corpus.db"),
+        ("sync",       "bootstrap state from existing artifacts on disk"),
+    ]),
+    ("Background services", [
+        ("daemon",     "run / install / uninstall the scheduling daemon"),
+        ("viewer",     "run / install / uninstall the local web viewer"),
+        ("hooks",      "install / uninstall / inspect Claude Code hooks"),
+        ("statusline", "install / uninstall the 💡 watchmen indicator"),
+        ("plugin",     "manage the Claude Code plugin marketplace clone"),
+        ("launchd",    "inspect installed launchd agents"),
+    ]),
+    ("Inspect", [
+        ("open",       "open the viewer in your browser"),
+        ("logs",       "tail launchd logs (daemon | viewer | all)"),
+    ]),
+]
+
+
+def _print_grouped_help(parser: argparse.ArgumentParser) -> None:
+    """Custom help renderer that groups subcommands into sections.
+
+    Argparse can't group subparsers natively — its --help renders a flat list
+    of choices that reads like an unsorted soup. We render our own help block
+    while leaving argparse parsing alone."""
+    print(f"watchmen v{_version()} — local Claude Code session intelligence\n")
+    print("usage: watchmen [--version] <command> [...]\n")
+    for group_name, commands in _HELP_GROUPS:
+        print(_bold(f"{group_name}:"))
+        for cmd, desc in commands:
+            print(f"  {cmd:<12}  {desc}")
+        print()
+    print(_bold("Quick start:"))
+    print(f"  {_dim('$')} watchmen init           # 5-min setup wizard")
+    print(f"  {_dim('$')} watchmen status         # see your tracked projects")
+    print(f"  {_dim('$')} watchmen open           # open the viewer in your browser")
+    print()
+    print(_dim("Run `watchmen <command> -h` for command-specific help."))
+    print(_dim("Docs + repo: https://github.com/firstbatchxyz/watchmen"))
+
+
+def _is_first_run() -> bool:
+    """Heuristic: 'fresh install' = no tracked projects AND no corpus.db.
+    Used to nudge first-time users toward `watchmen init`."""
+    if not (ROOT / "state.db").exists() and not (ROOT / "corpus.db").exists():
+        return True
+    try:
+        state.init_db()
+        return not state.list_projects()
+    except Exception:
+        return True
+
+
+def _bare_default() -> int:
+    """What `watchmen` (no subcommand) does. Fresh installs see a banner + the
+    `init` nudge; users with state see `status` directly."""
+    if _is_first_run():
+        try:
+            import banner
+            from rich.console import Console
+            banner.render(Console())
+        except Exception:
+            pass
+        print(_bold("First run? Get started in 5 minutes:"))
+        print(f"  {_dim('$')} watchmen init       # interactive setup wizard")
+        print(f"  {_dim('$')} watchmen --help     # full command reference")
+        print()
+        return 0
+    return cmd_status(argparse.Namespace())
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="watchmen", description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(prog="watchmen", description=__doc__.split("\n")[0], add_help=False)
+    # Override the argparse-generated help with our grouped renderer.
+    parser.format_help = lambda: ""  # type: ignore[method-assign]
+    parser.print_help = lambda *a, **kw: _print_grouped_help(parser)  # type: ignore[method-assign]
+    parser.add_argument("-h", "--help", action="help", help=argparse.SUPPRESS)
+    parser.add_argument("--version", action="version", version=f"watchmen {_version()}")
     sub = parser.add_subparsers(dest="cmd")
+
+    # Primary canonical entry point — first-time users discover this via --help.
+    sub.add_parser("init", help="5-minute interactive setup wizard").set_defaults(func=cmd_init)
+    p_doc = sub.add_parser("doctor", help="diagnose your install — API key, corpus, services")
+    p_doc.set_defaults(func=cmd_doctor)
+
+    p_open = sub.add_parser("open", help="open the viewer in your default browser")
+    p_open.add_argument("project", nargs="?", help="optional project key — jumps to its page")
+    p_open.add_argument("--host", default=config.VIEWER_DEFAULT_HOST)
+    p_open.add_argument("--port", type=int, default=config.viewer_port())
+    p_open.set_defaults(func=cmd_open)
+
+    p_logs = sub.add_parser("logs", help="tail launchd logs (daemon | viewer | all)")
+    p_logs.add_argument("name", choices=("daemon", "viewer", "all"), nargs="?", default="all")
+    p_logs.add_argument("-f", "--follow", action="store_true", help="tail -F (follow appended lines)")
+    p_logs.add_argument("-n", "--lines", type=int, default=50, help="initial lines to print (default 50)")
+    p_logs.set_defaults(func=cmd_logs)
 
     sub.add_parser("status", help="dashboard view").set_defaults(func=cmd_status)
     sub.add_parser("list", help="auto-detect projects from corpus").set_defaults(func=cmd_list)
@@ -631,7 +969,8 @@ def main(argv: list[str] | None = None) -> int:
     p_runs.add_argument("--limit", type=int, default=20)
     p_runs.set_defaults(func=cmd_runs)
 
-    sub.add_parser("config", help="edit config (P3)").set_defaults(func=cmd_config)
+    # `config` was a P3 placeholder — kept as hidden alias until removed entirely.
+    sub.add_parser("config", help=argparse.SUPPRESS).set_defaults(func=cmd_config)
 
     # ── daemon (noun) ──────────────────────────────────────────────────────
     p_daemon = sub.add_parser("daemon", help="run / install / uninstall the watchmen daemon")
@@ -648,7 +987,7 @@ def main(argv: list[str] | None = None) -> int:
     # ── viewer (noun) ──────────────────────────────────────────────────────
     p_viewer = sub.add_parser("viewer", help="run / install / uninstall the local web viewer")
     viewer_sub = p_viewer.add_subparsers(dest="viewer_cmd")
-    p_vrun = viewer_sub.add_parser("run", help="start the viewer in the foreground (http://127.0.0.1:8888)")
+    p_vrun = viewer_sub.add_parser("run", help=f"start the viewer in the foreground ({config.viewer_base_url()})")
     _add_viewer_run_args(p_vrun)
     p_vrun.set_defaults(func=cmd_viewer)
     p_vins = viewer_sub.add_parser("install", help="install launchd agent for autostart on login")
@@ -690,41 +1029,44 @@ def main(argv: list[str] | None = None) -> int:
     # ── deprecated aliases ─────────────────────────────────────────────────
     # Old verb-noun-with-hyphens forms. Keep working, print soft deprecation
     # line. Plan: remove after 1-2 releases once teammates' scripts update.
-    p_id = sub.add_parser("install-daemon", help="(deprecated) use `watchmen daemon install`")
+    # All deprecated aliases use argparse.SUPPRESS so they don't pollute --help,
+    # but still parse correctly for existing scripts.
+    p_id = sub.add_parser("install-daemon", help=argparse.SUPPRESS)
     _add_daemon_install_args(p_id)
     p_id.set_defaults(func=_deprecate("daemon install", cmd_install_daemon))
 
-    p_iv = sub.add_parser("install-viewer", help="(deprecated) use `watchmen viewer install`")
+    p_iv = sub.add_parser("install-viewer", help=argparse.SUPPRESS)
     _add_viewer_install_args(p_iv)
     p_iv.set_defaults(func=_deprecate("viewer install", cmd_install_viewer))
 
-    sub.add_parser("uninstall-daemon", help="(deprecated) use `watchmen daemon uninstall`").set_defaults(
+    sub.add_parser("uninstall-daemon", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("daemon uninstall", cmd_uninstall_daemon))
-    sub.add_parser("uninstall-viewer", help="(deprecated) use `watchmen viewer uninstall`").set_defaults(
+    sub.add_parser("uninstall-viewer", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("viewer uninstall", cmd_uninstall_viewer))
-    sub.add_parser("launchd-status", help="(deprecated) use `watchmen launchd status`").set_defaults(
+    sub.add_parser("launchd-status", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("launchd status", cmd_launchd_status))
 
-    sub.add_parser("install-hooks", help="(deprecated) use `watchmen hooks install`").set_defaults(
+    sub.add_parser("install-hooks", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("hooks install", cmd_install_hooks))
-    sub.add_parser("uninstall-hooks", help="(deprecated) use `watchmen hooks uninstall`").set_defaults(
+    sub.add_parser("uninstall-hooks", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("hooks uninstall", cmd_uninstall_hooks))
-    sub.add_parser("hooks-status", help="(deprecated) use `watchmen hooks status`").set_defaults(
+    sub.add_parser("hooks-status", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("hooks status", cmd_hooks_status))
 
-    p_isl = sub.add_parser("install-statusline", help="(deprecated) use `watchmen statusline install`")
+    p_isl = sub.add_parser("install-statusline", help=argparse.SUPPRESS)
     _add_statusline_install_args(p_isl)
     p_isl.set_defaults(func=_deprecate("statusline install", cmd_install_statusline))
-    sub.add_parser("uninstall-statusline", help="(deprecated) use `watchmen statusline uninstall`").set_defaults(
+    sub.add_parser("uninstall-statusline", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("statusline uninstall", cmd_uninstall_statusline))
 
-    sub.add_parser("update-plugin", help="(deprecated) use `watchmen plugin update`").set_defaults(
+    sub.add_parser("update-plugin", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("plugin update", cmd_update_plugin))
-    sub.add_parser("plugin-status", help="(deprecated) use `watchmen plugin status`").set_defaults(
+    sub.add_parser("plugin-status", help=argparse.SUPPRESS).set_defaults(
         func=_deprecate("plugin status", cmd_plugin_status))
 
-    sub.add_parser("onboard", help="interactive setup wizard (ingest + track + analyze + curate + autostart)").set_defaults(func=cmd_onboard)
-    sub.add_parser("reonboard", help="rerun the onboarding wizard (existing projects survive, new ones added)").set_defaults(func=cmd_reonboard)
+    # `onboard` / `reonboard` are hidden aliases — `init` is the canonical name.
+    sub.add_parser("onboard", help=argparse.SUPPRESS).set_defaults(func=cmd_onboard)
+    sub.add_parser("reonboard", help=argparse.SUPPRESS).set_defaults(func=cmd_reonboard)
 
     p_settings = sub.add_parser("settings", help="view / update per-project settings")
     settings_sub = p_settings.add_subparsers(dest="settings_cmd")
@@ -741,6 +1083,9 @@ def main(argv: list[str] | None = None) -> int:
     p_apikey.add_argument("--check", action="store_true", help="check current key without changing it")
     p_apikey.add_argument("--set", metavar="KEY", help="set a key non-interactively (for scripting)")
     p_apikey.set_defaults(func=cmd_settings_api_key)
+    p_port = settings_sub.add_parser("port", help="get or set the viewer port (writes to ~/.config/watchmen/.env)")
+    p_port.add_argument("value", nargs="?", help="new port (omit to print current)")
+    p_port.set_defaults(func=cmd_settings_port)
     p_settings.set_defaults(func=lambda a: (p_settings.print_help() or 1))
 
     p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (sessions, tokens, cost, suggestion uptake)")
@@ -750,8 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if not args.cmd:
-        parser.print_help()
-        return 1
+        return _bare_default()
     return args.func(args)
 
 
