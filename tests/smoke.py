@@ -1164,6 +1164,29 @@ def test_cli_logs_resolves_log_files_for_name():
         assert "no logs found" in out, f"missing hint message in {out!r}"
 
 
+def test_doomsday_clock_brackets_for_status_command():
+    """The Watchmen Doomsday Clock above `watchmen status` should hit the canonical
+    'five to midnight' position when 20–40% of tracked projects need attention —
+    that's the iconic comic-cover position, and it's the most-likely state for an
+    active watchmen install (a couple of projects always have new prompts coming
+    in). Boundaries matter: if the curve is off, every status command misreports
+    urgency."""
+    import cli
+    # Boundary sweep — same denominator (10), varying numerators.
+    # 0/10 stale → 12 (all clear)
+    assert cli._doomsday_minutes_to_midnight(0, 10) == 12
+    # 1/10 = 10% (< 20%) → 8
+    assert cli._doomsday_minutes_to_midnight(1, 10) == 8
+    # 3/10 = 30% (< 40%) → 5 (canonical Watchmen position)
+    assert cli._doomsday_minutes_to_midnight(3, 10) == 5
+    # 5/10 = 50% (< 70%) → 2
+    assert cli._doomsday_minutes_to_midnight(5, 10) == 2
+    # 8/10 = 80% (>= 70%) → 1 (critical)
+    assert cli._doomsday_minutes_to_midnight(8, 10) == 1
+    # Edge: empty fleet → safe (no stale projects can exist)
+    assert cli._doomsday_minutes_to_midnight(0, 0) == 12
+
+
 def test_config_viewer_port_reads_env_then_file_then_default():
     """`config.viewer_port()` resolves in priority order: process env var,
     then the global config file, then the hardcoded default. Regression:
@@ -1315,6 +1338,9 @@ def main() -> int:
     print("Viewer port config:")
     check("config.viewer_port respects env→file→default",  test_config_viewer_port_reads_env_then_file_then_default)
     check("`settings port` get/set + validates input",     test_cli_settings_port_get_and_set_with_validation)
+    print()
+    print("Watchmen aesthetic:")
+    check("doomsday clock buckets stale projects correctly", test_doomsday_clock_brackets_for_status_command)
     print()
     print("Curator cache:")
     check("cache hit when results unchanged",         test_cache_hit_when_results_unchanged)

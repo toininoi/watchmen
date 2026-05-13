@@ -72,6 +72,61 @@ def _yellow(s: str) -> str:
     return f"\033[33m{s}\033[0m"
 
 
+def _bright_blue(s: str) -> str:
+    return f"\033[94m{s}\033[0m"
+
+
+def _cyan(s: str) -> str:
+    return f"\033[36m{s}\033[0m"
+
+
+# ─── Watchmen aesthetic helpers ─────────────────────────────────────────────
+# Small thematic touches keyed to each character: Manhattan blue for `doctor`,
+# Doomsday Clock yellow for `status`, mission-log framing for `runs`. Kept
+# tiny so the CLI stays readable on narrow terminals.
+
+
+def _doomsday_minutes_to_midnight(needs_analysis: int, total: int) -> int:
+    """Map project staleness to the iconic Watchmen Doomsday Clock position.
+
+    Curve calibrated so a small fleet with 1-2 stale projects sits at the
+    classic "five to midnight" (Watchmen's opening clock position), while
+    a fleet where >70% of projects need attention is the harrowing
+    one-minute-to-midnight.
+
+    All up to date  → 12 to midnight (safe)
+    < 20% stale     → 8 to midnight
+    < 40% stale     → 5 to midnight  (canonical Watchmen position)
+    < 70% stale     → 2 to midnight
+    >= 70% stale    → 1 to midnight  (critical)"""
+    if total == 0:
+        return 12
+    ratio = needs_analysis / total
+    if ratio == 0:    return 12
+    if ratio < 0.2:   return 8
+    if ratio < 0.4:   return 5
+    if ratio < 0.7:   return 2
+    return 1
+
+
+# Spelled-out form for the clock line — reads better than "5 minutes" and is
+# the exact phrasing used in the comic.
+_DOOMSDAY_WORD = {12: "twelve", 8: "eight", 5: "five", 2: "two", 1: "one"}
+
+
+def _doomsday_line(needs: int, total: int) -> str:
+    """Format the Doomsday Clock line printed above `watchmen status`."""
+    n = _doomsday_minutes_to_midnight(needs, total)
+    word = _DOOMSDAY_WORD[n]
+    suffix = "minute" if n == 1 else "minutes"
+    body = f"  🕚  doomsday clock — {word} {suffix} to midnight"
+    if n == 12:
+        return _yellow(body) + _dim("    all clear.")
+    if n <= 2:
+        return _yellow(body) + _dim("    tick. tock.")
+    return _yellow(body)
+
+
 # ─── Subcommands ────────────────────────────────────────────────────────────
 
 
@@ -85,10 +140,21 @@ def cmd_status(args) -> int:
         print(_dim("  uv run watchmen track <key> --repo <abs-path>"))
         return 0
 
-    print(f"  {'project':<30} {'state':<10} {'last analyst':<22} {'new prompts':>11}  notes")
-    print(_dim("  " + "─" * 100))
+    # Collect progress per project first so we can compute the Doomsday Clock
+    # before rendering the table — the clock summarizes the table's verdict.
+    rows = []
+    needs = 0
     for p in tracked:
         progress = state.get_project_progress(p["project_key"])
+        rows.append((p, progress))
+        if progress.get("needs_analysis"):
+            needs += 1
+
+    print(_doomsday_line(needs, len(tracked)))
+    print()
+    print(f"  {'project':<30} {'state':<10} {'last analyst':<22} {'new prompts':>11}  notes")
+    print(_dim("  " + "─" * 100))
+    for p, progress in rows:
         last_day = p["last_analyst_day"] or "—"
         new_n = progress.get("new_prompts_since_last_analysis", "?")
         st = "enabled" if p["enabled"] else "paused"
@@ -102,7 +168,9 @@ def cmd_status(args) -> int:
     print()
     runs = state.recent_runs(limit=5)
     if runs:
-        print(_bold("Recent runs:"))
+        # "Mission log" framing borrows from the comic's Crimebusters/Minutemen
+        # tradition of recording field activity in a shared journal.
+        print(_bold("Mission log:"))
         for r in runs:
             t = r["started_at"][:19]
             status = r["status"]
@@ -558,14 +626,25 @@ def cmd_doctor(args) -> int:
     daemon/viewer state, hooks, latest run age, disk free.
 
     Used to self-diagnose a broken install — single screen of ✓/✗ rows. Returns
-    0 if everything is green, 1 if any required check fails."""
+    0 if everything is green, 1 if any required check fails.
+
+    Themed after Dr. Manhattan, who in the comic spends a chapter on Mars
+    contemplating the deterministic clockwork of human bodies. The bright-blue
+    palette + the atomic glyph echo his iconic look without taking over the
+    table."""
     from rich.console import Console
     from rich.table import Table
     console = Console()
 
+    # Manhattan-blue header line — small atom + name + tagline. Punches above
+    # the table without consuming much vertical space.
+    console.print()
+    console.print(f"[bold bright_blue]            ⚛[/]")
+    console.print(f"[bold bright_blue]   Dr. Manhattan's vitals[/]  [dim italic]— I see all the body's mechanisms, intact and predictable.[/]")
+
     fails = 0
     warns = 0
-    table = Table(title="watchmen doctor", show_header=True, header_style="bold cyan", expand=False)
+    table = Table(show_header=True, header_style="bold bright_blue", expand=False, border_style="bright_blue")
     table.add_column("check", style="bold")
     table.add_column("status", justify="center", width=4)
     table.add_column("detail")
@@ -674,7 +753,8 @@ def cmd_doctor(args) -> int:
     console.print()
     console.print(table)
     if fails == 0 and warns == 0:
-        console.print("\n[green]all green.[/]")
+        # Manhattan-detached closing line — neutral, observational.
+        console.print("\n[bright_blue]   Nothing here requires my intervention.[/]")
     elif fails == 0:
         console.print(f"\n[yellow]{warns} warning(s)[/] — non-blocking; fix when convenient.")
     else:
@@ -702,7 +782,9 @@ def cmd_open(args) -> int:
     if not up:
         print(_yellow(f"warning: viewer at {base} isn't responding — start with `watchmen viewer run` or `watchmen viewer install`"))
 
-    print(f"opening {url}")
+    # Tiny Rorschach-style inkblot prefix — the symmetric paired braces
+    # echo his mask. Nothing wider than two cells so it stays subtle.
+    print(_dim("  ⌗⌗⌗  ") + f"opening {url}")
     opened = webbrowser.open(url, new=2)
     if not opened:
         print(_dim("(browser didn't auto-open — copy the URL above)"))
