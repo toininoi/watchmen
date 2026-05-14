@@ -95,6 +95,8 @@ watchmen init
 
 The wizard handles everything: prompts for your `OPENROUTER_API_KEY` (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the launchd daemon + viewer for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
 
+Runtime data lives under `~/.watchmen/` by default (`state.db`, `corpus.db`, `analyses/`, `kai_claude/`, event logs). Set `WATCHMEN_HOME=/path/to/dir` if you need an alternate data directory for testing or a separate install. On first use, watchmen copies any legacy source-tree runtime files into the new location so existing local data is preserved.
+
 If anything looks wrong afterwards, `watchmen doctor` does a one-screen ✓/✗ check across API key, corpus, daemon, viewer, and hooks.
 
 When the wizard finishes, install the plugin inside any Claude Code session:

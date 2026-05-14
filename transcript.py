@@ -15,7 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from textwrap import shorten
 
-DB_PATH = Path(__file__).parent / "events.db"
+from paths import EVENTS_DB
+
+DB_PATH = EVENTS_DB
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 GRAY = "\033[90m"

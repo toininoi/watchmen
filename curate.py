@@ -33,6 +33,7 @@ import httpx
 
 from agent import Agent, load_api_key
 from cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers, write_cache
+from paths import KAI_CLAUDE_DIR
 from tools_lib import make_tools
 
 ROOT = Path(__file__).parent
@@ -811,7 +812,7 @@ def _build_skill_index() -> None:
         project_key = p.get("project_key")
         if not project_key:
             continue
-        skills_dir = ROOT / "kai_claude" / project_key / "skills"
+        skills_dir = KAI_CLAUDE_DIR / project_key / "skills"
         if not skills_dir.exists():
             continue
         for skill_dir in skills_dir.iterdir():
@@ -932,7 +933,7 @@ def main():
     args = parser.parse_args()
 
     api_key = load_api_key()
-    out_dir = ROOT / "kai_claude" / args.project
+    out_dir = KAI_CLAUDE_DIR / args.project
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "_run.log"
     log_path.write_text("", encoding="utf-8")  # truncate

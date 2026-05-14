@@ -7,16 +7,15 @@ Tables:
 Most operations idempotent. Schema is migrate-on-open: adding columns is fine, drop/rename requires manual migration.
 """
 
-import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from corpus_filters import substantive_filter
+from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR, STATE_DB
 
 ROOT = Path(__file__).parent
-STATE_DB = ROOT / "state.db"
 
 
 SCHEMA = """
@@ -54,6 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
 
 @contextmanager
 def conn():
+    STATE_DB.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(STATE_DB)
     c.row_factory = sqlite3.Row
     try:
@@ -188,19 +188,21 @@ def get_project_progress(project_key: str) -> dict:
     """Cross-reference state.db with corpus.db to derive: last day in corpus, last day in
     thesis, count of new prompts since last_analyst_day. Caller decides whether to trigger a run."""
     proj = get_project(project_key)
-    corpus_db = ROOT / "corpus.db"
-    if not corpus_db.exists():
+    if not CORPUS_DB.exists():
         return {"error": "corpus.db not found"}
+    if not proj:
+        return {"error": f"project not tracked: {project_key}"}
 
-    cc = sqlite3.connect(corpus_db)
+    cc = sqlite3.connect(CORPUS_DB)
     cc.row_factory = sqlite3.Row
 
+    project_where, project_params = _project_dir_predicate(proj["source_repo"])
     sub = substantive_filter("s")
     last_corpus_day = cc.execute(
         f"""SELECT MAX(substr(p.timestamp, 1, 10)) AS d
            FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-           WHERE s.project_dir LIKE ? AND s.is_subagent = 0 AND {sub}""",
-        (f"%{project_key}%",),
+           WHERE {project_where} AND s.is_subagent = 0 AND {sub}""",
+        project_params,
     ).fetchone()["d"]
 
     last_analyst_day = (proj or {}).get("last_analyst_day")
@@ -209,16 +211,16 @@ def get_project_progress(project_key: str) -> dict:
         new_prompts = cc.execute(
             f"""SELECT COUNT(*) AS n
                FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.project_dir LIKE ? AND s.is_subagent = 0 AND {sub}
+               WHERE {project_where} AND s.is_subagent = 0 AND {sub}
                  AND substr(p.timestamp, 1, 10) > ?""",
-            (f"%{project_key}%", last_analyst_day),
+            (*project_params, last_analyst_day),
         ).fetchone()["n"]
     else:
         new_prompts = cc.execute(
             f"""SELECT COUNT(*) AS n
                FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.project_dir LIKE ? AND s.is_subagent = 0 AND {sub}""",
-            (f"%{project_key}%",),
+               WHERE {project_where} AND s.is_subagent = 0 AND {sub}""",
+            project_params,
         ).fetchone()["n"]
     cc.close()
     return {
@@ -226,15 +228,26 @@ def get_project_progress(project_key: str) -> dict:
         "last_corpus_day": last_corpus_day,
         "last_analyst_day": last_analyst_day,
         "new_prompts_since_last_analysis": new_prompts,
-        "needs_analysis": (proj is None) or (new_prompts >= (proj.get("threshold_new_prompts", 30))),
+        "needs_analysis": new_prompts >= (proj.get("threshold_new_prompts", 30)),
     }
+
+
+def _project_dir_predicate(source_repo: str, alias: str = "s") -> tuple[str, tuple[str, str]]:
+    """SQL predicate for sessions inside a tracked repo root.
+
+    Exact equality handles normal adapter cwd storage; the child path match
+    covers sessions opened from a subdirectory without admitting arbitrary
+    substring collisions such as `kai` matching every Kai-related checkout.
+    """
+    root = str(Path(source_repo).expanduser())
+    return f"({alias}.project_dir = ? OR {alias}.project_dir LIKE ?)", (root, root.rstrip("/") + "/%")
 
 
 def sync_from_disk(project_key: str) -> dict:
     """Look at analyses/<project>/*.md and kai_claude/<project>/skills to derive last-run state.
     Updates state.db with what's on disk. Returns a summary of what was synced."""
     summary = {"analyst": False, "curator": False}
-    analyses_dir = ROOT / "analyses" / project_key
+    analyses_dir = ANALYSES_DIR / project_key
     if analyses_dir.exists():
         day_files = sorted(p.stem for p in analyses_dir.glob("20*.md"))
         if day_files:
@@ -245,11 +258,11 @@ def sync_from_disk(project_key: str) -> dict:
             update_project(project_key, last_analyst_day=latest, last_analyst_run=mtime_iso)
             summary["analyst"] = {"last_day": latest, "files": len(day_files)}
 
-    skills_dir = ROOT / "kai_claude" / project_key / "skills"
+    skills_dir = KAI_CLAUDE_DIR / project_key / "skills"
     if skills_dir.exists():
         skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir())
         if skill_count:
-            claude_md = ROOT / "kai_claude" / project_key / "CLAUDE.md"
+            claude_md = KAI_CLAUDE_DIR / project_key / "CLAUDE.md"
             mtime_iso = (
                 datetime.fromtimestamp(claude_md.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
                 if claude_md.exists()
@@ -268,10 +281,9 @@ def auto_detect_projects() -> list[dict]:
     so we just take that string as the source_repo. The project_key is the dir name
     of the path (used as a friendly id; collisions are rare and resolved by the user
     during onboarding)."""
-    corpus_db = ROOT / "corpus.db"
-    if not corpus_db.exists():
+    if not CORPUS_DB.exists():
         return []
-    cc = sqlite3.connect(corpus_db)
+    cc = sqlite3.connect(CORPUS_DB)
     cc.row_factory = sqlite3.Row
     rows = cc.execute(
         """SELECT s.project_dir, COUNT(*) AS prompts, COUNT(DISTINCT s.session_id) AS sessions

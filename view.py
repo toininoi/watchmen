@@ -4,7 +4,9 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "events.db"
+from paths import EVENTS_DB
+
+DB_PATH = EVENTS_DB
 
 GRAY = "\033[90m"
 YELLOW = "\033[33m"

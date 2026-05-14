@@ -23,10 +23,9 @@ from textwrap import dedent
 import httpx
 
 from corpus_filters import substantive_filter
+from paths import ANALYSES_DIR, CORPUS_DB
 
 ROOT = Path(__file__).parent
-CORPUS_DB = ROOT / "corpus.db"
-ANALYSES_DIR = ROOT / "analyses"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 
@@ -40,14 +39,37 @@ def load_api_key() -> str:
 
 # ─── Tools ──────────────────────────────────────────────────────────────────
 
+def _tracked_source_repo(project_key: str | None) -> str | None:
+    if not project_key:
+        return None
+    try:
+        import state
+        state.init_db()
+        proj = state.get_project(project_key)
+        return proj.get("source_repo") if proj else None
+    except Exception:
+        return None
+
+
+def _project_dir_predicate(source_repo: str, alias: str = "s") -> tuple[str, tuple[str, str]]:
+    root = str(Path(source_repo).expanduser())
+    return f"({alias}.project_dir = ? OR {alias}.project_dir LIKE ?)", (root, root.rstrip("/") + "/%")
+
+
 def tool_list_activity_on(date: str, project_substr: str | None = None):
     conn = sqlite3.connect(CORPUS_DB)
     conn.row_factory = sqlite3.Row
     where = ["substr(p.timestamp, 1, 10) = ?", "s.is_subagent = 0", substantive_filter("s")]
     params: list = [date]
     if project_substr:
-        where.append("s.project_dir LIKE ?")
-        params.append(f"%{project_substr}%")
+        source_repo = _tracked_source_repo(project_substr)
+        if source_repo:
+            pred, pred_params = _project_dir_predicate(source_repo)
+            where.append(pred)
+            params.extend(pred_params)
+        else:
+            where.append("s.project_dir = ?")
+            params.append(project_substr)
     rows = conn.execute(
         f"""
         SELECT s.session_id, s.project_dir,
@@ -373,8 +395,14 @@ def main() -> None:
     where = ["s.is_subagent = 0", substantive_filter("s")]
     params: list = []
     if args.project:
-        where.append("s.project_dir LIKE ?")
-        params.append(f"%{args.project}%")
+        source_repo = _tracked_source_repo(args.project)
+        if source_repo:
+            pred, pred_params = _project_dir_predicate(source_repo)
+            where.append(pred)
+            params.extend(pred_params)
+        else:
+            where.append("s.project_dir = ?")
+            params.append(args.project)
     rows = conn.execute(
         f"""
         SELECT substr(p.timestamp, 1, 10) AS day, COUNT(*) AS n
