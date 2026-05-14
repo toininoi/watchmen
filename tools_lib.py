@@ -10,8 +10,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR
+
 ROOT = Path(__file__).parent
-CORPUS_DB = ROOT / "corpus.db"
 
 
 # ─── Raw implementations (bound by make_tools) ─────────────────────────────
@@ -92,12 +93,12 @@ def read_session_full(session_id: str, max_chars: int = 30000) -> str:
 
 def read_thesis(project_key: str, section: str | None = None) -> str:
     """Read analyses/<project>/_running.md (full or one section by ## heading match)."""
-    candidates = [d for d in (ROOT / "analyses").iterdir() if d.is_dir() and project_key in d.name]
-    if not candidates:
+    thesis_dir = ANALYSES_DIR / project_key
+    if not thesis_dir.is_dir():
         return f"ERROR: thesis dir not found for project key: {project_key}"
-    running = candidates[0] / "_running.md"
+    running = thesis_dir / "_running.md"
     if not running.exists():
-        return f"ERROR: _running.md not found in {candidates[0]}"
+        return f"ERROR: _running.md not found in {thesis_dir}"
     content = running.read_text(encoding="utf-8")
     if section is None:
         return content[:50000]
@@ -133,7 +134,7 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
     """Bind a tool set to a project. Returns (tool_specs, handler_dict)."""
 
     repo_root = Path(source_repo).expanduser()
-    kai_claude_root = ROOT / "kai_claude" / project_key
+    kai_claude_root = KAI_CLAUDE_DIR / project_key
 
     # ── handlers ───────────────────────────────────────────────────────────
 

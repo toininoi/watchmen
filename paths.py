@@ -17,7 +17,56 @@ two transcripts from the same vanished project will still group together.
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).parent
+WATCHMEN_HOME = Path(os.environ.get("WATCHMEN_HOME", Path.home() / ".watchmen")).expanduser()
+
+
+def runtime_dir(*parts: str) -> Path:
+    """Directory for user-owned watchmen runtime data.
+
+    Source checkouts and installed wheels should stay immutable. Generated
+    databases, analyses, and curated artifacts live under ~/.watchmen by
+    default, with WATCHMEN_HOME available for tests or alternate installs.
+    """
+    path = WATCHMEN_HOME.joinpath(*parts)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def runtime_path(name: str, *, migrate_legacy: bool = True) -> Path:
+    """Path under WATCHMEN_HOME, optionally copied from the old source-root
+    location on first use. Copying preserves existing local data without
+    destructively moving files out of a checkout.
+    """
+    dest = WATCHMEN_HOME / name
+    if migrate_legacy and not dest.exists():
+        legacy = PROJECT_ROOT / name
+        try:
+            if legacy.is_dir():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(legacy, dest)
+            elif legacy.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy, dest)
+        except OSError:
+            # Runtime paths should not make imports or command startup fail.
+            pass
+    return dest
+
+
+STATE_DB = runtime_path("state.db")
+CORPUS_DB = runtime_path("corpus.db")
+EVENTS_DB = runtime_path("events.db")
+EVENTS_JSONL = runtime_path("events.jsonl")
+ANALYSES_DIR = runtime_path("analyses")
+KAI_CLAUDE_DIR = runtime_path("kai_claude")
+OUTPUT_DIR = runtime_path("output")
+INSIGHTS_DIR = runtime_dir("insights")
 
 
 def decode_project_dir(encoded: str) -> str:

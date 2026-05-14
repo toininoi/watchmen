@@ -25,18 +25,47 @@ Designed to be invoked as `uv run watchmen <subcommand>` or via the script entry
 """
 
 import argparse
+import difflib
+import os
 import random
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 import config
 import state
+from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR, STATE_DB
 
 ROOT = Path(__file__).parent
+SOURCE_ROOT = Path(__file__).parent
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 VIEWER_DEFAULT_HOST = config.VIEWER_DEFAULT_HOST
 VIEWER_DEFAULT_PORT = config.VIEWER_DEFAULT_PORT
+
+
+class WatchmenParser(argparse.ArgumentParser):
+    """Argparse with developer-grade error recovery.
+
+    Stripe/Modal-style CLIs make the next action obvious when a command is
+    mistyped. Argparse's default "invalid choice" block is technically correct
+    but buries the useful command names in a long choices list, so we surface
+    the closest match and a focused help hint.
+    """
+
+    def error(self, message: str) -> None:
+        if "invalid choice" in message and self.prog == "watchmen":
+            bad = message.split("invalid choice:", 1)[1].split("(", 1)[0].strip().strip("'\"")
+            known = [cmd for _, commands in _HELP_GROUPS for cmd, _ in commands]
+            match = difflib.get_close_matches(bad, known, n=1)
+            print(_red(f"Error: unknown command `{bad}`"), file=sys.stderr)
+            if match:
+                print(f"Did you mean `{match[0]}`?", file=sys.stderr)
+            print("Run `watchmen --help` to see available commands.", file=sys.stderr)
+            raise SystemExit(2)
+        print(_red(f"Error: {message}"), file=sys.stderr)
+        print(f"Run `{self.prog} --help` for usage.", file=sys.stderr)
+        raise SystemExit(2)
 
 
 def _version() -> str:
@@ -71,6 +100,44 @@ def _green(s: str) -> str:
 
 def _yellow(s: str) -> str:
     return f"\033[33m{s}\033[0m"
+
+
+def _red(s: str) -> str:
+    return f"\033[31m{s}\033[0m"
+
+
+def _print_runtime_state_error(exc: BaseException, *, stderr: bool = True) -> None:
+    from rich.console import Console
+
+    console = Console(stderr=stderr)
+    console.print("[red]watchmen cannot open its local state database.[/]")
+    console.print(f"[dim]path:[/] {STATE_DB}")
+    console.print(f"[dim]error:[/] {type(exc).__name__}: {exc}")
+    console.print()
+    console.print("[dim]Try setting a writable data directory:[/]")
+    console.print("  WATCHMEN_HOME=/path/to/watchmen-data watchmen status")
+
+
+def _short_path(path: str | Path) -> str:
+    text = str(path)
+    home = str(Path.home())
+    return text.replace(home, "~", 1) if text.startswith(home) else text
+
+
+def _ui_header(console, command: str, subtitle: str | None = None) -> None:
+    console.print(f"[bold]watchmen[/] [dim]{command}[/]")
+    if subtitle:
+        console.print(f"[dim]{subtitle}[/]")
+
+
+def _rich_status(status: str) -> str:
+    if status == "ok":
+        return "[green]ok[/]"
+    if status == "running":
+        return "[yellow]running[/]"
+    if status in {"failed", "error"}:
+        return "[red]failed[/]"
+    return f"[dim]{status or '-'}[/]"
 
 
 def _bright_blue(s: str) -> str:
@@ -303,13 +370,22 @@ def _new_changelog_entries(text: str, current: str, last_seen: str | None) -> li
     return [e for e in all_entries if _version_key(e[0]) > last_key]
 
 
-def _show_release_notes_if_bumped() -> None:
+def _show_release_notes_if_bumped(*, interactive: bool | None = None) -> None:
     """If the installed watchmen version is newer than the one this user
     last saw, print the new CHANGELOG.md entries to stderr. Updates the
     tracker after display so the announcement appears exactly once per
     bump. Silently no-ops on errors so changelog parsing can't break CLI
     startup."""
     try:
+        if os.environ.get("WATCHMEN_DISABLE_RELEASE_NOTES") == "1":
+            return
+        # Keep command output script-friendly. Users can always run
+        # `watchmen changelog`; automated/non-tty invocations should not get a
+        # surprise Markdown block on stderr.
+        if interactive is None:
+            interactive = sys.stderr.isatty()
+        if not interactive:
+            return
         current = _version()
         tracker = _LAST_SEEN_VERSION_FILE
         tracker.parent.mkdir(parents=True, exist_ok=True)
@@ -400,13 +476,25 @@ def _doomsday_ascii(needs: int, total: int) -> list[str]:
 
 
 def cmd_status(args) -> int:
-    state.init_db()
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+
+    try:
+        state.init_db()
+    except Exception as e:
+        _print_runtime_state_error(e, stderr=False)
+        return 1
+
     tracked = state.list_projects()
-    print(_bold("\nwatchmen status\n"))
     if not tracked:
-        print("No projects tracked yet. Run:")
-        print(_dim("  uv run watchmen list             # see auto-detected projects"))
-        print(_dim("  uv run watchmen track <key> --repo <abs-path>"))
+        _ui_header(console, "status")
+        console.print()
+        console.print("No projects tracked yet.")
+        console.print("[dim]Start with:[/]")
+        console.print("  watchmen init")
+        console.print("  watchmen ingest")
+        console.print("  watchmen list")
         return 0
 
     # Collect progress per project first so we can compute the Doomsday Clock
@@ -419,52 +507,51 @@ def cmd_status(args) -> int:
         if progress.get("needs_analysis"):
             needs += 1
 
-    for line in _doomsday_ascii(needs, len(tracked)):
-        print(line)
-    print()
+    enabled = sum(1 for p in tracked if p.get("enabled", 1))
+    latest_run = state.recent_runs(limit=1)
+    latest = latest_run[0]["started_at"][:19] if latest_run else "never"
 
-    # Rich Table auto-sizes columns to widest cell — fixes the printf
-    # alignment drift we used to have when the adapter-counts column overflowed
-    # its header. Headers + separators rendered consistently with `doctor`
-    # and `metrics`.
-    from rich.console import Console
-    from rich.table import Table
-    console = Console()
-    table = Table(show_header=True, header_style="bold", expand=False)
-    table.add_column("project")
+    _ui_header(console, "status")
+    console.print(
+        f"[dim]{len(tracked)} projects[/]  "
+        f"[dim]{enabled} enabled[/]  "
+        + (f"[yellow]{needs} need analysis[/]" if needs else "[green]all caught up[/]")
+        + f"  [dim]latest run: {latest}[/]\n"
+    )
+
+    table = Table(show_header=True, header_style="bold", expand=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("project", style="bold")
     table.add_column("state")
-    table.add_column("last analyst")
+    table.add_column("last")
     table.add_column("new", justify="right")
-    table.add_column("cc", justify="right")
-    table.add_column("cd", justify="right")
-    table.add_column("pi", justify="right")
-    table.add_column("notes")
+    table.add_column("adapters")
+    table.add_column("next")
     for p, progress in rows:
         last_day = p["last_analyst_day"] or "—"
         new_n = progress.get("new_prompts_since_last_analysis", "?")
         st = "enabled" if p["enabled"] else "[yellow]paused[/]"
         if progress.get("needs_analysis"):
-            flag = "[yellow]● needs analysis[/]"
+            flag = f"watchmen learn {p['project_key']}"
         elif p["last_analyst_day"]:
-            flag = "[green]● up to date[/]"
+            flag = "[green]ready[/]"
         else:
-            flag = ""
+            flag = f"watchmen analyze {p['project_key']}"
         bd = _adapter_breakdown(p["project_key"])
+        adapters = " ".join(
+            f"{label}:{bd.get(agent, 0)}"
+            for agent, label in (("claude_code", "cc"), ("codex", "cd"), ("pi", "pi"))
+            if bd.get(agent, 0)
+        ) or "-"
         table.add_row(
-            p["project_key"], st, last_day, str(new_n),
-            str(bd.get("claude_code", 0)),
-            str(bd.get("codex", 0)),
-            str(bd.get("pi", 0)),
+            p["project_key"], st, last_day, str(new_n), adapters,
             flag,
         )
     console.print(table)
 
     runs = state.recent_runs(limit=5)
     if runs:
-        # "Mission log" framing borrows from the comic's Crimebusters/Minutemen
-        # tradition of recording field activity in a shared journal.
         console.print()
-        console.print("[bold]Mission log:[/]")
+        console.print("[bold]Recent runs[/]")
         log = Table(show_header=False, box=None, padding=(0, 1, 0, 1))
         log.add_column("when")
         log.add_column("project")
@@ -480,20 +567,38 @@ def cmd_status(args) -> int:
 
 
 def cmd_list(args) -> int:
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
     detected = state.auto_detect_projects()
     if not detected:
-        print("No projects detected — run `watchmen ingest` to populate corpus.db.")
+        _ui_header(console, "list")
+        console.print("No projects detected.")
+        console.print("[dim]Run `watchmen ingest` to populate corpus.db.[/]")
         return 0
-    print(_bold(f"\nDetected {len(detected)} projects with ≥30 prompts:\n"))
-    print(f"  {'project_key':<32} {'prompts':>8} {'sessions':>9}  repo")
-    print(_dim("  " + "─" * 100))
     tracked_keys = {p["project_key"] for p in state.list_projects()}
+
+    _ui_header(console, "list", f"{len(detected)} projects with 30+ prompts")
+    console.print()
+    table = Table(show_header=True, header_style="bold", expand=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("project", style="bold")
+    table.add_column("tracked")
+    table.add_column("prompts", justify="right")
+    table.add_column("sessions", justify="right")
+    table.add_column("repo", style="dim")
     for d in detected:
-        marker = _green("✓") if d["project_key"] in tracked_keys else " "
-        repo_short = d["source_repo"].replace(str(Path.home()), "~", 1)
-        print(f"{marker} {d['project_key']:<32} {d['prompts']:>8} {d['sessions']:>9}  {repo_short}")
-    print()
-    print(_dim("Tracked projects show ✓ — track new ones with `watchmen track <key> --repo <path>`."))
+        tracked = "[green]yes[/]" if d["project_key"] in tracked_keys else "[dim]no[/]"
+        table.add_row(
+            d["project_key"],
+            tracked,
+            str(d["prompts"]),
+            str(d["sessions"]),
+            _short_path(d["source_repo"]),
+        )
+    console.print(table)
+    console.print()
+    console.print("[dim]Track a project with `watchmen track <key> --repo <path>`.[/]")
     return 0
 
 
@@ -564,7 +669,7 @@ def cmd_analyze(args) -> int:
     r = subprocess.run(cmd, cwd=str(ROOT))
     if r.returncode == 0:
         # Update last_analyst_day from the latest day in analyses/
-        analyses_dir = ROOT / "analyses" / args.project
+        analyses_dir = _analyses_base() / args.project
         if analyses_dir.exists():
             day_files = sorted(p.stem for p in analyses_dir.glob("20*.md"))
             if day_files:
@@ -601,7 +706,7 @@ def cmd_curate(args) -> int:
     print(_dim(f"Running: {' '.join(cmd)}"))
     r = subprocess.run(cmd, cwd=str(ROOT))
     if r.returncode == 0:
-        skills_dir = ROOT / "kai_claude" / args.project / "skills"
+        skills_dir = _kai_claude_base() / args.project / "skills"
         skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
         state.update_project(args.project, last_curator_run=state.now_iso(), last_curator_skill_count=skill_count)
         state.finish_run(run_id, "ok", notes=f"{skill_count} skills")
@@ -612,18 +717,30 @@ def cmd_curate(args) -> int:
 
 
 def cmd_runs(args) -> int:
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
     state.init_db()
     runs = state.recent_runs(limit=args.limit, project_key=args.project)
     if not runs:
-        print("No runs recorded yet.")
+        _ui_header(console, "runs")
+        console.print("No runs recorded yet.")
         return 0
-    print(_bold(f"\nRecent runs (limit {args.limit}):\n"))
+    scope = args.project or "all projects"
+    _ui_header(console, "runs", f"{scope} · latest {args.limit}")
+    console.print()
+    table = Table(show_header=True, header_style="bold", expand=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("started")
+    table.add_column("project", style="bold")
+    table.add_column("kind")
+    table.add_column("status")
+    table.add_column("notes", style="dim")
     for r in runs:
         t = (r["started_at"] or "?")[:19]
-        end = (r["ended_at"] or "running")[:19] if r["ended_at"] else "running"
         status = r["status"]
-        color = _green if status == "ok" else _yellow if status == "running" else _dim
-        print(f"  {t}  {r['project_key']:<25} {r['kind']:<22} {color(status):<14}  {r['notes'] or ''}")
+        table.add_row(t, r["project_key"], r["kind"], _rich_status(status), r["notes"] or "")
+    console.print(table)
     return 0
 
 
@@ -948,14 +1065,39 @@ _ADAPTER_SHORT = {"claude_code": "cc", "codex": "cd", "pi": "pi"}
 
 
 def _kai_claude_dir(project_key: str) -> Path:
-    return ROOT / "kai_claude" / project_key
+    return _kai_claude_base() / project_key
+
+
+def _kai_claude_base() -> Path:
+    return ROOT / "kai_claude" if ROOT != SOURCE_ROOT else KAI_CLAUDE_DIR
+
+
+def _analyses_base() -> Path:
+    return ROOT / "analyses" if ROOT != SOURCE_ROOT else ANALYSES_DIR
+
+
+def _corpus_db_path() -> Path:
+    return ROOT / "corpus.db" if ROOT != SOURCE_ROOT else CORPUS_DB
+
+
+def _tracked_source_repo(project_key: str) -> str | None:
+    proj = state.get_project(project_key)
+    return proj.get("source_repo") if proj else None
+
+
+def _project_dir_predicate(project_key: str, alias: str = "s") -> tuple[str, tuple[str, str]] | None:
+    source_repo = _tracked_source_repo(project_key)
+    if not source_repo:
+        return None
+    root = str(Path(source_repo).expanduser())
+    return f"({alias}.project_dir = ? OR {alias}.project_dir LIKE ?)", (root, root.rstrip("/") + "/%")
 
 
 def _tracked_project_keys() -> list[str]:
     """Project keys that have at least a `kai_claude/<key>/` dir on disk —
     used as the universe for `show` and `recent` without a project arg.
     Falls back to state.list_projects() when nothing is on disk yet."""
-    base = ROOT / "kai_claude"
+    base = _kai_claude_base()
     if base.exists():
         keys = sorted(d.name for d in base.iterdir() if d.is_dir() and (d / "skills").exists())
         if keys:
@@ -967,15 +1109,19 @@ def _adapter_breakdown(project_key: str) -> dict[str, int]:
     """Session counts per adapter from corpus.db, filtered to substantive
     non-subagent sessions matching the project path."""
     import sqlite3
-    corpus_db = ROOT / "corpus.db"
+    corpus_db = _corpus_db_path()
     if not corpus_db.exists():
         return {}
+    pred = _project_dir_predicate(project_key)
+    if not pred:
+        return {}
+    project_where, project_params = pred
     cc = sqlite3.connect(corpus_db)
     rows = cc.execute(
-        """SELECT agent, COUNT(*) FROM sessions
-           WHERE project_dir LIKE ? AND is_subagent = 0
+        """SELECT agent, COUNT(*) FROM sessions s
+           WHERE """ + project_where + """ AND is_subagent = 0
            GROUP BY agent""",
-        (f"%{project_key}%",),
+        project_params,
     ).fetchall()
     cc.close()
     return {agent: n for agent, n in rows}
@@ -1009,42 +1155,46 @@ def _repo_friction_signals(project_key: str) -> tuple[int, list[tuple[str, int]]
     satisfaction) — coarser than Anthropic's LLM-inferred satisfaction
     but cheap and traceable to actual user prompts."""
     import sqlite3
-    corpus_db = ROOT / "corpus.db"
+    corpus_db = _corpus_db_path()
     if not corpus_db.exists():
         return 0, [], 0, []
+    pred = _project_dir_predicate(project_key)
+    if not pred:
+        return 0, [], 0, []
+    project_where, project_params = pred
     cc = sqlite3.connect(corpus_db)
     # Tool-error total.
     err_total = cc.execute(
-        """SELECT COALESCE(SUM(tool_error_count), 0) FROM sessions
-           WHERE project_dir LIKE ? AND is_subagent = 0""",
-        (f"%{project_key}%",),
+        """SELECT COALESCE(SUM(tool_error_count), 0) FROM sessions s
+           WHERE """ + project_where + """ AND is_subagent = 0""",
+        project_params,
     ).fetchone()[0] or 0
     # Top erroring tools — useful for the LLM to cite specifics.
     top_tools = cc.execute(
-        """SELECT tc.tool_name, COUNT(*) AS n
+           """SELECT tc.tool_name, COUNT(*) AS n
            FROM tool_calls tc JOIN sessions s ON s.session_id = tc.session_id
-           WHERE s.project_dir LIKE ? AND s.is_subagent = 0 AND tc.is_error = 1
+           WHERE """ + project_where + """ AND s.is_subagent = 0 AND tc.is_error = 1
            GROUP BY tc.tool_name ORDER BY n DESC LIMIT 3""",
-        (f"%{project_key}%",),
+        project_params,
     ).fetchall()
     # Frustration-marker count + 2 representative samples.
     frust_count = cc.execute(
-        f"""SELECT COUNT(*) FROM prompts p
+            f"""SELECT COUNT(*) FROM prompts p
             JOIN sessions s ON s.session_id = p.session_id
-            WHERE s.project_dir LIKE ? AND s.is_subagent = 0
+            WHERE {project_where} AND s.is_subagent = 0
               AND ({_FRUSTRATION_MARKERS_SQL})""",
-        (f"%{project_key}%",),
+        project_params,
     ).fetchone()[0] or 0
     samples = [
         row[0][:120].replace("\n", " ").strip()
         for row in cc.execute(
             f"""SELECT substr(p.text, 1, 160) FROM prompts p
                 JOIN sessions s ON s.session_id = p.session_id
-                WHERE s.project_dir LIKE ? AND s.is_subagent = 0
+                WHERE {project_where} AND s.is_subagent = 0
                   AND ({_FRUSTRATION_MARKERS_SQL})
                   AND p.text NOT LIKE '%Image%'
                 ORDER BY p.timestamp DESC LIMIT 2""",
-            (f"%{project_key}%",),
+            project_params,
         ).fetchall()
     ]
     cc.close()
@@ -1072,7 +1222,7 @@ def cmd_show(args) -> int:
     Disambiguation: second arg ending in `.md` or `.json` is read as a file
     path under kai_claude/<project>/; anything else is treated as a skill slug
     and resolved to kai_claude/<project>/skills/<slug>/SKILL.md."""
-    base = ROOT / "kai_claude"
+    base = _kai_claude_base()
     if not args.project:
         # Mode 1 — overview of every project that has a curated bundle.
         keys = _tracked_project_keys()
@@ -1279,7 +1429,7 @@ def cmd_why(args) -> int:
         print()
 
     # Cross-reference session_ids with corpus.db to surface adapter + first prompt.
-    corpus_db = ROOT / "corpus.db"
+    corpus_db = _corpus_db_path()
     has_corpus = corpus_db.exists()
     if has_corpus:
         try:
@@ -1333,7 +1483,7 @@ def cmd_recent(args) -> int:
     doesn't require the web viewer."""
     days = args.days
     keys = [args.project] if args.project else _tracked_project_keys()
-    base = ROOT / "kai_claude"
+    base = _kai_claude_base()
     if not keys:
         print(_dim("no curated projects yet."))
         return 0
@@ -1788,24 +1938,19 @@ def cmd_doctor(args) -> int:
     Used to self-diagnose a broken install — single screen of ✓/✗ rows. Returns
     0 if everything is green, 1 if any required check fails.
 
-    Themed after Dr. Manhattan, who in the comic spends a chapter on Mars
-    contemplating the deterministic clockwork of human bodies. The bright-blue
-    palette + the atomic glyph echo his iconic look without taking over the
-    table."""
+    The subtitle keeps the historical "Dr. Manhattan" anchor while the actual
+    surface stays closer to a modern diagnostic CLI: compact title, scannable
+    table, and a single severity summary."""
     from rich.console import Console
     from rich.table import Table
     console = Console()
 
-    # Manhattan-blue atom panel + header. We pick the closing quote later
-    # (after we know fails/warns) but the panel itself goes up top.
+    _ui_header(console, "doctor", "Dr. Manhattan diagnostics")
     console.print()
-    for line in _manhattan_atom_panel():
-        console.print(f"[bold bright_blue]{line}[/]")
-    console.print(f"  [bold bright_blue]Dr. Manhattan's vitals[/]")
 
     fails = 0
     warns = 0
-    table = Table(show_header=True, header_style="bold bright_blue", expand=False, border_style="bright_blue")
+    table = Table(show_header=True, header_style="bold", expand=False, box=None, padding=(0, 2, 0, 0))
     table.add_column("check", style="bold")
     table.add_column("status", justify="center", width=4)
     table.add_column("detail")
@@ -1831,7 +1976,7 @@ def cmd_doctor(args) -> int:
         row("OpenRouter key", ok, info)
 
     # 2. corpus.db
-    corpus_db = ROOT / "corpus.db"
+    corpus_db = _corpus_db_path()
     if not corpus_db.exists():
         row("corpus.db", False, "missing — run `watchmen ingest`")
     else:
@@ -1911,17 +2056,14 @@ def cmd_doctor(args) -> int:
     free_gb = free / 1024**3
     row("disk free (cwd)", free_gb > 1.0, f"{free_gb:.1f} GiB")
 
-    console.print()
     console.print(table)
-    # Closing quote is randomly drawn from the pool that matches severity —
-    # consecutive runs of `watchmen doctor` feel different even when nothing
-    # has changed. Quote stays in Manhattan's voice (detached, observational).
+    console.print()
     if fails == 0 and warns == 0:
-        console.print(f"\n  [bright_blue italic]{random.choice(_MANHATTAN_QUOTES_OK)}[/]")
+        console.print(f"[green]healthy[/]  [dim]{random.choice(_MANHATTAN_QUOTES_OK)}[/]")
     elif fails == 0:
-        console.print(f"\n  [yellow italic]{random.choice(_MANHATTAN_QUOTES_WARN)}[/]  [dim]({warns} warning(s))[/]")
+        console.print(f"[yellow]{warns} warning(s)[/]  [dim]{random.choice(_MANHATTAN_QUOTES_WARN)}[/]")
     else:
-        console.print(f"\n  [red italic]{random.choice(_MANHATTAN_QUOTES_FAIL)}[/]  [dim]({fails} failure(s) / {warns} warning(s))[/]")
+        console.print(f"[red]{fails} failure(s)[/]  [yellow]{warns} warning(s)[/]  [dim]{random.choice(_MANHATTAN_QUOTES_FAIL)}[/]")
     return 1 if fails else 0
 
 
@@ -2109,7 +2251,7 @@ def _cmd_metrics_global(args) -> int:
     # Adapter breakdown across all projects — also rendered as bars, sized
     # vs the largest adapter so codex's 88% reads visually at a glance.
     import sqlite3
-    corpus_db = ROOT / "corpus.db"
+    corpus_db = _corpus_db_path()
     if corpus_db.exists():
         cc = sqlite3.connect(corpus_db)
         adapter_rows = cc.execute(
@@ -2163,7 +2305,7 @@ def cmd_insights(args) -> int:
 
     state.init_db()
     projects = state.list_projects()
-    base = ROOT / "kai_claude"
+    base = _kai_claude_base()
 
     if not projects:
         print(_dim("No projects tracked yet — run `watchmen init` to add one."))
@@ -2172,7 +2314,7 @@ def cmd_insights(args) -> int:
     # Adapter totals across the whole corpus — drives the header line and
     # also the "untapped corpora" friction signal below. corpus.db is the
     # source of truth; if it's missing we skip the section gracefully.
-    corpus_db = ROOT / "corpus.db"
+    corpus_db = _corpus_db_path()
     adapter_totals: dict[str, int] = {}
     if corpus_db.exists():
         cc = sqlite3.connect(corpus_db)
@@ -2413,7 +2555,7 @@ def cmd_insights(args) -> int:
         from rich.markdown import Markdown
         repos_synthesized = sum(
             1 for r in rows
-            if (ROOT / "analyses" / r["key"] / "_running.md").exists()
+            if (_analyses_base() / r["key"] / "_running.md").exists()
         )
         saved = _save_digest(digest, model, repos_synthesized)
         console.print(f"\n[bold]◉ Deep digest[/]  [dim]({model})[/]")
@@ -2609,7 +2751,7 @@ def _insights_pipeline(
     # un-analyzed repos still appear in Stage 2 via static facts.)
     eligible = []
     for r in rows:
-        thesis_path = ROOT / "analyses" / r["key"] / "_running.md"
+        thesis_path = _analyses_base() / r["key"] / "_running.md"
         if thesis_path.exists():
             eligible.append(r)
     if not eligible and not rows:
@@ -2637,8 +2779,8 @@ def _repo_synthesis(repo_row: dict, model: str) -> str | None:
     budget; the value is in citing actual dates/slugs/patterns, not
     in exhaustive coverage."""
     key = repo_row["key"]
-    proj_dir = ROOT / "kai_claude" / key
-    thesis_path = ROOT / "analyses" / key / "_running.md"
+    proj_dir = _kai_claude_base() / key
+    thesis_path = _analyses_base() / key / "_running.md"
     log_path = proj_dir / "_curation_log.md"
     cand_path = proj_dir / "_candidates.json"
 
@@ -2920,6 +3062,14 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
 ]
 
+_COMMON_WORKFLOWS: list[tuple[str, str, str]] = [
+    ("First run", "watchmen init", "guided setup, ingest, track, analyze, curate"),
+    ("Daily check", "watchmen status", "what changed and what to run next"),
+    ("Catch up one repo", "watchmen learn <project>", "incremental analysis + CLAUDE.md refresh"),
+    ("Inspect output", "watchmen show <project>", "skills, CLAUDE.md, curator files"),
+    ("Debug install", "watchmen doctor", "API key, corpus, services, hooks"),
+]
+
 
 def _print_grouped_help(parser: argparse.ArgumentParser) -> None:
     """Custom help renderer that groups subcommands into sections.
@@ -2927,26 +3077,29 @@ def _print_grouped_help(parser: argparse.ArgumentParser) -> None:
     Argparse can't group subparsers natively — its --help renders a flat list
     of choices that reads like an unsorted soup. We render our own help block
     while leaving argparse parsing alone."""
-    print(f"watchmen v{_version()} — local Claude Code session intelligence\n")
-    print("usage: watchmen [--version] <command> [...]\n")
+    print(f"{_bold('watchmen')} v{_version()}  {_dim('local coding-agent memory and skill curation')}\n")
+    print(f"{_bold('Usage')}")
+    print("  watchmen <command> [options]\n")
+
+    print(_bold("Common workflows"))
+    for label, command, desc in _COMMON_WORKFLOWS:
+        print(f"  {label:<18} {_cyan(command):<34} {_dim(desc)}")
+    print()
+
+    print(_bold("Commands"))
     for group_name, commands in _HELP_GROUPS:
-        print(_bold(f"{group_name}:"))
+        print(_dim(f"{group_name}:"))
         for cmd, desc in commands:
             print(f"  {cmd:<12}  {desc}")
         print()
-    print(_bold("Quick start:"))
-    print(f"  {_dim('$')} watchmen init           # 5-min setup wizard")
-    print(f"  {_dim('$')} watchmen status         # see your tracked projects")
-    print(f"  {_dim('$')} watchmen open           # open the viewer in your browser")
-    print()
-    print(_dim("Run `watchmen <command> -h` for command-specific help."))
-    print(_dim("Docs + repo: https://github.com/firstbatchxyz/watchmen"))
+    print(_dim("Run `watchmen <command> --help` for command-specific options."))
+    print(_dim("Use `watchmen changelog` for release notes."))
 
 
 def _is_first_run() -> bool:
     """Heuristic: 'fresh install' = no tracked projects AND no corpus.db.
     Used to nudge first-time users toward `watchmen init`."""
-    if not (ROOT / "state.db").exists() and not (ROOT / "corpus.db").exists():
+    if not STATE_DB.exists() and not _corpus_db_path().exists():
         return True
     try:
         state.init_db()
@@ -2974,7 +3127,7 @@ def _bare_default() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="watchmen", description=__doc__.split("\n")[0], add_help=False)
+    parser = WatchmenParser(prog="watchmen", description=__doc__.split("\n")[0], add_help=False)
     # Override the argparse-generated help with our grouped renderer.
     parser.format_help = lambda: ""  # type: ignore[method-assign]
     parser.print_help = lambda *a, **kw: _print_grouped_help(parser)  # type: ignore[method-assign]
@@ -3246,7 +3399,16 @@ def main(argv: list[str] | None = None) -> int:
     _show_release_notes_if_bumped()
     if not args.cmd:
         return _bare_default()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except sqlite3.OperationalError as e:
+        if "unable to open database file" in str(e):
+            _print_runtime_state_error(e)
+            return 1
+        raise
+    except PermissionError as e:
+        _print_runtime_state_error(e)
+        return 1
 
 
 if __name__ == "__main__":

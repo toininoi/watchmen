@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
     "httpx>=0.27",
+    "bleach>=6.1",
     "jinja2>=3.1",
     "markdown>=3.7",
     "pygments>=2.18",
@@ -27,12 +28,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 include = [
-    "cli.py", "state.py", "agent.py", "tools_lib.py",
-    "analyze.py", "curate.py", "corpus.py", "onboard.py",
-    "view.py", "transcript.py", "server.py",
-    "daemon.py", "launchd_setup.py", "hooks_setup.py", "plugin_setup.py",
-    "harness.py",
+    "*.py",
+    "adapters/**/*.py",
     "viewer/**/*.py", "viewer/templates/*.html",
     "hooks/*.sh",
+    "plugin/**/*.py", "plugin/**/*.sh", "plugin/**/*.md", "plugin/**/*.json",
     "CHANGELOG.md",
+]
+exclude = [
+    "tests/**",
 ]

@@ -1085,7 +1085,7 @@ def test_changelog_show_release_notes_writes_tracker_silently_on_match():
         orig_stderr = sys.stderr
         sys.stderr = io.StringIO()
         try:
-            cli._show_release_notes_if_bumped()
+            cli._show_release_notes_if_bumped(interactive=True)
             assert sys.stderr.getvalue() == "", "should be silent when version matches"
             assert tracker.read_text() == cli._version(), "tracker must not be rewritten"
         finally:
@@ -1108,7 +1108,7 @@ def test_changelog_show_release_notes_announces_on_bump_then_silences():
         try:
             # Run 1: bumped → expect output + tracker update.
             sys.stderr = buf1 = io.StringIO()
-            cli._show_release_notes_if_bumped()
+            cli._show_release_notes_if_bumped(interactive=True)
             out1 = buf1.getvalue()
             assert "watchmen updated" in out1, f"no announcement: {out1!r}"
             assert tracker.read_text().strip() == cli._version()
@@ -1730,6 +1730,28 @@ def test_cli_help_renders_groups_and_hides_deprecated():
     for deprecated in ("install-daemon", "install-viewer", "hooks-status", "launchd-status",
                        "uninstall-daemon", "uninstall-hooks", "install-statusline", "update-plugin"):
         assert deprecated not in body, f"deprecated alias leaked into --help: {deprecated}"
+
+
+def test_cli_unknown_command_suggests_nearest_match():
+    """Mistyped top-level commands should show a focused suggestion instead of
+    argparse's long invalid-choice block."""
+    import io
+    import cli
+    err = io.StringIO()
+    orig_stderr = cli.sys.stderr
+    cli.sys.stderr = err
+    try:
+        try:
+            cli.main(["sttaus"])
+            assert False, "unknown command should exit"
+        except SystemExit as e:
+            assert e.code == 2
+    finally:
+        cli.sys.stderr = orig_stderr
+    body = err.getvalue()
+    assert "unknown command `sttaus`" in body
+    assert "Did you mean `status`?" in body
+    assert "invalid choice" not in body
 
 
 def test_cli_open_constructs_url_and_invokes_webbrowser():
@@ -2569,6 +2591,7 @@ def main() -> int:
     check("--version prints semver, not 0.0.0 fallback", test_cli_version_flag_prints_version)
     check("`init` dispatches + `onboard` alias works",   test_cli_init_dispatches_to_onboard_and_onboard_still_works)
     check("--help groups visible, deprecated hidden",    test_cli_help_renders_groups_and_hides_deprecated)
+    check("unknown command suggests nearest match",      test_cli_unknown_command_suggests_nearest_match)
     check("`open <p>` builds URL + invokes webbrowser",  test_cli_open_constructs_url_and_invokes_webbrowser)
     check("`logs` resolves files + exits 1 if missing",  test_cli_logs_resolves_log_files_for_name)
     check("bare `watchmen` runs smart default (exit 0)", test_cli_bare_invocation_runs_smart_default)

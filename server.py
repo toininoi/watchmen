@@ -5,10 +5,11 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
+from paths import EVENTS_DB, EVENTS_JSONL
 
 ROOT = Path(__file__).parent
-DB_PATH = ROOT / "events.db"
-JSONL_PATH = ROOT / "events.jsonl"
+DB_PATH = EVENTS_DB
+JSONL_PATH = EVENTS_JSONL
 
 
 def init_db() -> None:
@@ -64,6 +65,7 @@ async def receive_hook(request: Request):
     conn.close()
 
     line = json.dumps({"received_at": received_at, **payload}, ensure_ascii=False)
+    JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with JSONL_PATH.open("a") as f:
         f.write(line + "\n")
 

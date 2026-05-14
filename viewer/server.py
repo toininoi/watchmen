@@ -5,24 +5,45 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+import bleach
 import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
+from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR, STATE_DB
 
 ROOT = Path(__file__).parent.parent  # kai-hooks-mvp/
-ANALYSES = ROOT / "analyses"
-KAI_CLAUDE = ROOT / "kai_claude"
-STATE_DB = ROOT / "state.db"
+ANALYSES = ANALYSES_DIR
+KAI_CLAUDE = KAI_CLAUDE_DIR
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
 MD_EXTENSIONS = ["fenced_code", "tables", "codehilite", "toc", "sane_lists", "nl2br"]
 MD_CONFIG = {"codehilite": {"css_class": "codehilite", "guess_lang": True}}
+MD_ALLOWED_TAGS = set(bleach.sanitizer.ALLOWED_TAGS) | {
+    "a", "abbr", "article", "blockquote", "br", "code", "dd", "div", "dl", "dt",
+    "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img", "li", "ol", "p", "pre",
+    "span", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
+}
+MD_ALLOWED_ATTRS = {
+    **bleach.sanitizer.ALLOWED_ATTRIBUTES,
+    "*": ["class", "id"],
+    "a": ["href", "title", "rel"],
+    "img": ["src", "alt", "title"],
+    "td": ["align"],
+    "th": ["align"],
+}
 
 
 def render_md(text: str) -> str:
-    return md.markdown(text, extensions=MD_EXTENSIONS, extension_configs=MD_CONFIG)
+    html = md.markdown(text, extensions=MD_EXTENSIONS, extension_configs=MD_CONFIG)
+    return bleach.clean(
+        html,
+        tags=MD_ALLOWED_TAGS,
+        attributes=MD_ALLOWED_ATTRS,
+        protocols=["http", "https", "mailto"],
+        strip=True,
+    )
 
 
 def _db():
@@ -280,9 +301,8 @@ def insights_page(request: Request):
 
     # Adapter totals across the whole corpus.
     adapter_totals: dict[str, int] = {}
-    corpus_db = ROOT / "corpus.db"
-    if corpus_db.exists():
-        cc = sqlite3.connect(str(corpus_db))
+    if CORPUS_DB.exists():
+        cc = sqlite3.connect(str(CORPUS_DB))
         for agent, n in cc.execute(
             "SELECT agent, COUNT(*) FROM sessions WHERE is_subagent = 0 GROUP BY agent ORDER BY 2 DESC"
         ).fetchall():

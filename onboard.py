@@ -18,6 +18,7 @@ import webbrowser
 from pathlib import Path
 
 import config
+from paths import CORPUS_DB
 
 from rich.console import Console
 from rich.panel import Panel
@@ -136,9 +137,8 @@ def run_ingest(console: Console) -> bool:
     if rc != 0:
         return False
 
-    db = ROOT / "corpus.db"
     try:
-        with sqlite3.connect(str(db)) as conn:
+        with sqlite3.connect(str(CORPUS_DB)) as conn:
             sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
             prompts = conn.execute("SELECT COUNT(*) FROM prompts").fetchone()[0]
     except sqlite3.Error:

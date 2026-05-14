@@ -18,8 +18,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
+from paths import CORPUS_DB, STATE_DB
+
 ROOT = Path(__file__).parent
-CORPUS_DB = ROOT / "corpus.db"
 SUGGESTIONS_LOG = Path.home() / ".watchmen" / "suggestions.jsonl"
 
 # Per 1M tokens. Source: https://platform.claude.com/docs/en/about-claude/pricing
@@ -120,11 +121,10 @@ def _project_dir_for_key(project_key: str) -> str | None:
     project isn't tracked or the state DB doesn't exist yet."""
     if not CORPUS_DB.exists():
         return None
-    state_db = ROOT / "state.db"
-    if not state_db.exists():
+    if not STATE_DB.exists():
         return None
     try:
-        with sqlite3.connect(str(state_db)) as conn:
+        with sqlite3.connect(str(STATE_DB)) as conn:
             row = conn.execute(
                 "SELECT source_repo FROM projects WHERE project_key = ?", (project_key,)
             ).fetchone()
@@ -329,11 +329,10 @@ def _tracked_project_dirs() -> list[str]:
     """Real-path project_dirs for every tracked project. Used to filter the
     aggregated views down to 'tracked only' when the toggle is on. Matches
     the post-normalization adapter convention (real cwd, not encoded)."""
-    state_db = ROOT / "state.db"
-    if not state_db.exists():
+    if not STATE_DB.exists():
         return []
     try:
-        with sqlite3.connect(str(state_db)) as conn:
+        with sqlite3.connect(str(STATE_DB)) as conn:
             rows = conn.execute(
                 "SELECT source_repo FROM projects WHERE source_repo IS NOT NULL"
             ).fetchall()
