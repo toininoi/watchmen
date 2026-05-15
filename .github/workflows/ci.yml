@@ -31,8 +31,8 @@ jobs:
       - name: Format diff (informational)
         run: uv tool run ruff format --check --diff src/watchmen tests || true
 
-  smoke:
-    name: smoke (${{ matrix.os }}, py${{ matrix.python }})
+  tests:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -45,7 +45,13 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python }}
-      - name: Install dependencies
-        run: uv sync
-      - name: Run smoke tests
-        run: uv run python tests/smoke.py
+      - name: Install dependencies (with dev extra for pytest)
+        run: uv sync --extra dev
+      - name: Run pytest
+        # WATCHMEN_HOME → temp dir so no test mutates ~/.watchmen.
+        # OPENROUTER_API_KEY explicitly unset so the api-key-resolution
+        # tests don't short-circuit their "raises" branch with a CI secret.
+        run: |
+          export WATCHMEN_HOME=$(mktemp -d)
+          unset OPENROUTER_API_KEY
+          uv run pytest tests/ -q

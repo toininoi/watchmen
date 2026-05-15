@@ -443,13 +443,15 @@ watchmen/
 
 ## Tests
 
-Cold-start smoke tests live at `tests/smoke.py`. They catch the bugs that only show up on a fresh install (no `state.db`, no corpus) and the bugs that silently misprice tokens. No pytest dep — runs as a plain script.
+Pytest-driven, no network. Smoke + regression coverage at `tests/test_smoke.py`, per-adapter tests at `tests/test_adapter_*.py`, OpenRouter agent loop with mocked httpx at `tests/test_agent.py`.
 
 ```bash
-uv run python tests/smoke.py
+uv sync --extra dev          # install pytest + pytest-cov once
+uv run pytest tests/         # full suite (~4s)
+uv run pytest --cov=watchmen # with coverage
 ```
 
-CI runs the same command on every push to `main` and every PR (`.github/workflows/test.yml`). If you change anything in `state.py`, `metrics.py`, `corpus.py`, or `onboard.py`, expect the smoke test to gate the merge.
+CI runs `pytest tests/` on every push to `main` and every PR (`.github/workflows/ci.yml`) across ubuntu × macos × py3.11/3.12. If you change anything in `state.py`, `metrics.py`, `corpus.py`, or `onboard.py`, expect the suite to gate the merge.
 
 ## License
 
