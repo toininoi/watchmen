@@ -1957,7 +1957,7 @@ def test_pin_unpin_drop_restore_roundtrip():
     """Pin/unpin and drop/restore must roundtrip cleanly and remove the
     underlying file when the list becomes empty. Drop must also delete the
     bundle dir on disk so `watchmen show` no longer lists the skill."""
-    from watchmen import cli
+    from watchmen import cli, util
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         proj_dir = _fake_curated_bundle(td_path, "fakeproj")
@@ -1969,7 +1969,7 @@ def test_pin_unpin_drop_restore_roundtrip():
             cli.cmd_pin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
             pinned_path = proj_dir / "_pinned.json"
             assert pinned_path.exists()
-            assert cli._read_skill_list("fakeproj", "_pinned.json") == {"lint-fixer"}
+            assert util.read_skill_list("fakeproj", "_pinned.json") == {"lint-fixer"}
 
             # pin again — idempotent, no error
             rc = cli.cmd_pin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
@@ -1978,7 +1978,7 @@ def test_pin_unpin_drop_restore_roundtrip():
             # pin by display name resolves to slug
             cli.cmd_unpin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
             cli.cmd_pin(_ap.Namespace(project="fakeproj", skill="Lint Fixer"))
-            assert cli._read_skill_list("fakeproj", "_pinned.json") == {"lint-fixer"}
+            assert util.read_skill_list("fakeproj", "_pinned.json") == {"lint-fixer"}
 
             # unpin clears the list → file deleted (no empty `[]` left behind)
             cli.cmd_unpin(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
@@ -1989,7 +1989,7 @@ def test_pin_unpin_drop_restore_roundtrip():
             assert skill_dir.exists()
             cli.cmd_drop(_ap.Namespace(project="fakeproj", skill="lint-fixer"))
             assert not skill_dir.exists(), "drop must remove the bundle dir"
-            assert cli._read_skill_list("fakeproj", "_blocklist.json") == {"lint-fixer"}
+            assert util.read_skill_list("fakeproj", "_blocklist.json") == {"lint-fixer"}
 
             # restore: blocklist cleared, file removed (bundle is NOT recreated
             # — that's the curator's job on the next run)
@@ -2431,9 +2431,11 @@ def test_rorschach_inkblots_are_mirror_symmetric():
     is `<left><gap><right>` where right is the mirror of left under a small
     character-flip table. We just verify the visual halves match by length and
     that the pool has enough variety for `random.choice` to feel different."""
-    from watchmen import cli
-    assert len(cli._RORSCHACH_BLOTS) >= 6, "pool too small for visible rotation"
-    for blot in cli._RORSCHACH_BLOTS:
+    # Moved from cli into commands.inspect during the Phase 3 split — same
+    # invariants, new home.
+    from watchmen.commands import inspect
+    assert len(inspect._RORSCHACH_BLOTS) >= 6, "pool too small for visible rotation"
+    for blot in inspect._RORSCHACH_BLOTS:
         # Each blot is "<half>  <half>" (two halves separated by spaces) — both
         # halves must be the same length, and at least one cell each.
         halves = blot.split("  ")
@@ -2441,7 +2443,7 @@ def test_rorschach_inkblots_are_mirror_symmetric():
         left, right = halves
         assert len(left) == len(right) and len(left) >= 2, f"asymmetric blot: {blot!r}"
     # And the function itself returns something from the pool.
-    assert cli._rorschach_inkblot() in cli._RORSCHACH_BLOTS
+    assert inspect._rorschach_inkblot() in inspect._RORSCHACH_BLOTS
 
 
 def test_config_viewer_port_reads_env_then_file_then_default():

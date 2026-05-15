@@ -267,3 +267,24 @@ def available_skills(project: str) -> list[str]:
     if not skills_dir.exists():
         return []
     return sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
+
+
+# ─── CHANGELOG.md discovery ────────────────────────────────────────────────
+
+
+def find_changelog() -> Path | None:
+    """Return the CHANGELOG.md path, or None if it isn't bundled.
+
+    Installed wheel layout: force-included at watchmen/CHANGELOG.md → sits
+    next to cli.py. Source-checkout layout: lives at the repo root, two
+    parents above src/watchmen/. Both `watchmen changelog` (interactive
+    render) and the version-bump notification on first run after a pull
+    use this lookup.
+    """
+    # Import lazily to dodge a cli → util cycle; this matches bundle_base
+    # — see _cli_root_pair above for why.
+    from watchmen import cli
+    for candidate in (cli.ROOT / "CHANGELOG.md", cli.ROOT.parents[1] / "CHANGELOG.md"):
+        if candidate.exists():
+            return candidate
+    return None
