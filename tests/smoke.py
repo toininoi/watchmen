@@ -165,7 +165,6 @@ def test_codex_adapter_parses_fixture():
     response_item + event_msg/user_message dedupe (count once), per-turn cost from
     last_token_usage (not cumulative), function_call + custom_tool_call as tool uses,
     reasoning blocks as thinking. If counts drift, the adapter regressed."""
-    from pathlib import Path
 
     from watchmen.adapters import codex
 
@@ -2351,7 +2350,6 @@ def test_cli_insights_save_view_list_roundtrip():
             # 5. Non-tty + cache present → _decide_digest_action returns "view"
             #    (refuses to silently spend API credit). stdin in the test
             #    harness is never a tty, so this asserts the safe default.
-            import argparse as _ap
             from rich.console import Console as _C
             class _Args:
                 regenerate = False

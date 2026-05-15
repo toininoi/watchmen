@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs of the same workflow on the same branch when a
+# new commit lands — saves CI minutes on rapid push cadences.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Install ruff
+        run: uv tool install ruff
+      - name: Lint
+        run: uv tool run ruff check src/watchmen tests
+      # Format checking is informational for now — gives contributors a
+      # heads-up about diffs without gating merge. Phase 3 will enforce it
+      # once the codebase has been formatted in a single focused PR.
+      - name: Format diff (informational)
+        run: uv tool run ruff format --check --diff src/watchmen tests || true
+
+  smoke:
+    name: smoke (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: uv sync
+      - name: Run smoke tests
+        run: uv run python tests/smoke.py

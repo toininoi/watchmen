@@ -8,7 +8,6 @@ make_tools(...) which returns a dict of (specs, handlers) ready to pass to Agent
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
 
 from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR
 
@@ -191,7 +190,7 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
             return f"ERROR: not found: {file_path}"
         content = target.read_text(encoding="utf-8")
         if len(content) > max_chars:
-            content = content[:max_chars] + f"\n[... truncated ...]"
+            content = content[:max_chars] + "\n[... truncated ...]"
         return content
 
     def append_curation_log(entry: str) -> str:

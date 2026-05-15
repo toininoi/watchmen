@@ -2,7 +2,6 @@ import json
 import re
 import sqlite3
 import sys
-from pathlib import Path
 
 from watchmen.paths import EVENTS_DB
 

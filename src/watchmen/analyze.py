@@ -13,9 +13,7 @@ Usage:
 
 import argparse
 import json
-import os
 import sqlite3
-import sys
 import time
 from pathlib import Path
 from textwrap import dedent

@@ -48,3 +48,22 @@ include = [
     "LICENSE",
     "pyproject.toml",
 ]
+
+# ─── Linting / formatting ─────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Minimal starter set — catches real bugs without flooding the repo with
+# cosmetic changes:
+#   F    — pyflakes (undefined names, unused imports/variables, real bugs)
+#   E9   — syntax errors and IO errors
+# Stylistic + modernization rules are deliberately off for now; Phase 3
+# will ratchet up (add B for bugbear, UP for pyupgrade, I for isort) and
+# pay the import-sort + datetime-utc cleanup cost in a focused PR.
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/watchmen/__init__.py" = ["F401"]   # re-exports for public API

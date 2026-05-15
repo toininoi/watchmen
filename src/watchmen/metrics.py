@@ -482,7 +482,6 @@ def activity_calendar(project_key: str, weeks: int = 26) -> list[tuple[str, int]
     project_dir = _project_dir_for_key(project_key)
     if not project_dir or not CORPUS_DB.exists():
         return []
-    days = weeks * 7
     today = date.today()
     # Sunday-align: roll back to the Sunday of this week, then go N-1 weeks back.
     # weekday(): Mon=0..Sun=6 → days to subtract to reach Sunday

@@ -427,7 +427,7 @@ if __name__ == "__main__":
 
     if len(sys.argv) < 2:
         print("usage: python model_prices.py <model_name>")
-        print(f"       python model_prices.py --list")
+        print("       python model_prices.py --list")
         sys.exit(1)
 
     cmd = sys.argv[1]

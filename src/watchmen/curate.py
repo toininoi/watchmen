@@ -32,7 +32,7 @@ from textwrap import dedent
 import httpx
 
 from watchmen.agent import Agent, load_api_key
-from watchmen.cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers, write_cache
+from watchmen.cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers
 from watchmen.paths import BUNDLES_DIR
 from watchmen.tools_lib import make_tools
 
@@ -931,7 +931,8 @@ def main():
              "for user review instead of dropping straight into skills/")
     args = parser.parse_args()
 
-    api_key = load_api_key()
+    # Fail fast if no API key — the agents will need it later anyway.
+    load_api_key()
     out_dir = BUNDLES_DIR / args.project
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "_run.log"

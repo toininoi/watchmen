@@ -1007,7 +1007,7 @@ def cmd_settings_port(args) -> int:
         source = "default" if current == config.VIEWER_DEFAULT_PORT and not config.read_env_var("WATCHMEN_VIEWER_PORT") else "config"
         console.print(f"viewer port: [bold]{current}[/] [dim]({source})[/]")
         if source == "default":
-            console.print(f"  [dim]set with: watchmen settings port <N>[/]")
+            console.print("  [dim]set with: watchmen settings port <N>[/]")
         return 0
 
     try:
@@ -1016,7 +1016,7 @@ def cmd_settings_port(args) -> int:
         console.print(f"[red]✗[/] port must be an integer (got {args.value!r})")
         return 1
     if not (1024 <= port <= 65535):
-        console.print(f"[red]✗[/] port must be in 1024–65535")
+        console.print("[red]✗[/] port must be in 1024–65535")
         return 1
 
     path = config.write_env_var("WATCHMEN_VIEWER_PORT", str(port))
@@ -1027,7 +1027,7 @@ def cmd_settings_port(args) -> int:
     try:
         from watchmen import launchd_setup
         if launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL):
-            console.print(f"  [yellow]![/] viewer launchd agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
+            console.print("  [yellow]![/] viewer launchd agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
     except Exception:
         pass
     return 0
@@ -1404,7 +1404,8 @@ def cmd_why(args) -> int:
 
     This is the trust-building command — without it, every skill is "trust me,
     this is from your data" with no way to verify."""
-    import sqlite3, json as _json
+    import sqlite3
+    import json as _json
     proj_dir = _bundle_dir(args.project)
     candidates_path = proj_dir / "_candidates.json"
     if not candidates_path.exists():
@@ -1648,7 +1649,7 @@ def cmd_learn(args) -> int:
     # 1. Analyst — incremental by default, so only new days get processed.
     #    If nothing new and we're not --full, bail cheaply.
     if new_prompts == 0:
-        print(_dim(f"  no new prompts to analyze."))
+        print(_dim("  no new prompts to analyze."))
         if not args.full:
             print(_dim(f"  use --full to refresh CLAUDE.md anyway, or `watchmen show {args.project} CLAUDE.md` to view current."))
             return 0
@@ -1674,7 +1675,7 @@ def cmd_learn(args) -> int:
 
     print()
     if rc == 0:
-        print(_green(f"  ✓ learn complete"))
+        print(_green("  ✓ learn complete"))
         print(_dim(f"  view: watchmen show {args.project} CLAUDE.md"))
         if not args.full:
             print(_dim(f"  for new skills: watchmen learn {args.project} --full"))
@@ -1892,7 +1893,7 @@ def cmd_pin(args) -> int:
     path = _write_skill_list(args.project, _PINNED_FILE, pinned)
     print(_green(f"✓ pinned {slug}"))
     print(_dim(f"  wrote → {path}"))
-    print(_dim(f"  the next curator run will skip re-curating this skill"))
+    print(_dim("  the next curator run will skip re-curating this skill"))
     return 0
 
 
@@ -2028,6 +2029,7 @@ def cmd_doctor(args) -> int:
     except Exception:
         daemon_loaded = viewer_loaded = False
     row("daemon (launchd)", daemon_loaded, "loaded" if daemon_loaded else "not loaded — `watchmen daemon install`", severity="warn")
+    row("viewer (launchd)", viewer_loaded, "loaded" if viewer_loaded else "not loaded — `watchmen viewer install`", severity="warn")
 
     # 5. viewer responding
     try:
@@ -2042,7 +2044,8 @@ def cmd_doctor(args) -> int:
 
     # 6. hooks installed
     try:
-        import hooks_setup, json as _json
+        from watchmen import hooks_setup
+        import json as _json
         settings = _json.loads(hooks_setup.SETTINGS_FILE.read_text()) if hooks_setup.SETTINGS_FILE.exists() else {}
         wired = sum(
             1 for entries in (settings.get("hooks") or {}).values()
