@@ -404,7 +404,10 @@ def test_settings_parser_validates_inputs():
     # repo: must point at an existing directory.
     col, val = cli._parse_setting("repo", str(ROOT))
     assert col == "source_repo"
-    assert val.endswith("watchmen")
+    # _parse_setting resolves to an absolute path; just verify it round-trips
+    # against ROOT (was previously `endswith("watchmen")`, which broke when
+    # tests ran from a git worktree under a differently-named directory).
+    assert val == str(ROOT.resolve()), f"expected {ROOT.resolve()}, got {val}"
     try:
         cli._parse_setting("repo", "/tmp/_no_such_dir_for_smoke_test")
         raise AssertionError("expected ValueError on missing repo path")
