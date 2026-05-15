@@ -17,8 +17,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from adapters import ADAPTERS
-from paths import CORPUS_DB
+from watchmen.adapters import ADAPTERS
+from watchmen.paths import CORPUS_DB
 
 ROOT = Path(__file__).parent
 DB_PATH = CORPUS_DB

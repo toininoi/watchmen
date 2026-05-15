@@ -12,8 +12,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from corpus_filters import substantive_filter
-from paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
+from watchmen.corpus_filters import substantive_filter
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
 
 ROOT = Path(__file__).parent
 

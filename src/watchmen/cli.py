@@ -33,9 +33,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import config
-import state
-from paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
+from watchmen import config
+from watchmen import state
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
 
 ROOT = Path(__file__).parent
 SOURCE_ROOT = Path(__file__).parent
@@ -69,7 +69,12 @@ class WatchmenParser(argparse.ArgumentParser):
 
 
 def _version() -> str:
-    """Read version from package metadata if installed, else parse pyproject.toml."""
+    """Read version from package metadata if installed, else parse pyproject.toml.
+
+    Two source-tree layouts: editable install (ROOT = src/watchmen/, pyproject
+    two levels up) and dev checkout pre-install (same layout). We try both
+    plausible locations before giving up.
+    """
     try:
         from importlib.metadata import version as _v
         return _v("watchmen")
@@ -77,10 +82,13 @@ def _version() -> str:
         pass
     try:
         import tomllib  # 3.11+
-        with (ROOT / "pyproject.toml").open("rb") as fh:
-            return tomllib.load(fh)["project"]["version"]
+        for candidate in (ROOT / "pyproject.toml", ROOT.parents[1] / "pyproject.toml"):
+            if candidate.exists():
+                with candidate.open("rb") as fh:
+                    return tomllib.load(fh)["project"]["version"]
     except Exception:
-        return "0.0.0"
+        pass
+    return "0.0.0"
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -392,8 +400,8 @@ def _show_release_notes_if_bumped(*, interactive: bool | None = None) -> None:
         last_seen = tracker.read_text().strip() if tracker.exists() else None
         if last_seen == current:
             return  # already announced this version
-        changelog_path = ROOT / "CHANGELOG.md"
-        if not changelog_path.exists():
+        changelog_path = _find_changelog()
+        if changelog_path is None:
             tracker.write_text(current)
             return
         entries = _new_changelog_entries(
@@ -418,14 +426,26 @@ def _show_release_notes_if_bumped(*, interactive: bool | None = None) -> None:
         pass
 
 
+def _find_changelog() -> Path | None:
+    """Return the CHANGELOG.md path or None.
+
+    Installed wheel: force-included at watchmen/CHANGELOG.md → next to cli.py.
+    Source checkout: lives at the repo root, two parents above src/watchmen/.
+    """
+    for candidate in (ROOT / "CHANGELOG.md", ROOT.parents[1] / "CHANGELOG.md"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def cmd_changelog(args) -> int:
     """`watchmen changelog` — render CHANGELOG.md anytime. Handy when the
     auto-announcement scrolled off the user's terminal or they want to
     re-read what landed in an older version."""
     from rich.console import Console
     from rich.markdown import Markdown
-    changelog_path = ROOT / "CHANGELOG.md"
-    if not changelog_path.exists():
+    changelog_path = _find_changelog()
+    if changelog_path is None:
         print("CHANGELOG.md not present in this checkout.")
         return 1
     console = Console()
@@ -635,7 +655,7 @@ def cmd_sync(args) -> int:
 
 def cmd_ingest(args) -> int:
     print(_dim("Running corpus.py scan..."))
-    r = subprocess.run([sys.executable, str(ROOT / "corpus.py"), "scan"], cwd=str(ROOT))
+    r = subprocess.run([sys.executable, "-m", "watchmen.corpus", "scan"], cwd=str(ROOT))
     return r.returncode
 
 
@@ -660,7 +680,7 @@ def cmd_analyze(args) -> int:
             print(_green(f"{args.project}: already up to date (last analyst day: {from_day})"))
             return 0
 
-    cmd = [sys.executable, str(ROOT / "analyze.py"), "-p", args.project, "--model", args.model]
+    cmd = [sys.executable, "-m", "watchmen.analyze", "-p", args.project, "--model", args.model]
     if from_day:
         cmd.extend(["--from-day", from_day])
 
@@ -689,7 +709,7 @@ def cmd_curate(args) -> int:
         print(f"ERROR: project '{args.project}' not tracked.")
         return 1
 
-    cmd = [sys.executable, str(ROOT / "curate.py"),
+    cmd = [sys.executable, "-m", "watchmen.curate",
            "--project", args.project, "--repo", proj["source_repo"], "--model", args.model]
     if args.regen_claude:
         cmd.extend(["--skip-finder", "--skip-skills"])
@@ -751,85 +771,85 @@ def cmd_config(args) -> int:
 
 def cmd_viewer(args) -> int:
     state.init_db()
-    from viewer.server import serve
+    from watchmen.viewer.server import serve
     serve(host=args.host, port=args.port)
     return 0
 
 
 def cmd_daemon(args) -> int:
-    import daemon as _daemon
+    from watchmen import daemon as _daemon
     return _daemon.run(args)
 
 
 def cmd_install_daemon(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.install_daemon(model=args.model, interval=args.interval, dry_run=args.dry_run)
 
 
 def cmd_install_viewer(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.install_viewer(host=args.host, port=args.port, dry_run=args.dry_run)
 
 
 def cmd_uninstall_daemon(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.uninstall_daemon()
 
 
 def cmd_uninstall_viewer(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.uninstall_viewer()
 
 
 def cmd_launchd_status(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.status()
 
 
 def cmd_install_hooks(args) -> int:
-    import hooks_setup
+    from watchmen import hooks_setup
     return hooks_setup.install()
 
 
 def cmd_uninstall_hooks(args) -> int:
-    import hooks_setup
+    from watchmen import hooks_setup
     return hooks_setup.uninstall()
 
 
 def cmd_hooks_status(args) -> int:
-    import hooks_setup
+    from watchmen import hooks_setup
     return hooks_setup.status()
 
 
 def cmd_update_plugin(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.update_marketplace()
 
 
 def cmd_install_statusline(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.install_statusline(force=args.force)
 
 
 def cmd_uninstall_statusline(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.uninstall_statusline()
 
 
 def cmd_plugin_status(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.status()
 
 
 def cmd_onboard(args) -> int:
-    import onboard
+    from watchmen import onboard
     return onboard.run()
 
 
 def cmd_reonboard(args) -> int:
     """Re-run the onboarding wizard. Same code path as `onboard` — onboard.run()
     is already idempotent (existing projects show up tracked, get refreshed)."""
-    import onboard
+    from watchmen import onboard
     print(_dim("Re-running onboarding wizard. Tracked projects survive — new ones are added."))
     return onboard.run()
 
@@ -1005,7 +1025,7 @@ def cmd_settings_port(args) -> int:
     # The launchd plist is baked at install time — port changes don't propagate
     # until reinstall. Make the next step obvious.
     try:
-        import launchd_setup
+        from watchmen import launchd_setup
         if launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL):
             console.print(f"  [yellow]![/] viewer launchd agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
     except Exception:
@@ -2002,7 +2022,7 @@ def cmd_doctor(args) -> int:
 
     # 4. daemon launchd state
     try:
-        import launchd_setup
+        from watchmen import launchd_setup
         daemon_loaded = launchd_setup._is_loaded(launchd_setup.DAEMON_LABEL)
         viewer_loaded = launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL)
     except Exception:
@@ -2129,12 +2149,12 @@ def cmd_logs(args) -> int:
 def cmd_init(args) -> int:
     """Alias for onboard — `init` is the discoverable name; `onboard` kept as a
     hidden alias for muscle memory."""
-    import onboard
+    from watchmen import onboard
     return onboard.run()
 
 
 def cmd_metrics(args) -> int:
-    import metrics as _metrics
+    from watchmen import metrics as _metrics
     from rich.console import Console
     from rich.table import Table
 
@@ -2194,7 +2214,7 @@ def _cmd_metrics_global(args) -> int:
     """Global rollup across all tracked projects. Aggregates tokens/cost from
     metrics.daily_metrics per project + adapter session counts from corpus.db.
     Shown when `watchmen metrics` is invoked without a project arg."""
-    import metrics as _metrics
+    from watchmen import metrics as _metrics
     from rich.console import Console
     from rich.table import Table
     state.init_db()
@@ -2295,7 +2315,7 @@ def cmd_insights(args) -> int:
     call, fully local."""
     import json
     import sqlite3
-    import metrics as _metrics
+    from watchmen import metrics as _metrics
     from rich.console import Console
     from rich.table import Table
 
@@ -2887,7 +2907,7 @@ def _one_shot_llm(
     error (missing key, network, malformed response). Never raises so
     callers can run inside a parallel dispatcher without aborting peers."""
     try:
-        import agent as _ag
+        from watchmen import agent as _ag
         import httpx
         api_key = _ag.load_api_key()
     except Exception:
@@ -3115,7 +3135,7 @@ def _bare_default() -> int:
     `init` nudge; users with state see `status` directly."""
     if _is_first_run():
         try:
-            import banner
+            from watchmen import banner
             from rich.console import Console
             banner.render(Console())
         except Exception:
@@ -3391,7 +3411,7 @@ def main(argv: list[str] | None = None) -> int:
     # is current. Means users only need to pull + rerun to pick up schema
     # changes; no separate `watchmen ingest --full` step required.
     try:
-        import corpus as _corpus
+        from watchmen import corpus as _corpus
         _corpus.migrate_schema()
     except Exception:
         pass

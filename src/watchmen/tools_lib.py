@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR
 
 ROOT = Path(__file__).parent
 

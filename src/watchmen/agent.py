@@ -19,21 +19,16 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 def load_api_key() -> str:
     if k := os.environ.get("OPENROUTER_API_KEY"):
         return k
-    # Fallbacks in priority order:
-    # 1. <project_root>/.env
-    # 2. ~/.config/watchmen/.env
-    candidates = [
-        Path(__file__).parent / ".env",
-        Path.home() / ".config" / "watchmen" / ".env",
-    ]
-    for env_path in candidates:
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                if line.startswith("OPENROUTER_API_KEY="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    # Canonical location written by `watchmen settings api-key set` and read
+    # by every agent in the pipeline. The wizard chmods this 0600.
+    env_path = Path.home() / ".config" / "watchmen" / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith("OPENROUTER_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
     raise RuntimeError(
-        "OPENROUTER_API_KEY not set. Either `export OPENROUTER_API_KEY=...` or put it in "
-        ".env at the watchmen project root or ~/.config/watchmen/.env"
+        "OPENROUTER_API_KEY not set. Either `export OPENROUTER_API_KEY=...` or "
+        "run `watchmen settings api-key set <key>` (writes ~/.config/watchmen/.env)."
     )
 
 

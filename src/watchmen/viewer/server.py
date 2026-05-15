@@ -10,9 +10,9 @@ import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
-from paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, STATE_DB
+from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, STATE_DB
 
-ROOT = Path(__file__).parent.parent  # watchmen/
+ROOT = Path(__file__).parent.parent  # src/watchmen/
 ANALYSES = ANALYSES_DIR
 BUNDLES = BUNDLES_DIR
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -283,8 +283,7 @@ def insights_page(request: Request):
     aggregate hour-of-day heatmap) that don't fit a terminal."""
     import json as _json
     import sys as _sys
-    import metrics as _metrics
-
+    from watchmen import metrics as _metrics
     # Reach into cli.py for the friction-signal + adapter helpers + the
     # digest cache reader. Keeps the viewer thin without duplicating those
     # SQL queries / parser helpers.
@@ -294,8 +293,7 @@ def insights_page(request: Request):
     state_init = getattr(__import__("state"), "init_db", None)
     if state_init:
         state_init()
-    import state as _state
-
+    from watchmen import state as _state
     projects = _state.list_projects()
     base = BUNDLES
 
@@ -433,8 +431,7 @@ def insights_page(request: Request):
 
 @app.get("/metrics", response_class=HTMLResponse)
 def metrics_all(request: Request, tracked: int = 0):
-    import metrics as _metrics
-
+    from watchmen import metrics as _metrics
     tracked_only = bool(tracked)
     rows = _metrics.daily_metrics_all(days=30, tracked_only=tracked_only)
     last7 = _metrics.summarize_window(rows, 7)
@@ -480,8 +477,7 @@ def metrics_all(request: Request, tracked: int = 0):
 
 @app.get("/p/{project_key}/metrics", response_class=HTMLResponse)
 def project_metrics(request: Request, project_key: str):
-    import metrics as _metrics
-
+    from watchmen import metrics as _metrics
     rows = _metrics.daily_metrics(project_key, days=30)
     last7 = _metrics.summarize_window(rows, 7)
     last30 = _metrics.summarize_window(rows, 30)
@@ -609,13 +605,12 @@ def project_diff(request: Request, project_key: str, sha: str):
 
 
 def serve(host: str | None = None, port: int | None = None):
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import config
     import uvicorn
+
+    from watchmen import config
     host = host or config.VIEWER_DEFAULT_HOST
     port = port if port is not None else config.viewer_port()
-    print(f"\n  🌐 watchmen viewer running at http://{host}:{port}\n", flush=True)
+    print(f"\n  watchmen viewer running at http://{host}:{port}\n", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

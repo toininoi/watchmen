@@ -5,7 +5,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
-from paths import EVENTS_DB, EVENTS_JSONL
+from watchmen.paths import EVENTS_DB, EVENTS_JSONL
 
 ROOT = Path(__file__).parent
 DB_PATH = EVENTS_DB

@@ -33,7 +33,7 @@ from typing import Optional
 
 import httpx
 
-from paths import WATCHMEN_HOME
+from watchmen.paths import WATCHMEN_HOME
 
 # ─── API endpoint ──────────────────────────────────────────────────────────
 
@@ -152,7 +152,7 @@ def _get_api_key() -> Optional[str]:
     """Get OpenRouter API key from env or config."""
     if k := os.environ.get("OPENROUTER_API_KEY"):
         return k
-    from config import read_env_var
+    from watchmen.config import read_env_var
     return read_env_var("OPENROUTER_API_KEY")
 
 

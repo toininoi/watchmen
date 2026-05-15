@@ -17,8 +17,8 @@ import sys
 import webbrowser
 from pathlib import Path
 
-import config
-from paths import CORPUS_DB
+from watchmen import config
+from watchmen.paths import CORPUS_DB
 
 from rich.console import Console
 from rich.panel import Panel
@@ -42,7 +42,7 @@ def _step(console: Console, n: int, total: int, title: str) -> None:
 
 
 def show_welcome(console: Console, total_steps: int) -> None:
-    import banner
+    from watchmen import banner
     banner.render(console)
     body = Text.from_markup(
         "[bold]watchmen[/] mines your Claude Code session history, ships skill\n"
@@ -59,13 +59,11 @@ def show_welcome(console: Console, total_steps: int) -> None:
 def _have_openrouter_key() -> bool:
     if os.environ.get("OPENROUTER_API_KEY"):
         return True
-    for c in [ROOT / ".env", Path.home() / ".config" / "watchmen" / ".env"]:
-        try:
-            if c.exists() and "OPENROUTER_API_KEY=" in c.read_text():
-                return True
-        except OSError:
-            continue
-    return False
+    env_path = Path.home() / ".config" / "watchmen" / ".env"
+    try:
+        return env_path.exists() and "OPENROUTER_API_KEY=" in env_path.read_text()
+    except OSError:
+        return False
 
 
 def _prompt_for_openrouter_key(console: Console) -> bool:
@@ -132,7 +130,7 @@ def run_ingest(console: Console) -> bool:
     rc = stream_subprocess(
         console,
         "Reading ~/.claude/projects/ into corpus.db",
-        [sys.executable, str(ROOT / "corpus.py"), "scan"],
+        [sys.executable, "-m", "watchmen.corpus", "scan"],
     )
     if rc != 0:
         return False
@@ -148,7 +146,7 @@ def run_ingest(console: Console) -> bool:
 
 
 def project_candidates(console: Console) -> list[dict]:
-    import state
+    from watchmen import state
     detected = state.auto_detect_projects()
     tracked = {p["project_key"]: p for p in state.list_projects()}
 
@@ -279,13 +277,13 @@ def run_analyze(console: Console, project_key: str) -> bool:
     rc = stream_subprocess(
         console,
         f"Analyzing {project_key}",
-        [sys.executable, str(ROOT / "analyze.py"), "--project", project_key],
+        [sys.executable, "-m", "watchmen.analyze", "--project", project_key],
     )
     return rc == 0
 
 
 def run_curate(console: Console, project_key: str) -> bool:
-    import state
+    from watchmen import state
     proj = state.get_project(project_key)
     if not proj:
         console.print(f"[red]✗[/] {project_key} not tracked, can't curate")
@@ -293,7 +291,7 @@ def run_curate(console: Console, project_key: str) -> bool:
     rc = stream_subprocess(
         console,
         f"Curating {project_key}",
-        [sys.executable, str(ROOT / "curate.py"), "--project", project_key, "--repo", proj["source_repo"]],
+        [sys.executable, "-m", "watchmen.curate", "--project", project_key, "--repo", proj["source_repo"]],
     )
     return rc == 0
 
@@ -316,7 +314,7 @@ def _run_pipeline_silent(project_key: str, source_repo: str, console: Console, l
     console.print(f"  {label} [bold]{project_key}[/]: analyst started")
     t0 = _t.time()
     r = subprocess.run(
-        [sys.executable, str(ROOT / "analyze.py"), "--project", project_key],
+        [sys.executable, "-m", "watchmen.analyze", "--project", project_key],
         cwd=str(ROOT), capture_output=True, text=True,
     )
     result["analyst_secs"] = _t.time() - t0
@@ -332,7 +330,7 @@ def _run_pipeline_silent(project_key: str, source_repo: str, console: Console, l
     console.print(f"  {label} [bold]{project_key}[/]: curator started")
     t0 = _t.time()
     r = subprocess.run(
-        [sys.executable, str(ROOT / "curate.py"), "--project", project_key, "--repo", source_repo],
+        [sys.executable, "-m", "watchmen.curate", "--project", project_key, "--repo", source_repo],
         cwd=str(ROOT), capture_output=True, text=True,
     )
     result["curator_secs"] = _t.time() - t0
@@ -357,8 +355,7 @@ def run_pipeline_parallel(console: Console, selected: list, concurrency: int = 3
     critic-per-skill = ~24 OpenRouter calls in flight. Comfortable for
     deepseek-v4-flash rate limits."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    import state
-
+    from watchmen import state
     console.print(f"\nRunning {len(selected)} projects in parallel (concurrency={concurrency})…\n")
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -383,7 +380,7 @@ def run_pipeline_parallel(console: Console, selected: list, concurrency: int = 3
 
 def install_autostart(console: Console) -> None:
     if Confirm.ask("\nInstall launchd autostart for daemon + viewer?", default=True):
-        import launchd_setup
+        from watchmen import launchd_setup
         launchd_setup.install_daemon()
         launchd_setup.install_viewer()
     else:
@@ -391,7 +388,7 @@ def install_autostart(console: Console) -> None:
 
 
 def install_hooks_if_wanted(console: Console) -> None:
-    import hooks_setup
+    from watchmen import hooks_setup
     if Confirm.ask("\nWire Claude Code hooks (real-time event capture)?", default=True):
         hooks_setup.install()
     else:
@@ -436,7 +433,7 @@ def run() -> int:
 
     # First-install safety: state.db won't have its schema yet on a totally
     # fresh clone. init_db is idempotent (CREATE TABLE IF NOT EXISTS).
-    import state
+    from watchmen import state
     state.init_db()
 
     show_welcome(console, TOTAL)
@@ -463,7 +460,7 @@ def run() -> int:
         return 0
 
     _step(console, 4, TOTAL, "Track + run the pipeline")
-    import state
+    from watchmen import state
     for proj in selected:
         repo = prompt_for_repo(console, proj)
         if not repo:

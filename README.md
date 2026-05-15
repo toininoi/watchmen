@@ -148,7 +148,7 @@ If you'd rather drive the steps by hand instead of via the wizard:
 watchmen hooks install
 
 # 2. Start the hook server in a long-lived terminal (captures every session event)
-uv run python server.py
+uv run python -m watchmen.server
 # Leave this running. Or run in tmux/screen.
 
 # 3. In another terminal: build the historical corpus
@@ -409,24 +409,26 @@ Other roadmap items: diff view in the web UI (generated CLAUDE.md vs the repo's 
 
 ```
 watchmen/
-├── cli.py                  # `watchmen` CLI entry
-├── agent.py                # shared OpenRouter tool-calling agent loop
-├── state.py                # state.db schema + helpers (run tracking, project state)
-├── tools_lib.py            # shared tool implementations for agents
-├── analyze.py              # longitudinal per-day analyst
-├── curate.py               # 4-stage skill + CLAUDE.md curator
-├── corpus.py               # ingest ~/.claude/projects/*.jsonl → corpus.db
-├── server.py               # hook server (you run this in a terminal)
-├── daemon.py               # scheduling loop
-├── view.py                 # CLI event browser (low-level)
-├── transcript.py           # CLI transcript renderer (low-level)
-├── viewer/                 # FastAPI web dashboard
-│   ├── server.py
-│   └── templates/
-├── hooks/
-│   └── watchmen_observe.sh # POSTs hook stdin → localhost:8765
-├── hooks_setup.py          # install-hooks / uninstall-hooks
-├── launchd_setup.py        # install-daemon / install-viewer launchd integration
+├── src/watchmen/             # Python package (src layout to avoid site-packages collisions)
+│   ├── cli.py                # `watchmen` CLI entry
+│   ├── agent.py              # shared OpenRouter tool-calling agent loop
+│   ├── state.py              # state.db schema + helpers (run tracking, project state)
+│   ├── tools_lib.py          # shared tool implementations for agents
+│   ├── analyze.py            # longitudinal per-day analyst
+│   ├── curate.py             # 4-stage skill + CLAUDE.md curator
+│   ├── corpus.py             # ingest ~/.claude/projects/*.jsonl → corpus.db
+│   ├── server.py             # hook capture server (`python -m watchmen.server`)
+│   ├── daemon.py             # scheduling loop
+│   ├── view.py               # CLI event browser (low-level)
+│   ├── transcript.py         # CLI transcript renderer (low-level)
+│   ├── viewer/               # FastAPI web dashboard + Jinja templates
+│   ├── adapters/             # cc / cd / pi adapters for the corpus ingest path
+│   ├── hooks/                # watchmen_observe.sh — POSTs hook stdin → localhost:8765
+│   ├── hooks_setup.py        # install / uninstall the Claude Code hook entries
+│   └── launchd_setup.py      # install / uninstall the daemon + viewer launchd agents
+├── plugin/                   # Claude Code plugin (separate distribution)
+├── tests/                    # pytest-runnable smoke suite (Phase 5: full pytest port)
+├── CHANGELOG.md
 └── pyproject.toml
 ```
 

@@ -22,8 +22,8 @@ from textwrap import dedent
 
 import httpx
 
-from corpus_filters import substantive_filter
-from paths import ANALYSES_DIR, CORPUS_DB
+from watchmen.corpus_filters import substantive_filter
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB
 
 ROOT = Path(__file__).parent
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -33,7 +33,7 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 def load_api_key() -> str:
     # Use the same lookup as agent.py: env → repo-local .env → ~/.config/watchmen/.env.
     # Kept as a thin wrapper so analyze.py stays self-runnable from CLI.
-    from agent import load_api_key as _load
+    from watchmen.agent import load_api_key as _load
     return _load()
 
 
@@ -43,7 +43,7 @@ def _tracked_source_repo(project_key: str | None) -> str | None:
     if not project_key:
         return None
     try:
-        import state
+        from watchmen import state
         state.init_db()
         proj = state.get_project(project_key)
         return proj.get("source_repo") if proj else None

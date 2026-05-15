@@ -19,8 +19,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
-from paths import CORPUS_DB, STATE_DB
-from model_prices import price_for_model as price_for_model_from_api, turn_cost_usd as turn_cost_usd_from_api
+from watchmen.paths import CORPUS_DB, STATE_DB
+from watchmen.model_prices import price_for_model as price_for_model_from_api, turn_cost_usd as turn_cost_usd_from_api
 
 ROOT = Path(__file__).parent
 SUGGESTIONS_LOG = Path.home() / ".watchmen" / "suggestions.jsonl"
@@ -465,7 +465,7 @@ def activity_by_hour_dow_all(days: int = 90, tracked_only: bool = False) -> list
 def per_project_totals(days: int = 30) -> list[dict]:
     """Per-project rollup over the window, sorted by cost descending.
     Used in the aggregated metrics page to show which projects drive the totals."""
-    import state as _state
+    from watchmen import state as _state
     out = []
     for p in _state.list_projects():
         rows = daily_metrics(p["project_key"], days=days)

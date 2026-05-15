@@ -26,15 +26,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-import config
+from watchmen import config
 from textwrap import dedent
 
 import httpx
 
-from agent import Agent, load_api_key
-from cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers, write_cache
-from paths import BUNDLES_DIR
-from tools_lib import make_tools
+from watchmen.agent import Agent, load_api_key
+from watchmen.cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers, write_cache
+from watchmen.paths import BUNDLES_DIR
+from watchmen.tools_lib import make_tools
 
 ROOT = Path(__file__).parent
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
@@ -98,7 +98,7 @@ CANDIDATE_FINDER_PROMPT_TEMPLATE = dedent("""
 def _build_finder_prompt(installed: list[dict]) -> str:
     """Compose the candidate-finder system prompt with the harness block.
     Kept thin so tests can introspect the resulting string easily."""
-    import harness as _harness
+    from watchmen import harness as _harness
     block = _harness.format_for_prompt(installed)
     if not block:
         block = "(The user has no skills installed in their Claude Code harness yet.)"
@@ -341,7 +341,7 @@ def build_finder_agent(client, model, project_key, source_repo, log_path, record
     Claude Code harness (from harness.installed_skills()); when non-empty
     the candidate finder is instructed to propose enhancements rather
     than duplicates, and to set `enhancement_of` on overlapping candidates."""
-    import harness as _harness
+    from watchmen import harness as _harness
     specs, handlers = make_tools(source_repo=source_repo, project_key=project_key)
     keep = ["query_corpus", "read_thesis_section", "list_repo_files", "read_repo_file"]
     finder_specs = [s for s in specs if s["function"]["name"] in keep]
@@ -801,8 +801,7 @@ def _build_skill_index() -> None:
     """Rebuild ~/.watchmen/skill_index.db (FTS5) from every tracked project's skill
     bundles. The plugin's UserPromptSubmit hook queries this to surface
     'you could have used /<skill> to save time & tokens' indicators."""
-    import state as _state
-
+    from watchmen import state as _state
     base = Path.home() / ".watchmen"
     base.mkdir(parents=True, exist_ok=True)
     db_path = base / "skill_index.db"
@@ -957,7 +956,7 @@ def main():
         # both the prompt injection (so the finder knows what already exists)
         # and the --skip-overlap filter (post-finder, drops candidates that
         # duplicate an installed skill outright).
-        import harness as _harness
+        from watchmen import harness as _harness
         installed = _harness.installed_skills()
         if installed:
             print(f"   harness: {len(installed)} installed skill(s) — finder will consider overlaps", flush=True)
@@ -986,7 +985,7 @@ def main():
             candidates_path.write_text(json.dumps(candidates, indent=2))
             # Persist read-log only on successful candidate emission (terminal tool fired).
             if candidates:
-                from cache import write_cache
+                from watchmen.cache import write_cache
                 write_cache(candidates_cache, finder_recorder)
             print(f"      → {len(candidates)} candidates in {time.time()-t0:.1f}s", flush=True)
             for c in candidates:
