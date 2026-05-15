@@ -4,38 +4,14 @@ All notable changes to watchmen are listed here. The CLI surfaces the latest
 release notes once per version bump (CLI + web viewer) so a `git pull` is
 never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.4.2] — 2026-05-15
+## [0.5.0] — 2026-05-15
 
-### Added — pytest migration + adapter / agent coverage
-- Test suite migrated from a hand-rolled `def check()` driver in
-  `tests/smoke.py` to standard pytest discovery. `pytest tests/` is now
-  the canonical entry point; existing `def test_*` functions kept their
-  bodies — only the driver and module-level boilerplate moved out.
-- `tests/conftest.py` owns the `src/` `sys.path` nudge + exports
-  `ROOT` / `SRC` constants so individual tests can read package files.
-- 30 new tests added across two zero-coverage modules:
-  - `tests/test_adapter_claude_code.py` (11 tests) — exercises the
-    Claude Code transcript parser with synthetic JSONL: user-prompt
-    extraction, tool_use accounting, tool_error counting, cache-bucket
-    handling, malformed-line tolerance, subagent threading.
-  - `tests/test_agent.py` (19 tests) — fully mocked OpenRouter loop.
-    Covers `load_api_key` (env → file → raise), `_backoff_seconds`
-    (exponential + Retry-After floor), `call_openrouter` retry policy
-    (429 / 500 retry, 400 fail-fast, RequestError exhaustion), Agent
-    attribution headers, terminal-tool dispatch, non-terminal handler
-    dispatch, `max_cost_usd` budget ceiling, max_iter exhaustion.
-- CI workflow renamed `smoke` → `tests`; runs `pytest tests/ -q` with
-  `WATCHMEN_HOME` redirected to a temp dir and `OPENROUTER_API_KEY`
-  explicitly unset so the api-key-resolution tests exercise the raise
-  branch on a CI secret-free environment.
-- `pytest>=8.0` + `pytest-cov>=5.0` added as `[project.optional-dependencies].dev`.
-  Install once via `uv sync --extra dev`.
+First PyPI release. This rolls up everything since 0.4.0 — Linux daemon
+backend, hardened internals, pytest migration, and 30 new tests filling
+the biggest coverage holes. The CLI surface is unchanged; existing users
+upgrade in place.
 
-### Changed
-- README + CONTRIBUTING updated with the new `pytest tests/` workflow,
-  pytest layout, and `--cov` invocation.
-
-## [0.4.1] — 2026-05-15
+Install: `uv tool install watchmen` (or `pip install watchmen`).
 
 ### Added — Linux daemon backend (systemd --user)
 - `watchmen daemon install` / `watchmen viewer install` now work on Linux,
@@ -54,8 +30,43 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
   available via `journalctl --user -u watchmen-daemon.service`).
 - `--dry-run` for both backends now skips all preflight + filesystem
   side effects so you can audit the generated unit/plist on any platform.
-- Three new smoke tests guard the systemd unit shape (noun-verb form,
-  dry-run output, dispatcher routing).
+
+### Added — pytest migration + adapter / agent coverage
+- Test suite migrated from a hand-rolled `def check()` driver in
+  `tests/smoke.py` to standard pytest discovery. `pytest tests/` is now
+  the canonical entry point; existing `def test_*` functions kept their
+  bodies — only the driver and module-level boilerplate moved out.
+- `tests/conftest.py` owns the `src/` `sys.path` nudge + exports
+  `ROOT` / `SRC` constants so individual tests can read package files.
+- 30 new tests added across two previously zero-coverage modules:
+  - `tests/test_adapter_claude_code.py` (11 tests) — exercises the
+    Claude Code transcript parser with synthetic JSONL: user-prompt
+    extraction, tool_use accounting, tool_error counting, cache-bucket
+    handling, malformed-line tolerance, subagent threading.
+  - `tests/test_agent.py` (19 tests) — fully mocked OpenRouter loop.
+    Covers `load_api_key` (env → file → raise), `_backoff_seconds`
+    (exponential + Retry-After floor), `call_openrouter` retry policy
+    (429 / 500 retry, 400 fail-fast, RequestError exhaustion), Agent
+    attribution headers, terminal-tool dispatch, non-terminal handler
+    dispatch, `max_cost_usd` budget ceiling, max_iter exhaustion.
+- CI workflow renamed `smoke` → `tests`; runs `pytest tests/ -q` across
+  ubuntu × macos × py3.11/3.12 with `WATCHMEN_HOME` redirected to a temp
+  dir and `OPENROUTER_API_KEY` explicitly unset so the api-key-resolution
+  tests exercise their raise branch on a CI secret-free environment.
+- `pytest>=8.0` + `pytest-cov>=5.0` added as `[project.optional-dependencies].dev`.
+  Install once via `uv sync --extra dev`.
+
+### Added — release plumbing
+- `.github/workflows/release.yml` fires on `v*.*.*` tag pushes. Builds
+  wheel + sdist, smoke-tests the wheel in a fresh venv, attaches both to
+  a GitHub Release with auto-generated notes, and (when the
+  `PUBLISH_TO_PYPI` repo variable is `true`) publishes to PyPI via OIDC
+  trusted publishing — no API tokens stored anywhere.
+- Added "Releasing" section to CONTRIBUTING.md documenting the tag flow.
+
+### Changed
+- README + CONTRIBUTING updated with the new `pytest tests/` workflow,
+  pytest layout, `--cov` invocation, and cross-platform daemon notes.
 
 ## [0.4.0] — 2026-05-13
 
