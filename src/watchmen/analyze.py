@@ -20,19 +20,12 @@ from textwrap import dedent
 
 import httpx
 
+from watchmen.agent import call_openrouter, load_api_key
 from watchmen.corpus_filters import substantive_filter
 from watchmen.paths import ANALYSES_DIR, CORPUS_DB
 
 ROOT = Path(__file__).parent
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
-
-
-def load_api_key() -> str:
-    # Use the same lookup as agent.py: env → repo-local .env → ~/.config/watchmen/.env.
-    # Kept as a thin wrapper so analyze.py stays self-runnable from CLI.
-    from watchmen.agent import load_api_key as _load
-    return _load()
 
 
 # ─── Tools ──────────────────────────────────────────────────────────────────
@@ -269,22 +262,6 @@ SYSTEM_PROMPT = dedent("""
     Be concrete. Cite session_ids and dates. When done, call update_analysis with the full updated
     thesis.
 """).strip()
-
-
-def call_openrouter(client: httpx.Client, headers: dict, payload: dict, max_retries: int = 3):
-    for attempt in range(max_retries):
-        try:
-            r = client.post(OPENROUTER_URL, headers=headers, json=payload)
-            if r.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except httpx.RequestError:
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(2 ** attempt)
-    raise RuntimeError("exhausted retries")
 
 
 def run_day(

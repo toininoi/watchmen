@@ -16,7 +16,10 @@ Usage:
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -38,6 +41,46 @@ from watchmen.tools_lib import make_tools
 
 ROOT = Path(__file__).parent
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+
+
+# ─── Filesystem helpers ─────────────────────────────────────────────────────
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write `content` to `path` atomically: write to a sibling temp file
+    then rename. Prevents readers from seeing a half-written file and
+    prevents crashes mid-write from leaving the destination truncated.
+
+    Uses the same dir for the tmp file so the rename is atomic (rename
+    across filesystems isn't).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path):
+    """Advisory exclusive flock on a lock file. Blocks until acquired.
+
+    Used to serialize concurrent curator runs around the FTS5 skill index
+    rebuild (DROP TABLE + CREATE + bulk INSERT is not transactional in
+    SQLite's autocommit, so two simultaneous rebuilds can corrupt the
+    index). macOS + Linux only; the daemon is macOS-only today anyway.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 # ─── Prompts ────────────────────────────────────────────────────────────────
@@ -643,7 +686,7 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
     removed = sorted({_changelog_label(k) for k in prev if k not in current})
 
     if not (added or updated or removed):
-        manifest_path.write_text(json.dumps(current, indent=2, sort_keys=True))
+        _atomic_write_text(manifest_path, json.dumps(current, indent=2, sort_keys=True))
         return
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -672,8 +715,14 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
             new_text = f"# Changelog\n\n{new_entry}\n{existing}"
     else:
         new_text = f"# Changelog\n\n{new_entry}"
-    changelog_path.write_text(new_text)
-    manifest_path.write_text(json.dumps(current, indent=2, sort_keys=True))
+    # Order matters: write the manifest FIRST. If we crash between writes,
+    # the manifest correctly reflects current state and the next run sees
+    # no diff (we lose this changelog entry, but we don't duplicate it on
+    # every subsequent run). Reverse the order and a crash here produces a
+    # duplicate entry every time the curator runs until the manifest
+    # catches up. Both writes are atomic via _atomic_write_text.
+    _atomic_write_text(manifest_path, json.dumps(current, indent=2, sort_keys=True))
+    _atomic_write_text(changelog_path, new_text)
 
     # Commit artifacts to a per-project git repo so the viewer can render
     # a diff between successive runs. Non-fatal on failure (git missing, etc.).
@@ -800,11 +849,18 @@ def _extract_frontmatter_field(fm: str, field: str) -> str:
 def _build_skill_index() -> None:
     """Rebuild ~/.watchmen/skill_index.db (FTS5) from every tracked project's skill
     bundles. The plugin's UserPromptSubmit hook queries this to surface
-    'you could have used /<skill> to save time & tokens' indicators."""
+    'you could have used /<skill> to save time & tokens' indicators.
+
+    Two concurrent curator runs would race here (DROP + CREATE + INSERT
+    isn't transactional under SQLite's autocommit). The flock makes the
+    rebuild serial across the host. Also wraps the SQL in BEGIN/COMMIT so
+    a reader during the rebuild sees the old index until the swap.
+    """
     from watchmen import state as _state
     base = Path.home() / ".watchmen"
     base.mkdir(parents=True, exist_ok=True)
     db_path = base / "skill_index.db"
+    lock_path = base / "skill_index.db.lock"
 
     rows: list[tuple[str, str, str, str]] = []
     for p in _state.list_projects():
@@ -831,7 +887,8 @@ def _build_skill_index() -> None:
             indexable = " ".join(filter(None, [when_to, description]))
             rows.append((project_key, skill_dir.name, indexable, when_not))
 
-    with sqlite3.connect(str(db_path)) as conn:
+    with _file_lock(lock_path), sqlite3.connect(str(db_path)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DROP TABLE IF EXISTS skill_match")
         conn.execute("""
             CREATE VIRTUAL TABLE skill_match USING fts5(
@@ -846,6 +903,7 @@ def _build_skill_index() -> None:
             "VALUES (?, ?, ?, ?)",
             rows,
         )
+        conn.execute("COMMIT")
     print(f"      indexed {len(rows)} skill(s) across projects → {db_path}", flush=True)
 
 
