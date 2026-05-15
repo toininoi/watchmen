@@ -1,10 +1,10 @@
 # watchmen
 
-Local Claude Code session intelligence. Observes your sessions, analyzes how you use coding agents over time, and auto-generates skill bundles + `CLAUDE.md` per project — all on your Mac, no cloud.
+Local coding-agent session intelligence. Observes your Claude Code, Codex, and pi.dev sessions, analyzes how you actually use them over time, and auto-generates skill bundles + a workspace brief (`CLAUDE.md` for Claude Code, mirrored to `AGENTS.md` for Codex) per project — all on your machine, no cloud.
 
-The premise: every Claude Code session leaves a JSONL transcript in `~/.claude/projects/`. Across weeks of work this becomes a corpus of how you actually use the agent. watchmen mines that corpus, runs a longitudinal LLM analyst day by day with a carry-forward thesis, then curates the recurring procedural patterns into runnable skill bundles plus a workspace-level `CLAUDE.md` for each repo.
+The premise: every coding-agent session leaves a transcript on disk (`~/.claude/projects/` for Claude Code, `~/.codex/sessions/` for Codex, pi.dev's session export). Across weeks of work this becomes a corpus of how you actually use those agents. watchmen mines that corpus, runs a longitudinal LLM analyst day by day with a carry-forward thesis, then curates the recurring procedural patterns into runnable skill bundles plus a workspace brief for each repo (`CLAUDE.md` + `AGENTS.md`, identical content).
 
-Runs continuously via a launchd daemon. Comes with a local web viewer at `http://127.0.0.1:8979` (changeable via `watchmen settings port <N>`).
+Runs continuously via a launchd daemon (macOS) or systemd user unit (Linux). Comes with a local web viewer at `http://127.0.0.1:8979` (changeable via `watchmen settings port <N>`).
 
 ## What you get
 
@@ -12,6 +12,7 @@ For each tracked repo, watchmen produces under `bundles/<repo>/`:
 
 ```
 CLAUDE.md                # 12-section workspace brief auto-generated from session evidence
+AGENTS.md                # identical mirror of CLAUDE.md so Codex picks up the same brief
 skills/
   <skill-name>/
     SKILL.md             # frontmatter + trigger phrases + procedure + examples
@@ -78,7 +79,7 @@ Cost: ~$0.05-0.10 per regeneration with deepseek-flash. Time: ~30-60s depending 
 - [`uv`](https://github.com/astral-sh/uv) (Python toolchain)
 - Python 3.11+
 - An OpenRouter API key (`OPENROUTER_API_KEY`)
-- Claude Code CLI in active use (the corpus is your `~/.claude/projects/` directory)
+- At least one supported coding agent in active use — Claude Code (`~/.claude/projects/`), Codex (`~/.codex/sessions/`), or pi.dev — for there to be a session corpus to mine
 
 Models: defaults to `deepseek/deepseek-v4-flash` (fast, cheap, capable of multi-turn tool calling). Configurable per command.
 
@@ -195,7 +196,7 @@ Default cadence:
 
 | What | When |
 |---|---|
-| Re-ingest `~/.claude/projects/` + incremental analyst | Every **2 hours** |
+| Re-ingest all coding-agent transcripts (Claude Code / Codex / pi.dev) + incremental analyst | Every **2 hours** |
 | `CLAUDE.md` regen (stage 3 only, light) | After an analyst run if last regen >24h ago |
 | **Full curator** (skill bundles + CLAUDE.md, expensive) | **02:00 and 14:00 local time**, min 8h between runs per project |
 

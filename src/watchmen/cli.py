@@ -1,4 +1,4 @@
-"""watchmen — orchestrator CLI for the local Claude Code session intelligence pipeline.
+"""watchmen — orchestrator CLI for the local coding-agent session intelligence pipeline.
 
 Subcommands:
   status                    Dashboard: tracked projects, last-run, what needs analysis
@@ -994,7 +994,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Project inventory", [
         ("list",       "auto-detect projects from corpus"),
         ("track",      "add a project to tracking"),
-        ("ingest",     "re-scan ~/.claude/projects into corpus.db"),
+        ("ingest",     "re-scan all coding-agent transcripts into corpus.db"),
         ("sync",       "bootstrap state from existing artifacts on disk"),
     ]),
     ("Background services", [
@@ -1168,7 +1168,7 @@ def main(argv: list[str] | None = None) -> int:
     p_track.add_argument("--threshold", type=int, default=30, help="min new prompts to trigger run")
     p_track.set_defaults(func=cmd_track)
 
-    sub.add_parser("ingest", help="re-scan ~/.claude/projects into corpus.db").set_defaults(func=cmd_ingest)
+    sub.add_parser("ingest", help="re-scan all coding-agent transcripts into corpus.db").set_defaults(func=cmd_ingest)
 
     p_sync = sub.add_parser("sync", help="bootstrap state from existing analyses/ + bundles/ on disk")
     p_sync.add_argument("--project", help="just one project (default: all tracked)")

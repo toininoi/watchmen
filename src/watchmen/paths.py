@@ -46,6 +46,11 @@ def runtime_path(name: str, *, migrate_legacy: bool = True, legacy_alias: str | 
     `legacy_alias` covers in-place renames: if the new name doesn't exist on
     disk but the alias does (under WATCHMEN_HOME), move the alias to the new
     name. Used for the kai_claude → bundles rename in 0.5.
+
+    If BOTH the alias and the new name already exist (an old daemon recreated
+    the alias after the migration ran, or a stale checkout copy lingered),
+    archive the alias to `<alias>.legacy/` so live data in `dest` is untouched
+    and the user can manually merge or delete the legacy copy.
     """
     dest = WATCHMEN_HOME / name
     if migrate_legacy and not dest.exists():
@@ -71,6 +76,24 @@ def runtime_path(name: str, *, migrate_legacy: bool = True, legacy_alias: str | 
         except OSError:
             # Runtime paths should not make imports or command startup fail.
             pass
+    elif migrate_legacy and legacy_alias and dest.exists():
+        # 3. Both dest and alias coexist — one-shot archive of the stale alias.
+        # The rename is self-deleting (alias disappears after one run) so this
+        # path stays silent on every subsequent import.
+        alias_path = WATCHMEN_HOME / legacy_alias
+        archive_path = WATCHMEN_HOME / f"{legacy_alias}.legacy"
+        if alias_path.exists() and not archive_path.exists():
+            try:
+                alias_path.rename(archive_path)
+                import sys as _sys
+                print(
+                    f"watchmen: archived stale ~/.watchmen/{legacy_alias}/ "
+                    f"→ ~/.watchmen/{legacy_alias}.legacy/ "
+                    f"(canonical data lives in ~/.watchmen/{name}/)",
+                    file=_sys.stderr,
+                )
+            except OSError:
+                pass
     return dest
 
 
