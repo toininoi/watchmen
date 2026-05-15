@@ -150,10 +150,16 @@ and (when configured) publishes to PyPI via OIDC trusted publishing.
 
 **One-time PyPI setup** (needed before the first publish):
 
-1. Claim the `watchmen` project on PyPI as a pending trusted publisher
+> **Note on the PyPI name:** the bare `watchmen` namespace was already
+> claimed by an unrelated package, so we publish under **`dria-watchmen`**.
+> The CLI binary is still `watchmen`, and `from watchmen import ...` still
+> works — only the `pip install` string is `pip install dria-watchmen`.
+
+1. Claim the `dria-watchmen` project on PyPI as a pending trusted publisher
    at https://pypi.org/manage/account/publishing/.
-   - Owner: `firstbatchxyz`, repo: `watchmen`,
-   - workflow file: `release.yml`, environment: `pypi`.
+   - PyPI project name: `dria-watchmen`
+   - Owner: `firstbatchxyz`, repository: `watchmen`
+   - Workflow file: `release.yml`, environment: `pypi`
 2. Create a "pypi" Environment on GitHub: **Settings → Environments → New**.
    Add at least one required reviewer so prod releases require approval.
 3. Set the repo variable `PUBLISH_TO_PYPI = true`: **Settings →

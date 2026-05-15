@@ -1,5 +1,10 @@
 [project]
-name = "watchmen"
+# PyPI dist name. The plain `watchmen` namespace on PyPI was already
+# claimed by an unrelated package, so we publish under `dria-watchmen`.
+# The CLI binary (`watchmen`) and the import name (`from watchmen import
+# ...`) are unaffected — only the `pip install` / `uv tool install`
+# string changes. See CONTRIBUTING.md "Releasing" for details.
+name = "dria-watchmen"
 version = "0.5.0"
 description = "Local Claude Code session intelligence — observe, analyze, and generate skills + CLAUDE.md per project, autonomously"
 readme = "README.md"

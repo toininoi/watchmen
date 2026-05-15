@@ -180,6 +180,42 @@ toml = [
 ]
 
 [[package]]
+name = "dria-watchmen"
+version = "0.5.0"
+source = { editable = "." }
+dependencies = [
+    { name = "bleach" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "markdown" },
+    { name = "pygments" },
+    { name = "rich" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bleach", specifier = ">=6.1" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "markdown", specifier = ">=3.7" },
+    { name = "pygments", specifier = ">=2.18" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "rich", specifier = ">=13.7" },
+    { name = "uvicorn", specifier = ">=0.32" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "fastapi"
 version = "0.136.1"
 source = { registry = "https://pypi.org/simple" }
@@ -653,42 +689,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/1f/93/041fca8274050e40e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/31/a3/5b1562db76a5a488274b2332a97199b32d0442aca0ed193697fd47786316/uvicorn-0.46.0-py3-none-any.whl", hash = "sha256:bbebbcbed972d162afca128605223022bedd345b7bc7855ce66deb31487a9048", size = 70926, upload-time = "2026-04-23T07:15:58.355Z" },
 ]
-
-[[package]]
-name = "watchmen"
-version = "0.5.0"
-source = { editable = "." }
-dependencies = [
-    { name = "bleach" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "jinja2" },
-    { name = "markdown" },
-    { name = "pygments" },
-    { name = "rich" },
-    { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-cov" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bleach", specifier = ">=6.1" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "jinja2", specifier = ">=3.1" },
-    { name = "markdown", specifier = ">=3.7" },
-    { name = "pygments", specifier = ">=2.18" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "rich", specifier = ">=13.7" },
-    { name = "uvicorn", specifier = ">=0.32" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "webencodings"
