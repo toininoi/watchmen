@@ -78,8 +78,10 @@ class Agent:
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://kai.dria.co/hooks-mvp",
-            "X-Title": f"kai-hooks-mvp:{name}",
+            # OpenRouter app attribution: app=watchmen, sub-agent=name.
+            # https://openrouter.ai/docs/api-reference/overview#headers
+            "HTTP-Referer": "https://github.com/firstbatchxyz/watchmen",
+            "X-Title": f"watchmen:{name}",
         }
         self.log_path = log_path
         self.result_max_chars = result_max_chars

@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import state
-from paths import ANALYSES_DIR, KAI_CLAUDE_DIR
+from paths import ANALYSES_DIR, BUNDLES_DIR
 
 ROOT = Path(__file__).parent
 DEFAULT_INTERVAL = 7200       # 2 hours between analyst checks
@@ -137,7 +137,7 @@ def _run_full_curator(project_key: str, model: str, log: logging.Logger) -> bool
         log.error("full-curator[%s] failed: %s", project_key, (r.stderr or r.stdout)[:500])
         state.finish_run(run_id, "failed", notes=f"exit {r.returncode}")
         return False
-    skills_dir = KAI_CLAUDE_DIR / project_key / "skills"
+    skills_dir = BUNDLES_DIR / project_key / "skills"
     skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
     state.update_project(project_key, last_curator_run=state.now_iso(), last_curator_skill_count=skill_count)
     state.finish_run(run_id, "ok", notes=f"{skill_count} skills")
@@ -200,7 +200,7 @@ def cycle_once(
             log.info("[%s] below threshold — skipping analyst", key)
 
         last_curator = _parse_iso(p.get("last_curator_run"))
-        skills_dir = KAI_CLAUDE_DIR / key / "skills"
+        skills_dir = BUNDLES_DIR / key / "skills"
         has_bundles = skills_dir.exists() and any(d.is_dir() for d in skills_dir.iterdir())
 
         # Scheduled full curator (twice a day by default) — full pipeline incl. skill bundles

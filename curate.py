@@ -9,7 +9,7 @@ Stages:
                          critic, refines.
   4. index writer      : writes _index.md summarizing what was generated and why.
 
-Output: kai_claude/<project_key>/ with skills/<name>/, CLAUDE.md, _curation_log.md, _index.md.
+Output: bundles/<project_key>/ with skills/<name>/, CLAUDE.md, _curation_log.md, _index.md.
 
 Usage:
   uv run curate.py --project tally-weijl-images --repo ~/Development/personal/tally-weijl-images
@@ -33,7 +33,7 @@ import httpx
 
 from agent import Agent, load_api_key
 from cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers, write_cache
-from paths import KAI_CLAUDE_DIR
+from paths import BUNDLES_DIR
 from tools_lib import make_tools
 
 ROOT = Path(__file__).parent
@@ -146,11 +146,11 @@ SKILL_CURATOR_PROMPT_TEMPLATE = dedent("""
     Process:
       1. Investigate via read_thesis_section, read_session_full, list_repo_files, read_repo_file.
          Focus on EXTRACTING real code, not reinventing.
-      2. Draft the bundle — write SKILL.md and at least one script via write_kai_claude_file.
+      2. Draft the bundle — write SKILL.md and at least one script via write_bundle_file.
          Use paths like 'skills/{skill_slug}/SKILL.md', 'skills/{skill_slug}/scripts/<name>.py'.
       3. When draft is in place, call run_critic with skill_dir='skills/{skill_slug}' and a representative
          sample_task. The critic will report missing/ambiguous/hardcoded/broken issues.
-      4. Refine based on critic feedback. Re-read with read_kai_claude_file, rewrite as needed.
+      4. Refine based on critic feedback. Re-read with read_bundle_file, rewrite as needed.
       5. Loop until the critic says it's clean OR you've done 2 critic rounds.
       6. append_curation_log with a brief summary of decisions + critic findings.
       7. Call finish_skill with the slug and a short summary.
@@ -179,8 +179,8 @@ CRITIC_PROMPT = dedent("""
       - References: any file referenced from SKILL.md that doesn't exist?
 
     Process:
-      1. list_kai_claude_files(subdir=skill_dir) to enumerate.
-      2. read_kai_claude_file each one.
+      1. list_bundle_files(subdir=skill_dir) to enumerate.
+      2. read_bundle_file each one.
       3. Optionally query_corpus or read_session_full for context if a claim looks suspicious.
       4. Call finish_critique with structured findings: list of {{type, location, issue, suggestion}}.
          type ∈ "missing" | "ambiguous" | "hardcoded" | "broken" | "ok-overall".
@@ -193,7 +193,7 @@ CRITIC_PROMPT = dedent("""
 CLAUDE_MD_PROMPT = dedent("""
     You are authoring the workspace-level CLAUDE.md for project: {project_key}
 
-    Output to: kai_claude/{project_key}/CLAUDE.md
+    Output to: bundles/{project_key}/CLAUDE.md
 
     A good CLAUDE.md is a STANDING BRIEF for any future Claude Code session opened in this repo. It
     answers EVERY question a fresh agent might have on day 1: what this project is, how it's structured,
@@ -271,8 +271,8 @@ CLAUDE_MD_PROMPT = dedent("""
       2. list_repo_files (broad pattern like '*' or '**/*') to map the repo's structure.
       3. read_repo_file on key infrastructure files: package.json, pyproject.toml, Cargo.toml,
          README.md, .env.example, tsconfig.json — whichever apply.
-      4. list_kai_claude_files(subdir='skills') and read each SKILL.md frontmatter.
-      5. Draft and write CLAUDE.md via write_kai_claude_file.
+      4. list_bundle_files(subdir='skills') and read each SKILL.md frontmatter.
+      5. Draft and write CLAUDE.md via write_bundle_file.
       6. run_critic with skill_dir='' (review whole CLAUDE.md), sample_task='a fresh agent opens this repo'.
       7. Refine if critic flags issues.
       8. append_curation_log + call finish_claude_md.
@@ -289,7 +289,7 @@ def make_critic_runner(client: httpx.Client, model: str, project_key: str, log_p
     specs, handlers = make_tools(source_repo="/", project_key=project_key)
     # Critic gets a read-only subset
     read_only = ["query_corpus", "read_session_full", "read_thesis_section",
-                 "list_kai_claude_files", "read_kai_claude_file"]
+                 "list_bundle_files", "read_bundle_file"]
     crit_specs = [s for s in specs if s["function"]["name"] in read_only]
     crit_handlers = {k: handlers[k] for k in read_only}
 
@@ -326,7 +326,7 @@ def make_critic_runner(client: httpx.Client, model: str, project_key: str, log_p
             log_path=log_path,
         )
         result, _ = critic.run(
-            f"Evaluate the bundle at '{skill_dir or 'kai_claude root'}' against this sample task: {sample_task}",
+            f"Evaluate the bundle at '{skill_dir or 'bundles root'}' against this sample task: {sample_task}",
             max_iter=15,
         )
         return json.dumps(result, indent=2) if result else "(critic produced no findings)"
@@ -395,7 +395,7 @@ def build_finder_agent(client, model, project_key, source_repo, log_path, record
 def build_skill_curator(client, model, project_key, source_repo, candidate, log_path, run_critic, recorder: ReadRecorder | None = None, out_subdir: str = "skills"):
     """Build the per-skill curator agent.
 
-    `out_subdir` controls where the bundle lands inside `kai_claude/<project>/`.
+    `out_subdir` controls where the bundle lands inside `bundles/<project>/`.
     Default is `skills` (the canonical, harness-installable location). When
     a project has `approval_required` set, new bundles route to `_pending`
     instead — the user reviews and approves them via `watchmen review` before
@@ -407,7 +407,7 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
     specs, handlers = make_tools(source_repo=source_repo, project_key=project_key)
     slug = candidate["slug"]
     expected_prefix = f"{out_subdir}/{slug}/"
-    raw_writer = handlers["write_kai_claude_file"]
+    raw_writer = handlers["write_bundle_file"]
 
     def write_skill_scoped(file_path: str, content: str) -> str:
         # If agent typed the slug as a prefix (the original path bug), strip it
@@ -432,9 +432,9 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
         )
 
     # Replace the write tool spec + handler with the scoped version
-    specs = [s for s in specs if s["function"]["name"] != "write_kai_claude_file"]
+    specs = [s for s in specs if s["function"]["name"] != "write_bundle_file"]
     specs.append({"type": "function", "function": {
-        "name": "write_kai_claude_file",
+        "name": "write_bundle_file",
         "description": (
             f"Write a file UNDER {expected_prefix} (this skill's bundle). Use relative paths: "
             f"'SKILL.md', 'scripts/<name>.py', 'references/<name>.md', 'requirements.txt', "
@@ -446,7 +446,7 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
         }, "required": ["file_path", "content"]},
     }})
     handlers = dict(handlers)
-    handlers["write_kai_claude_file"] = write_skill_scoped
+    handlers["write_bundle_file"] = write_skill_scoped
 
     specs.append({"type": "function", "function": {
         "name": "run_critic",
@@ -564,7 +564,7 @@ def build_claude_md_author(client, model, project_key, source_repo, log_path, ru
 
 
 # ─── Pin / blocklist support (Round 2) ──────────────────────────────────────
-# Two opt-in user-edited files inside kai_claude/<project>/:
+# Two opt-in user-edited files inside bundles/<project>/:
 #   _pinned.json     — list of slugs to skip re-curating (forced cache hit)
 #   _blocklist.json  — list of slugs to filter out of candidate-finder output
 # Both are written by `watchmen pin/drop` and read here at run time. If either
@@ -585,7 +585,7 @@ def _load_skill_list(out_dir: Path, filename: str) -> set[str]:
 def _apply_blocklist(candidates: list[dict], blocklist: set[str], out_dir: Path) -> list[dict]:
     """Filter candidate list against the blocklist (matches slug + display name,
     both lowercased). Also deletes any leftover bundle dir for blocked slugs
-    — leaving stale `kai_claude/<project>/skills/<dropped>/` around would
+    — leaving stale `bundles/<project>/skills/<dropped>/` around would
     confuse the user (and break `watchmen show`'s skill list)."""
     if not blocklist:
         return candidates
@@ -722,7 +722,7 @@ def _git_commit_artifacts(
     updated: list[str],
     removed: list[str],
 ) -> str | None:
-    """Init git in kai_claude/<project>/ on first call, commit the current state,
+    """Init git in bundles/<project>/ on first call, commit the current state,
     return the resulting commit SHA. Returns None if git is unavailable, the
     directory is missing, or nothing changed on a working repo with no HEAD.
 
@@ -812,7 +812,7 @@ def _build_skill_index() -> None:
         project_key = p.get("project_key")
         if not project_key:
             continue
-        skills_dir = KAI_CLAUDE_DIR / project_key / "skills"
+        skills_dir = BUNDLES_DIR / project_key / "skills"
         if not skills_dir.exists():
             continue
         for skill_dir in skills_dir.iterdir():
@@ -921,19 +921,19 @@ def main():
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--max-skills", type=int, default=8)
     parser.add_argument("--skip-finder", action="store_true", help="reuse existing _candidates.json")
-    parser.add_argument("--skip-skills", action="store_true", help="skip stage 2 — assume kai_claude/<project>/skills/* is already populated")
+    parser.add_argument("--skip-skills", action="store_true", help="skip stage 2 — assume bundles/<project>/skills/* is already populated")
     parser.add_argument("--regen-all", action="store_true", help="invalidate every input cache for this project, forcing full re-curation")
     parser.add_argument("--curator-concurrency", type=int, default=4, help="parallel per-skill curator agents in stage 2 (default 4)")
     parser.add_argument("--skip-overlap", action="store_true",
         help="drop candidates that overlap with the user's already-installed harness skills "
              "(default: propose them as enhancements via the `enhancement_of` field)")
     parser.add_argument("--approval-required", action="store_true",
-        help="route newly-curated skill bundles to kai_claude/<project>/_pending/<slug>/ "
+        help="route newly-curated skill bundles to bundles/<project>/_pending/<slug>/ "
              "for user review instead of dropping straight into skills/")
     args = parser.parse_args()
 
     api_key = load_api_key()
-    out_dir = KAI_CLAUDE_DIR / args.project
+    out_dir = BUNDLES_DIR / args.project
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "_run.log"
     log_path.write_text("", encoding="utf-8")  # truncate
@@ -948,7 +948,7 @@ def main():
     _, replay_handlers = make_tools(source_repo=args.repo, project_key=args.project)
 
     print(f"== curate {args.project} (repo={args.repo}, model={args.model})", flush=True)
-    print(f"   output → kai_claude/{args.project}/  log → {log_path.name}", flush=True)
+    print(f"   output → bundles/{args.project}/  log → {log_path.name}", flush=True)
 
     with httpx.Client(timeout=300.0) as client:
         run_critic = make_critic_runner(client, args.model, args.project, log_path)
@@ -1146,7 +1146,7 @@ def main():
 
         # ─── Stage 4: write _index.md ─────────────────────────────────────────
         print("[4/4] writing _index.md...", flush=True)
-        index_lines = [f"# kai_claude/{args.project} — generated artifacts\n"]
+        index_lines = [f"# bundles/{args.project} — generated artifacts\n"]
         index_lines.append(f"- Model: {args.model}")
         index_lines.append(f"- Source repo: {args.repo}")
         index_lines.append(f"- Skills generated: {len(completed)}\n")
@@ -1167,7 +1167,7 @@ def main():
         except Exception as e:
             print(f"      changelog write failed: {type(e).__name__}: {e}", flush=True)
 
-        print(f"      done. final output: kai_claude/{args.project}/", flush=True)
+        print(f"      done. final output: bundles/{args.project}/", flush=True)
 
 
 if __name__ == "__main__":

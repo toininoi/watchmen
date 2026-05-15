@@ -386,8 +386,9 @@ def main() -> None:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://kai.dria.co/hooks-mvp",
-        "X-Title": "kai-hooks-mvp analyst",
+        # OpenRouter app attribution. Matches agent.py for consistent app=watchmen identity.
+        "HTTP-Referer": "https://github.com/firstbatchxyz/watchmen",
+        "X-Title": "watchmen:analyst",
     }
 
     conn = sqlite3.connect(CORPUS_DB)

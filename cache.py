@@ -2,7 +2,7 @@
 
 Each stage's agent reads from a set of input-side tools (read_thesis_section,
 read_repo_file, read_session_full, list_repo_files, query_corpus,
-read_kai_claude_file, list_kai_claude_files). We instrument those tools to
+read_bundle_file, list_bundle_files). We instrument those tools to
 record every (tool_name, args, sha256(result)) tuple during a run, and persist
 that log alongside the stage's output. On the next run, replay those tool
 calls — if every result hashes to the cached value, skip the agent entirely
@@ -14,9 +14,9 @@ a tool's pure-function contract broke. False cache misses (re-run when we
 could have skipped) are fine; we lose the speedup but produce a correct bundle.
 
 Cache files (each holds a JSON array of {tool, args, result_hash}):
-    kai_claude/<project>/.candidates.inputs.json    — stage 1
-    kai_claude/<project>/skills/<slug>/.inputs.json — stage 2 (per skill)
-    kai_claude/<project>/.claude_md.inputs.json     — stage 3
+    bundles/<project>/.candidates.inputs.json    — stage 1
+    bundles/<project>/skills/<slug>/.inputs.json — stage 2 (per skill)
+    bundles/<project>/.claude_md.inputs.json     — stage 3
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 # Tools whose results affect the agent's output. Effect-side tools
-# (write_kai_claude_file, append_curation_log, run_critic, finish_*) are NOT
+# (write_bundle_file, append_curation_log, run_critic, finish_*) are NOT
 # instrumented — they're outputs, not dependencies.
 INPUT_TOOLS = frozenset({
     "query_corpus",
@@ -35,8 +35,8 @@ INPUT_TOOLS = frozenset({
     "read_thesis_section",
     "list_repo_files",
     "read_repo_file",
-    "read_kai_claude_file",
-    "list_kai_claude_files",
+    "read_bundle_file",
+    "list_bundle_files",
 })
 
 
@@ -132,7 +132,7 @@ def write_cache(cache_file: Path, recorder: ReadRecorder) -> None:
 
 
 def invalidate_all(project_root: Path) -> int:
-    """Delete every cache file under kai_claude/<project>/. Returns the count
+    """Delete every cache file under bundles/<project>/. Returns the count
     removed. Backing `curate --regen-all`."""
     if not project_root.exists():
         return 0

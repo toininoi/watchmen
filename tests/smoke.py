@@ -632,7 +632,7 @@ def test_stage_2_parallel_dispatcher_preserves_order_independence():
 
 
 def test_only_input_tools_are_recorded():
-    """Effect-side tools (write_kai_claude_file, append_curation_log) must NOT
+    """Effect-side tools (write_bundle_file, append_curation_log) must NOT
     be wrapped — otherwise their results pollute the cache key, and any minor
     write-tool semantic change would force every cache to miss."""
     from cache import INPUT_TOOLS, ReadRecorder, wrap_handlers
@@ -646,7 +646,7 @@ def test_only_input_tools_are_recorded():
 
     handlers = {
         "read_repo_file": make_handler("read_repo_file"),
-        "write_kai_claude_file": make_handler("write_kai_claude_file"),
+        "write_bundle_file": make_handler("write_bundle_file"),
         "append_curation_log": make_handler("append_curation_log"),
     }
     recorder = ReadRecorder()
@@ -654,12 +654,12 @@ def test_only_input_tools_are_recorded():
 
     # All three callable; only read_repo_file should land in the recorder.
     wrapped["read_repo_file"](file_path="x")
-    wrapped["write_kai_claude_file"](file_path="y", content="z")
+    wrapped["write_bundle_file"](file_path="y", content="z")
     wrapped["append_curation_log"](entry="w")
 
     assert len(recorder) == 1
     assert recorder.export()[0]["tool"] == "read_repo_file"
-    assert "write_kai_claude_file" not in INPUT_TOOLS
+    assert "write_bundle_file" not in INPUT_TOOLS
     assert "append_curation_log" not in INPUT_TOOLS
 
 
@@ -669,7 +669,7 @@ def test_only_input_tools_are_recorded():
 def test_substantive_filter_drops_trivial_sessions():
     """The filter keeps sessions with any tool use OR with ≥4 messages and ≥2
     user prompts. Trivial aborts (3-message, 0-tool, single-prompt) get dropped.
-    Calibration on kai-hooks-mvp showed this drops 15% of main sessions, all
+    Calibration on watchmen showed this drops 15% of main sessions, all
     aborts. If this regression-tests the SQL drift, the boundary cases below
     will catch it."""
     import tempfile
@@ -1309,13 +1309,13 @@ def test_curate_build_skill_curator_respects_out_subdir():
         _agent.load_api_key = _orig_load
     write_spec = next(
         s for s in curator.tool_specs
-        if s["function"]["name"] == "write_kai_claude_file"
+        if s["function"]["name"] == "write_bundle_file"
     )
     desc = write_spec["function"]["description"]
     assert "_pending/demo-skill/" in desc, f"write tool not scoped to _pending/: {desc!r}"
     # Calling the scoped handler with a `skills/...` path must be rejected
     # so the agent can't escape the pending dir.
-    err = curator.tool_handlers["write_kai_claude_file"](file_path="skills/other-skill/SKILL.md", content="x")
+    err = curator.tool_handlers["write_bundle_file"](file_path="skills/other-skill/SKILL.md", content="x")
     assert "ERROR" in err and "can only write under '_pending/demo-skill/'" in err
 
 
@@ -1830,11 +1830,11 @@ def test_doomsday_clock_brackets_for_status_command():
 
 
 def _fake_curated_bundle(td: Path, project_key: str = "fakeproj") -> Path:
-    """Build a tiny `kai_claude/<project>/` skeleton inside td so the show/why/
+    """Build a tiny `bundles/<project>/` skeleton inside td so the show/why/
     recent commands have something to read without touching the user's real
     state. Returns the project dir."""
     import json as _json
-    proj = td / "kai_claude" / project_key
+    proj = td / "bundles" / project_key
     (proj / "skills" / "lint-fixer").mkdir(parents=True)
     (proj / "CLAUDE.md").write_text("# Fake CLAUDE.md\n")
     (proj / "_candidates.json").write_text(_json.dumps([
@@ -2014,7 +2014,7 @@ def test_curate_apply_blocklist_filters_and_sweeps_bundles():
     after the next curator run finishes."""
     import curate
     with tempfile.TemporaryDirectory() as td:
-        out_dir = Path(td) / "kai_claude" / "fake"
+        out_dir = Path(td) / "bundles" / "fake"
         (out_dir / "skills" / "lint-fixer").mkdir(parents=True)
         (out_dir / "skills" / "lint-fixer" / "SKILL.md").write_text("stub")
         (out_dir / "skills" / "keep-me").mkdir(parents=True)
@@ -2167,8 +2167,8 @@ def test_cli_why_shows_provenance_and_curator_excerpt():
         assert "lint-fixer" in buf.getvalue(), "should suggest available slugs on miss"
 
 
-def test_cli_recent_walks_git_log_of_kai_claude():
-    """`watchmen recent` must run `git log` inside each kai_claude/<project>/
+def test_cli_recent_walks_git_log_of_bundles():
+    """`watchmen recent` must run `git log` inside each bundles/<project>/
     and produce one section per project with at least the commit subject."""
     import io
     import cli
@@ -2215,7 +2215,7 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
         # p2: shares the lint-fixer slug in _candidates.json but has no
         # skills/ dir. That's the pattern we need both for cross-repo
         # detection (✓ curated vs · candidate) and untapped corpora.
-        p2 = td_path / "kai_claude" / "p2"
+        p2 = td_path / "bundles" / "p2"
         p2.mkdir(parents=True)
         (p2 / "_candidates.json").write_text(_json.dumps([{
             "name": "Lint Fixer", "slug": "lint-fixer",
@@ -2616,7 +2616,7 @@ def main() -> int:
     check("sparkline + bar handle empty / all-zero series",  test_sparkline_and_bar_edge_cases)
     check("`show` overview / project / file / skill modes",  test_cli_show_modes_list_overview_and_dump)
     check("`why` surfaces provenance + curator log excerpt", test_cli_why_shows_provenance_and_curator_excerpt)
-    check("`recent` runs git log inside each kai_claude/",   test_cli_recent_walks_git_log_of_kai_claude)
+    check("`recent` runs git log inside each bundles/",   test_cli_recent_walks_git_log_of_bundles)
     check("`insights` digests across repos + cross-link",    test_cli_insights_aggregates_curated_and_uncurated_repos)
     check("`insights` cache save/view/list + non-tty default", test_cli_insights_save_view_list_roundtrip)
     print()

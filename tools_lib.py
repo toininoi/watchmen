@@ -1,7 +1,7 @@
-"""Shared tool implementations for kai-hooks-mvp agents.
+"""Shared tool implementations for watchmen agents.
 
 Each function returns a string (or json-serializable). Path-safe (no traversal out of scoped roots).
-Scoping: tools are bound to a (corpus_db, source_repo, kai_claude_root, project_key) tuple via
+Scoping: tools are bound to a (corpus_db, source_repo, bundle_root, project_key) tuple via
 make_tools(...) which returns a dict of (specs, handlers) ready to pass to Agent().
 """
 
@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR
+from paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR
 
 ROOT = Path(__file__).parent
 
@@ -134,7 +134,7 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
     """Bind a tool set to a project. Returns (tool_specs, handler_dict)."""
 
     repo_root = Path(source_repo).expanduser()
-    kai_claude_root = KAI_CLAUDE_DIR / project_key
+    bundle_root = BUNDLES_DIR / project_key
 
     # ── handlers ───────────────────────────────────────────────────────────
 
@@ -166,25 +166,25 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
     def read_thesis_section(section: str = "") -> str:
         return read_thesis(project_key, section or None)
 
-    def write_kai_claude_file(file_path: str, content: str) -> str:
-        target = _resolve_safe(kai_claude_root, file_path)
+    def write_bundle_file(file_path: str, content: str) -> str:
+        target = _resolve_safe(bundle_root, file_path)
         if target is None:
             return "ERROR: path traversal blocked"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return f"wrote: kai_claude/{project_key}/{file_path} ({len(content)} chars)"
+        return f"wrote: bundles/{project_key}/{file_path} ({len(content)} chars)"
 
-    def list_kai_claude_files(subdir: str = "") -> str:
-        base = kai_claude_root if not subdir else _resolve_safe(kai_claude_root, subdir)
+    def list_bundle_files(subdir: str = "") -> str:
+        base = bundle_root if not subdir else _resolve_safe(bundle_root, subdir)
         if base is None:
             return "ERROR: path traversal blocked"
         if not base.exists():
             return "[]"
-        files = sorted(str(p.relative_to(kai_claude_root)) for p in base.rglob("*") if p.is_file())
+        files = sorted(str(p.relative_to(bundle_root)) for p in base.rglob("*") if p.is_file())
         return json.dumps(files)
 
-    def read_kai_claude_file(file_path: str, max_chars: int = 20000) -> str:
-        target = _resolve_safe(kai_claude_root, file_path)
+    def read_bundle_file(file_path: str, max_chars: int = 20000) -> str:
+        target = _resolve_safe(bundle_root, file_path)
         if target is None:
             return "ERROR: path traversal blocked"
         if not target.exists():
@@ -195,7 +195,7 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
         return content
 
     def append_curation_log(entry: str) -> str:
-        target = kai_claude_root / "_curation_log.md"
+        target = bundle_root / "_curation_log.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "a", encoding="utf-8") as f:
             import time
@@ -208,9 +208,9 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
         "read_thesis_section": read_thesis_section,
         "list_repo_files": list_repo_files,
         "read_repo_file": read_repo_file,
-        "write_kai_claude_file": write_kai_claude_file,
-        "list_kai_claude_files": list_kai_claude_files,
-        "read_kai_claude_file": read_kai_claude_file,
+        "write_bundle_file": write_bundle_file,
+        "list_bundle_files": list_bundle_files,
+        "read_bundle_file": read_bundle_file,
         "append_curation_log": append_curation_log,
     }
 
@@ -250,22 +250,22 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
             "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
         }},
         {"type": "function", "function": {
-            "name": "write_kai_claude_file",
-            "description": (f"Write a file under kai_claude/{project_key}/. Creates parent dirs. "
+            "name": "write_bundle_file",
+            "description": (f"Write a file under bundles/{project_key}/. Creates parent dirs. "
                             "Use for SKILL.md, scripts/*, references/*, CLAUDE.md, _index.md."),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "relative path inside kai_claude/<project>/"},
+                "file_path": {"type": "string", "description": "relative path inside bundles/<project>/"},
                 "content": {"type": "string"},
             }, "required": ["file_path", "content"]},
         }},
         {"type": "function", "function": {
-            "name": "list_kai_claude_files",
-            "description": "List files written so far under kai_claude/<project>/. Optional subdir filter.",
+            "name": "list_bundle_files",
+            "description": "List files written so far under bundles/<project>/. Optional subdir filter.",
             "parameters": {"type": "object", "properties": {"subdir": {"type": "string"}}, "required": []},
         }},
         {"type": "function", "function": {
-            "name": "read_kai_claude_file",
-            "description": "Read a file you previously wrote under kai_claude/<project>/.",
+            "name": "read_bundle_file",
+            "description": "Read a file you previously wrote under bundles/<project>/.",
             "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
         }},
         {"type": "function", "function": {

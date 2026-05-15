@@ -35,7 +35,7 @@ from pathlib import Path
 
 import config
 import state
-from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR, STATE_DB
+from paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
 
 ROOT = Path(__file__).parent
 SOURCE_ROOT = Path(__file__).parent
@@ -706,7 +706,7 @@ def cmd_curate(args) -> int:
     print(_dim(f"Running: {' '.join(cmd)}"))
     r = subprocess.run(cmd, cwd=str(ROOT))
     if r.returncode == 0:
-        skills_dir = _kai_claude_base() / args.project / "skills"
+        skills_dir = _bundle_base() / args.project / "skills"
         skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
         state.update_project(args.project, last_curator_run=state.now_iso(), last_curator_skill_count=skill_count)
         state.finish_run(run_id, "ok", notes=f"{skill_count} skills")
@@ -1064,12 +1064,14 @@ def cmd_settings_api_key(args) -> int:
 _ADAPTER_SHORT = {"claude_code": "cc", "codex": "cd", "pi": "pi"}
 
 
-def _kai_claude_dir(project_key: str) -> Path:
-    return _kai_claude_base() / project_key
+def _bundle_dir(project_key: str) -> Path:
+    return _bundle_base() / project_key
 
 
-def _kai_claude_base() -> Path:
-    return ROOT / "kai_claude" if ROOT != SOURCE_ROOT else KAI_CLAUDE_DIR
+def _bundle_base() -> Path:
+    # When tests or alternate installs override ROOT, look for bundles/ there;
+    # fall through to the canonical WATCHMEN_HOME/bundles/ via paths.BUNDLES_DIR.
+    return ROOT / "bundles" if ROOT != SOURCE_ROOT else BUNDLES_DIR
 
 
 def _analyses_base() -> Path:
@@ -1094,10 +1096,10 @@ def _project_dir_predicate(project_key: str, alias: str = "s") -> tuple[str, tup
 
 
 def _tracked_project_keys() -> list[str]:
-    """Project keys that have at least a `kai_claude/<key>/` dir on disk —
+    """Project keys that have at least a `bundles/<key>/` dir on disk —
     used as the universe for `show` and `recent` without a project arg.
     Falls back to state.list_projects() when nothing is on disk yet."""
-    base = _kai_claude_base()
+    base = _bundle_base()
     if base.exists():
         keys = sorted(d.name for d in base.iterdir() if d.is_dir() and (d / "skills").exists())
         if keys:
@@ -1220,9 +1222,9 @@ def cmd_show(args) -> int:
       watchmen show <project> <skill|file>   # dump that skill/file
 
     Disambiguation: second arg ending in `.md` or `.json` is read as a file
-    path under kai_claude/<project>/; anything else is treated as a skill slug
-    and resolved to kai_claude/<project>/skills/<slug>/SKILL.md."""
-    base = _kai_claude_base()
+    path under bundles/<project>/; anything else is treated as a skill slug
+    and resolved to bundles/<project>/skills/<slug>/SKILL.md."""
+    base = _bundle_base()
     if not args.project:
         # Mode 1 — overview of every project that has a curated bundle.
         keys = _tracked_project_keys()
@@ -1383,7 +1385,7 @@ def cmd_why(args) -> int:
     This is the trust-building command — without it, every skill is "trust me,
     this is from your data" with no way to verify."""
     import sqlite3, json as _json
-    proj_dir = _kai_claude_dir(args.project)
+    proj_dir = _bundle_dir(args.project)
     candidates_path = proj_dir / "_candidates.json"
     if not candidates_path.exists():
         print(_yellow(f"no candidates file at {candidates_path} — has the curator run for this project?"))
@@ -1478,12 +1480,12 @@ def cmd_why(args) -> int:
 
 
 def cmd_recent(args) -> int:
-    """Git log of kai_claude/ artifact commits in the last N days. Every curator
+    """Git log of bundles/ artifact commits in the last N days. Every curator
     run lands as a commit, so this is a fast 'what changed lately' view that
     doesn't require the web viewer."""
     days = args.days
     keys = [args.project] if args.project else _tracked_project_keys()
-    base = _kai_claude_base()
+    base = _bundle_base()
     if not keys:
         print(_dim("no curated projects yet."))
         return 0
@@ -1535,10 +1537,10 @@ _BLOCKLIST_FILE = "_blocklist.json"
 
 
 def _read_skill_list(project: str, filename: str) -> set[str]:
-    """Load a JSON list of skill slugs from kai_claude/<project>/<filename>.
+    """Load a JSON list of skill slugs from bundles/<project>/<filename>.
     Empty/missing/invalid → empty set."""
     import json as _json
-    p = _kai_claude_dir(project) / filename
+    p = _bundle_dir(project) / filename
     if not p.exists():
         return set()
     try:
@@ -1552,7 +1554,7 @@ def _write_skill_list(project: str, filename: str, values: set[str]) -> Path:
     list becomes empty (last unpin or restore), delete the file instead of
     leaving an empty `[]` behind — keeps the bundle dir tidy."""
     import json as _json
-    proj_dir = _kai_claude_dir(project)
+    proj_dir = _bundle_dir(project)
     proj_dir.mkdir(parents=True, exist_ok=True)
     p = proj_dir / filename
     if not values:
@@ -1565,12 +1567,12 @@ def _write_skill_list(project: str, filename: str, values: set[str]) -> Path:
 
 def _resolve_skill_slug(project: str, target: str) -> str | None:
     """Find the canonical slug for a user-supplied skill identifier. Accepts:
-      - exact slug matching kai_claude/<project>/skills/<slug>/
+      - exact slug matching bundles/<project>/skills/<slug>/
       - display name from _candidates.json (case-insensitive)
     Returns None if neither matches — the caller is expected to suggest
     available slugs in that case."""
     import json as _json
-    proj_dir = _kai_claude_dir(project)
+    proj_dir = _bundle_dir(project)
     skills_dir = proj_dir / "skills"
     if skills_dir.exists() and (skills_dir / target).is_dir():
         return target
@@ -1588,7 +1590,7 @@ def _resolve_skill_slug(project: str, target: str) -> str | None:
 
 def _available_skills(project: str) -> list[str]:
     """List slugs present on disk — used to suggest valid options on miss."""
-    skills_dir = _kai_claude_dir(project) / "skills"
+    skills_dir = _bundle_dir(project) / "skills"
     if not skills_dir.exists():
         return []
     return sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
@@ -1679,7 +1681,7 @@ def cmd_review(args) -> int:
         print(_dim("  inspect non-interactively with `watchmen show <project>` instead."))
         return 1
 
-    proj_dir = _kai_claude_dir(args.project)
+    proj_dir = _bundle_dir(args.project)
     if not proj_dir.exists():
         print(_yellow(f"no curated bundle for '{args.project}'"))
         return 1
@@ -1897,7 +1899,7 @@ def cmd_drop(args) -> int:
     is also stored so candidate-finder output for the same skill (under a
     different generated slug) gets caught."""
     slug = _resolve_skill_slug(args.project, args.skill) or args.skill
-    proj_dir = _kai_claude_dir(args.project)
+    proj_dir = _bundle_dir(args.project)
     skill_dir = proj_dir / "skills" / slug
     blocklist = _read_skill_list(args.project, _BLOCKLIST_FILE)
     already_blocked = slug in blocklist
@@ -2305,7 +2307,7 @@ def cmd_insights(args) -> int:
 
     state.init_db()
     projects = state.list_projects()
-    base = _kai_claude_base()
+    base = _bundle_base()
 
     if not projects:
         print(_dim("No projects tracked yet — run `watchmen init` to add one."))
@@ -2779,7 +2781,7 @@ def _repo_synthesis(repo_row: dict, model: str) -> str | None:
     budget; the value is in citing actual dates/slugs/patterns, not
     in exhaustive coverage."""
     key = repo_row["key"]
-    proj_dir = _kai_claude_base() / key
+    proj_dir = _bundle_base() / key
     thesis_path = _analyses_base() / key / "_running.md"
     log_path = proj_dir / "_curation_log.md"
     cand_path = proj_dir / "_candidates.json"
@@ -3208,7 +3210,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("ingest", help="re-scan ~/.claude/projects into corpus.db").set_defaults(func=cmd_ingest)
 
-    p_sync = sub.add_parser("sync", help="bootstrap state from existing analyses/ + kai_claude/ on disk")
+    p_sync = sub.add_parser("sync", help="bootstrap state from existing analyses/ + bundles/ on disk")
     p_sync.add_argument("--project", help="just one project (default: all tracked)")
     p_sync.set_defaults(func=cmd_sync)
 
@@ -3228,7 +3230,7 @@ def main(argv: list[str] | None = None) -> int:
              "(default: propose them as enhancements). Per-project alternative: "
              "`watchmen settings set <p> skip_overlapping_skills true`")
     p_cu.add_argument("--approval-required", dest="approval_required", action="store_true",
-        help="route new bundles to kai_claude/<p>/_pending/ for review via "
+        help="route new bundles to bundles/<p>/_pending/ for review via "
              "`watchmen review`. Per-project alternative: "
              "`watchmen settings set <p> approval_required true`")
     p_cu.set_defaults(func=cmd_curate)

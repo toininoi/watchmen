@@ -8,7 +8,7 @@ Runs continuously via a launchd daemon. Comes with a local web viewer at `http:/
 
 ## What you get
 
-For each tracked repo, watchmen produces under `kai_claude/<repo>/`:
+For each tracked repo, watchmen produces under `bundles/<repo>/`:
 
 ```
 CLAUDE.md                # 12-section workspace brief auto-generated from session evidence
@@ -65,7 +65,7 @@ The same digest is also available as an HTML page in the local viewer at `http:/
 `watchmen insights` is a two-stage pipeline mirroring the analyst/curator architecture:
 
 1. **Static aggregation** (instant, no LLM): repo table with skills/adapter/pending/activity sparkline, cross-repo candidate-slug overlaps, untapped corpora.
-2. **Stage 1 — per-repo synthesis** (parallel): for each repo with a thesis on disk, read `analyses/<repo>/_running.md` + `kai_claude/<repo>/_curation_log.md` + `_candidates.json` and produce a structured per-repo summary (themes / friction / user signals / skill gaps).
+2. **Stage 1 — per-repo synthesis** (parallel): for each repo with a thesis on disk, read `analyses/<repo>/_running.md` + `bundles/<repo>/_curation_log.md` + `_candidates.json` and produce a structured per-repo summary (themes / friction / user signals / skill gaps).
 3. **Stage 2 — cross-repo synthesis**: feeds the Stage 1 outputs + static facts into a final markdown digest with 5 sections — themes across your work, friction patterns, skill gaps, underused capabilities (CLAUDE.md rules / hooks / MCP), concrete next moves with copy-pastable commands.
 
 Each run is cached at `~/.watchmen/insights/<timestamp>.md` with YAML frontmatter (model + repos synthesized + timestamp). When a cached digest exists, `watchmen insights` shows the latest run's age and prompts `(v)iew · (r)egenerate · (q)uit`. Non-interactive contexts (piped, CI) default to view so a script can't silently spend API credit.
@@ -95,7 +95,7 @@ watchmen init
 
 The wizard handles everything: prompts for your `OPENROUTER_API_KEY` (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the launchd daemon + viewer for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
 
-Runtime data lives under `~/.watchmen/` by default (`state.db`, `corpus.db`, `analyses/`, `kai_claude/`, event logs). Set `WATCHMEN_HOME=/path/to/dir` if you need an alternate data directory for testing or a separate install. On first use, watchmen copies any legacy source-tree runtime files into the new location so existing local data is preserved.
+Runtime data lives under `~/.watchmen/` by default (`state.db`, `corpus.db`, `analyses/`, `bundles/`, event logs). Set `WATCHMEN_HOME=/path/to/dir` if you need an alternate data directory for testing or a separate install. On first use, watchmen copies any legacy source-tree runtime files into the new location so existing local data is preserved.
 
 If anything looks wrong afterwards, `watchmen doctor` does a one-screen ✓/✗ check across API key, corpus, daemon, viewer, and hooks.
 
@@ -166,7 +166,7 @@ watchmen curate my-project                   # skill bundles + CLAUDE.md
 watchmen viewer run                          # http://127.0.0.1:8979
 ```
 
-Outputs land in `kai_claude/my-project/` and `analyses/my-project/`. Both are gitignored — they're your data, not the source.
+Outputs land in `bundles/my-project/` and `analyses/my-project/`. Both are gitignored — they're your data, not the source.
 
 ## The Claude Code plugin
 
@@ -175,7 +175,7 @@ Once installed (`/plugin install watchmen@watchmen` after `/plugin marketplace a
 - **`/watchmen:brief`** — pull the latest curator state for your current workspace. Claude reads what changed since the last run (new skills, CLAUDE.md updates), summarizes it, and asks if you want to load a suggested skill. Your decision; nothing auto-loads.
 - **`💡 watchmen` statusLine indicator** — appears bottom-right of the Claude Code TUI when there's something new for the project you're in. Acknowledges itself when you invoke `/watchmen:brief`.
 - **In-flight skill suggestions** — every prompt you submit gets matched against your project's skill index (FTS5, sub-millisecond). If a strong match exists, the statusLine refreshes after the assistant's response with "💡 you could have used /<skill> to save time & tokens on this task". Retrospective hint; no agent context injection.
-- **Diff view in the viewer** — every curator run becomes a git commit in `kai_claude/<project>/`. The viewer (`http://127.0.0.1:8979/p/<project>/runs`) shows a side-by-side diff per run, GitHub-style.
+- **Diff view in the viewer** — every curator run becomes a git commit in `bundles/<project>/`. The viewer (`http://127.0.0.1:8979/p/<project>/runs`) shows a side-by-side diff per run, GitHub-style.
 
 The plugin reads `~/.watchmen/state/<project>.json` (written by the engine at end of every curator run) and `~/.watchmen/projects.json` (index of tracked projects). It never reaches into the engine's install dir.
 
@@ -282,7 +282,7 @@ The curator is autonomous by default — every 12 hours it re-proposes and re-cu
 - **`watchmen drop <project> <skill>`** — the curator keeps proposing a skill you don't want. Drop removes the bundle dir AND adds the slug to `_blocklist.json`. The candidate finder still proposes whatever it wants, but `curate.py` filters its output against the blocklist before Stage 2 — so dropped slugs stay gone.
 - **`watchmen unpin` / `watchmen restore`** — reverse either decision.
 
-State lives in `kai_claude/<project>/_pinned.json` and `_blocklist.json` — JSON lists of slugs. Empty lists delete the file. Both are git-tracked inside the project bundle, so pin/drop state survives across machines if you sync `kai_claude/` somewhere.
+State lives in `bundles/<project>/_pinned.json` and `_blocklist.json` — JSON lists of slugs. Empty lists delete the file. Both are git-tracked inside the project bundle, so pin/drop state survives across machines if you sync `bundles/` somewhere.
 
 ### Harness awareness
 
@@ -306,7 +306,7 @@ watchmen settings set kai-frontend approval_required true
 watchmen curate kai-frontend --approval-required
 ```
 
-With `approval_required` on, **new** skill bundles route to `kai_claude/<project>/_pending/<slug>/` instead of `skills/<slug>/`. Already-approved skills keep updating in place — only first-time additions are gated. To review the queue:
+With `approval_required` on, **new** skill bundles route to `bundles/<project>/_pending/<slug>/` instead of `skills/<slug>/`. Already-approved skills keep updating in place — only first-time additions are gated. To review the queue:
 
 ```bash
 watchmen review <project>      # walks _pending/ first (a)pprove / (d)rop / (s)kip / (v)iew / (q)uit,
@@ -320,7 +320,7 @@ Approving moves `_pending/<slug>/` → `skills/<slug>/`. If a previously-approve
 ### Fast-cycle commands
 
 - **`watchmen learn <project>`** closes the "did watchmen catch my latest session?" loop. Runs the analyst incrementally (only days since `last_analyst_day`) then a Stage-3-only curator pass to refresh CLAUDE.md. ~$0.50, 5-10 min. Add `--full` if you want the whole pipeline (Stage 1 finder + Stage 2 per-skill + Stage 3 CLAUDE.md, ~$3-8, 30-60 min) — useful when you expect new skill candidates to surface.
-- **`watchmen review <project>`** walks every skill, prompts `(k)eep / (d)rop / (p)in / (s)kip / (v)iew / (q)uit`, and applies decisions through the same pin/drop helpers. Every walk appends to `kai_claude/<project>/review.md` so there's an audit trail of when each decision was made. Bails cleanly with a hint when stdin isn't a tty (e.g., piped).
+- **`watchmen review <project>`** walks every skill, prompts `(k)eep / (d)rop / (p)in / (s)kip / (v)iew / (q)uit`, and applies decisions through the same pin/drop helpers. Every walk appends to `bundles/<project>/review.md` so there's an audit trail of when each decision was made. Bails cleanly with a hint when stdin isn't a tty (e.g., piped).
 
 ## How it works
 
@@ -355,7 +355,7 @@ Approving moves `_pending/<slug>/` → `skills/<slug>/`. If a previously-approve
 │      spawns critic, refines                                      │
 │   3. CLAUDE.md author reads thesis + skills + infra files        │
 │   4. Index writer                                                │
-│   Output: kai_claude/<project>/                                  │
+│   Output: bundles/<project>/                                  │
 └──────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -380,7 +380,7 @@ Per project, a full curator run (analyst + 6-8 skill bundles + CLAUDE.md) is typ
 
 ## Privacy
 
-Everything lives locally. Your session transcripts live in `~/.claude/projects/` already (Anthropic puts them there). watchmen reads them, builds a SQLite corpus, and ships only the chunks needed for analysis to OpenRouter (your chosen LLM provider). The artifacts it generates (`kai_claude/`, `analyses/`) stay on your disk.
+Everything lives locally. Your session transcripts live in `~/.claude/projects/` already (Anthropic puts them there). watchmen reads them, builds a SQLite corpus, and ships only the chunks needed for analysis to OpenRouter (your chosen LLM provider). The artifacts it generates (`bundles/`, `analyses/`) stay on your disk.
 
 If you don't want certain repos analyzed, just don't track them — auto-detect only suggests, `watchmen track` is opt-in.
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from corpus_filters import substantive_filter
-from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR, STATE_DB
+from paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
 
 ROOT = Path(__file__).parent
 
@@ -76,7 +76,7 @@ def _migrate_project_columns(c) -> None:
     a pull, no `watchmen ingest --full` needed.
 
     History:
-      - `approval_required`: gates new bundles to kai_claude/<repo>/_pending/
+      - `approval_required`: gates new bundles to bundles/<repo>/_pending/
         until reviewed via `watchmen review`. Default 0 (autonomy preserved).
       - `skip_overlapping_skills`: makes `watchmen curate` drop candidates
         that overlap with installed harness skills entirely, rather than
@@ -244,7 +244,7 @@ def _project_dir_predicate(source_repo: str, alias: str = "s") -> tuple[str, tup
 
 
 def sync_from_disk(project_key: str) -> dict:
-    """Look at analyses/<project>/*.md and kai_claude/<project>/skills to derive last-run state.
+    """Look at analyses/<project>/*.md and bundles/<project>/skills to derive last-run state.
     Updates state.db with what's on disk. Returns a summary of what was synced."""
     summary = {"analyst": False, "curator": False}
     analyses_dir = ANALYSES_DIR / project_key
@@ -258,11 +258,11 @@ def sync_from_disk(project_key: str) -> dict:
             update_project(project_key, last_analyst_day=latest, last_analyst_run=mtime_iso)
             summary["analyst"] = {"last_day": latest, "files": len(day_files)}
 
-    skills_dir = KAI_CLAUDE_DIR / project_key / "skills"
+    skills_dir = BUNDLES_DIR / project_key / "skills"
     if skills_dir.exists():
         skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir())
         if skill_count:
-            claude_md = KAI_CLAUDE_DIR / project_key / "CLAUDE.md"
+            claude_md = BUNDLES_DIR / project_key / "CLAUDE.md"
             mtime_iso = (
                 datetime.fromtimestamp(claude_md.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
                 if claude_md.exists()
