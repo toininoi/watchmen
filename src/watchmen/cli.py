@@ -35,7 +35,7 @@ from pathlib import Path
 
 from watchmen import config
 from watchmen import state
-from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
+from watchmen.paths import STATE_DB
 # Presentation helpers were inline until Phase 3 — alias them under the
 # `_name` convention the rest of cli.py uses so call sites don't churn.
 from watchmen.ui import (
@@ -54,6 +54,25 @@ from watchmen.ui import (
 )
 from watchmen.ui import (
     print_runtime_state_error as _ui_print_runtime_state_error,
+)
+# Project/path/skill helpers moved to watchmen.util during the Phase 3 split.
+# Aliased under the `_name` convention so the dispatch functions in this file
+# don't churn.
+from watchmen.util import (
+    ADAPTER_SHORT as _ADAPTER_SHORT,
+    BLOCKLIST_FILE as _BLOCKLIST_FILE,
+    PINNED_FILE as _PINNED_FILE,
+    adapter_breakdown as _adapter_breakdown,
+    analyses_base as _analyses_base,
+    available_skills as _available_skills,
+    bundle_base as _bundle_base,
+    bundle_dir as _bundle_dir,
+    corpus_db_path as _corpus_db_path,
+    read_skill_list as _read_skill_list,
+    repo_friction_signals as _repo_friction_signals,
+    resolve_skill_slug as _resolve_skill_slug,
+    tracked_project_keys as _tracked_project_keys,
+    write_skill_list as _write_skill_list,
 )
 
 
@@ -1006,159 +1025,6 @@ def cmd_settings_api_key(args) -> int:
 # ─── Round 1: inspection + provenance commands ─────────────────────────────
 
 
-_ADAPTER_SHORT = {"claude_code": "cc", "codex": "cd", "pi": "pi"}
-
-
-def _bundle_dir(project_key: str) -> Path:
-    return _bundle_base() / project_key
-
-
-def _bundle_base() -> Path:
-    # When tests or alternate installs override ROOT, look for bundles/ there;
-    # fall through to the canonical WATCHMEN_HOME/bundles/ via paths.BUNDLES_DIR.
-    return ROOT / "bundles" if ROOT != SOURCE_ROOT else BUNDLES_DIR
-
-
-def _analyses_base() -> Path:
-    return ROOT / "analyses" if ROOT != SOURCE_ROOT else ANALYSES_DIR
-
-
-def _corpus_db_path() -> Path:
-    return ROOT / "corpus.db" if ROOT != SOURCE_ROOT else CORPUS_DB
-
-
-def _tracked_source_repo(project_key: str) -> str | None:
-    proj = state.get_project(project_key)
-    return proj.get("source_repo") if proj else None
-
-
-def _project_dir_predicate(project_key: str, alias: str = "s") -> tuple[str, tuple[str, str]] | None:
-    source_repo = _tracked_source_repo(project_key)
-    if not source_repo:
-        return None
-    root = str(Path(source_repo).expanduser())
-    return f"({alias}.project_dir = ? OR {alias}.project_dir LIKE ?)", (root, root.rstrip("/") + "/%")
-
-
-def _tracked_project_keys() -> list[str]:
-    """Project keys that have at least a `bundles/<key>/` dir on disk —
-    used as the universe for `show` and `recent` without a project arg.
-    Falls back to state.list_projects() when nothing is on disk yet."""
-    base = _bundle_base()
-    if base.exists():
-        keys = sorted(d.name for d in base.iterdir() if d.is_dir() and (d / "skills").exists())
-        if keys:
-            return keys
-    return [p["project_key"] for p in state.list_projects()]
-
-
-def _adapter_breakdown(project_key: str) -> dict[str, int]:
-    """Session counts per adapter from corpus.db, filtered to substantive
-    non-subagent sessions matching the project path."""
-    import sqlite3
-    corpus_db = _corpus_db_path()
-    if not corpus_db.exists():
-        return {}
-    pred = _project_dir_predicate(project_key)
-    if not pred:
-        return {}
-    project_where, project_params = pred
-    cc = sqlite3.connect(corpus_db)
-    rows = cc.execute(
-        """SELECT agent, COUNT(*) FROM sessions s
-           WHERE """ + project_where + """ AND is_subagent = 0
-           GROUP BY agent""",
-        project_params,
-    ).fetchall()
-    cc.close()
-    return {agent: n for agent, n in rows}
-
-
-_FRUSTRATION_MARKERS_SQL = (
-    # Case-sensitive markers that would create false positives if lowercased.
-    "p.text LIKE '%:(%' "
-    # Case-insensitive — phrase fragments common in genuine frustration.
-    "OR LOWER(p.text) LIKE '%no wait%' "
-    "OR LOWER(p.text) LIKE '%bruh%' "
-    "OR LOWER(p.text) LIKE '%nope%' "
-    "OR LOWER(p.text) LIKE '%dammit%' "
-    "OR LOWER(p.text) LIKE '%wtf%' "
-    "OR LOWER(p.text) LIKE '%just stop%' "
-    "OR LOWER(p.text) LIKE '%still?%' "
-    "OR LOWER(p.text) LIKE '%ugh,%' "
-    "OR LOWER(p.text) LIKE '%fuck,%' "
-    "OR LOWER(p.text) LIKE '%fucking%'"
-)
-
-
-def _repo_friction_signals(project_key: str) -> tuple[int, list[tuple[str, int]], int, list[str]]:
-    """Pull tool-error totals + frustration-marker matches per repo from
-    corpus.db. Returns (total_tool_errors, [(tool, n), …] top-3 erroring
-    tools, frustration_prompt_count, [sample_text, …] first 2 samples).
-
-    Two signals that `/insights` surfaces as charts: tool-error counts
-    and inferred-satisfaction histograms. We approximate satisfaction
-    via a regex over the prompts table (frustration markers ≈ negative
-    satisfaction) — coarser than Anthropic's LLM-inferred satisfaction
-    but cheap and traceable to actual user prompts."""
-    import sqlite3
-    corpus_db = _corpus_db_path()
-    if not corpus_db.exists():
-        return 0, [], 0, []
-    pred = _project_dir_predicate(project_key)
-    if not pred:
-        return 0, [], 0, []
-    project_where, project_params = pred
-    cc = sqlite3.connect(corpus_db)
-    # Tool-error total.
-    err_total = cc.execute(
-        """SELECT COALESCE(SUM(tool_error_count), 0) FROM sessions s
-           WHERE """ + project_where + """ AND is_subagent = 0""",
-        project_params,
-    ).fetchone()[0] or 0
-    # Top erroring tools — useful for the LLM to cite specifics.
-    top_tools = cc.execute(
-           """SELECT tc.tool_name, COUNT(*) AS n
-           FROM tool_calls tc JOIN sessions s ON s.session_id = tc.session_id
-           WHERE """ + project_where + """ AND s.is_subagent = 0 AND tc.is_error = 1
-           GROUP BY tc.tool_name ORDER BY n DESC LIMIT 3""",
-        project_params,
-    ).fetchall()
-    # Frustration-marker count + 2 representative samples.
-    frust_count = cc.execute(
-            f"""SELECT COUNT(*) FROM prompts p
-            JOIN sessions s ON s.session_id = p.session_id
-            WHERE {project_where} AND s.is_subagent = 0
-              AND ({_FRUSTRATION_MARKERS_SQL})""",
-        project_params,
-    ).fetchone()[0] or 0
-    samples = [
-        row[0][:120].replace("\n", " ").strip()
-        for row in cc.execute(
-            f"""SELECT substr(p.text, 1, 160) FROM prompts p
-                JOIN sessions s ON s.session_id = p.session_id
-                WHERE {project_where} AND s.is_subagent = 0
-                  AND ({_FRUSTRATION_MARKERS_SQL})
-                  AND p.text NOT LIKE '%Image%'
-                ORDER BY p.timestamp DESC LIMIT 2""",
-            project_params,
-        ).fetchall()
-    ]
-    cc.close()
-    return err_total, list(top_tools), frust_count, samples
-
-
-def _format_adapter_count(breakdown: dict[str, int]) -> str:
-    """Compact `2053 cc · 417 cd · 0 pi` style line. Always shows all 3 adapters
-    so the row width is stable, even when projects don't have sessions in
-    every adapter yet."""
-    parts = []
-    for agent in ("claude_code", "codex", "pi"):
-        n = breakdown.get(agent, 0)
-        parts.append(f"{n:>4} {_ADAPTER_SHORT[agent]}")
-    return " · ".join(parts)
-
-
 def cmd_show(args) -> int:
     """Terminal-native viewer. Three modes:
 
@@ -1449,70 +1315,6 @@ def cmd_recent(args) -> int:
 # proposes anything (it's an LLM, we can't muzzle it cleanly), but
 # curate.py filters its output against the blocklist before Stage 2 and
 # deletes any leftover bundle dir for the blocked slug.
-
-_PINNED_FILE = "_pinned.json"
-_BLOCKLIST_FILE = "_blocklist.json"
-
-
-def _read_skill_list(project: str, filename: str) -> set[str]:
-    """Load a JSON list of skill slugs from bundles/<project>/<filename>.
-    Empty/missing/invalid → empty set."""
-    import json as _json
-    p = _bundle_dir(project) / filename
-    if not p.exists():
-        return set()
-    try:
-        return set(_json.loads(p.read_text()))
-    except Exception:
-        return set()
-
-
-def _write_skill_list(project: str, filename: str, values: set[str]) -> Path:
-    """Persist a sorted JSON list of slugs back to the project dir. When the
-    list becomes empty (last unpin or restore), delete the file instead of
-    leaving an empty `[]` behind — keeps the bundle dir tidy."""
-    import json as _json
-    proj_dir = _bundle_dir(project)
-    proj_dir.mkdir(parents=True, exist_ok=True)
-    p = proj_dir / filename
-    if not values:
-        if p.exists():
-            p.unlink()
-        return p
-    p.write_text(_json.dumps(sorted(values), indent=2) + "\n")
-    return p
-
-
-def _resolve_skill_slug(project: str, target: str) -> str | None:
-    """Find the canonical slug for a user-supplied skill identifier. Accepts:
-      - exact slug matching bundles/<project>/skills/<slug>/
-      - display name from _candidates.json (case-insensitive)
-    Returns None if neither matches — the caller is expected to suggest
-    available slugs in that case."""
-    import json as _json
-    proj_dir = _bundle_dir(project)
-    skills_dir = proj_dir / "skills"
-    if skills_dir.exists() and (skills_dir / target).is_dir():
-        return target
-    cands_path = proj_dir / "_candidates.json"
-    if cands_path.exists():
-        try:
-            cands = _json.loads(cands_path.read_text())
-        except Exception:
-            cands = []
-        for c in cands:
-            if c.get("slug") == target or c.get("name", "").lower() == target.lower():
-                return c.get("slug")
-    return None
-
-
-def _available_skills(project: str) -> list[str]:
-    """List slugs present on disk — used to suggest valid options on miss."""
-    skills_dir = _bundle_dir(project) / "skills"
-    if not skills_dir.exists():
-        return []
-    return sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
-
 
 # ─── Round 3: fast feedback loop + interactive review ──────────────────────
 
