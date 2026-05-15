@@ -8,7 +8,7 @@
 #
 # Self-locates via $0 — CLAUDE_PLUGIN_ROOT isn't set for the global statusLine.
 
-set -u
+set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -20,12 +20,23 @@ STATE_FILE="${STATE_DIR}/${PROJECT_KEY}.json"
 ACK_FILE="${STATE_DIR}/${PROJECT_KEY}.acknowledged"
 SUGGESTION_FILE="${STATE_DIR}/${PROJECT_KEY}.suggestion.json"
 
+# Portable file-mtime: BSD/macOS uses `stat -f %m`, Linux GNU stat uses `-c %Y`.
+# `stat -c %Y` fails first on macOS (BSD doesn't know -c); the `||` chain
+# transparently falls through to BSD form. Returns 0 if neither works (so
+# arithmetic comparison below stays valid).
+_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0
+}
+
 # 1. Live suggestion from the prompt hook (highest priority).
+# Pass the file path through an env var so a path containing quotes can't
+# inject Python — defense in depth, even though resolve_project_key.py
+# should never produce a malicious one.
 if [ -f "${SUGGESTION_FILE}" ]; then
-  SKILL=$(python3 -c "
-import json, sys
+  SKILL=$(WATCHMEN_FILE="${SUGGESTION_FILE}" python3 -c "
+import json, os
 try:
-    d = json.load(open('${SUGGESTION_FILE}'))
+    d = json.load(open(os.environ['WATCHMEN_FILE']))
     print(d.get('skill_slug', ''))
 except Exception:
     pass
@@ -39,15 +50,15 @@ fi
 # 2. Pending brief from curator (unless already acknowledged).
 [ ! -f "${STATE_FILE}" ] && exit 0
 if [ -f "${ACK_FILE}" ]; then
-  state_mtime=$(stat -f %m "${STATE_FILE}" 2>/dev/null || echo 0)
-  ack_mtime=$(stat -f %m "${ACK_FILE}" 2>/dev/null || echo 0)
+  state_mtime=$(_mtime "${STATE_FILE}")
+  ack_mtime=$(_mtime "${ACK_FILE}")
   [ "${ack_mtime}" -gt "${state_mtime}" ] && exit 0
 fi
 
-SUMMARY=$(python3 -c "
-import json
+SUMMARY=$(WATCHMEN_FILE="${STATE_FILE}" python3 -c "
+import json, os
 try:
-    d = json.load(open('${STATE_FILE}'))
+    d = json.load(open(os.environ['WATCHMEN_FILE']))
     print(d.get('summary', '').strip())
 except Exception:
     pass
