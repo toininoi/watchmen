@@ -1,11 +1,20 @@
 name: release
 
-# Fires when a tag matching v0.5.0, v1.0.0, etc. is pushed.
-# Phase 6 of the handover will use this for the first PyPI publish; until
-# then the workflow is a draft — pushing a tag will build a wheel + sdist
-# and attach them to the GitHub Release, but the PyPI publish step is
-# guarded behind a repo-level `secrets.PYPI_TRUSTED_PUBLISHER` flag so it
-# stays off until the project's PyPI account is set up with OIDC.
+# Fires when a tag matching v0.5.0, v1.0.0, etc. is pushed. Builds wheel +
+# sdist, smoke-tests the wheel in a fresh venv, attaches both to a GitHub
+# Release, and (when the `PUBLISH_TO_PYPI` repo variable is set to 'true')
+# publishes to PyPI via OIDC trusted publishing — no API tokens stored.
+#
+# To enable PyPI publishing:
+#   1. Claim the `watchmen` project on PyPI (pending-publisher works for
+#      first publish — register at https://pypi.org/manage/account/publishing/).
+#   2. Add this repo as a trusted publisher: owner=firstbatchxyz,
+#      repo=watchmen, workflow=release.yml, environment=pypi.
+#   3. Create a "pypi" GitHub Environment on this repo (Settings →
+#      Environments → New environment) so the publish job has a deploy
+#      gate the maintainer must approve per release.
+#   4. Set the `PUBLISH_TO_PYPI` repo variable to `true` (Settings →
+#      Secrets and variables → Actions → Variables).
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']
@@ -74,17 +83,17 @@ jobs:
           generate_release_notes: true
           files: dist/*
 
-  # Disabled until Phase 6 enables PyPI OIDC trusted publishing on the
-  # firstbatchxyz/watchmen repo. To enable: register the project on PyPI,
-  # add this repo + workflow as a trusted publisher, then flip the `if`
-  # condition below to `true` (or drop the guard entirely).
+  # Gated on the `PUBLISH_TO_PYPI` repo variable so contributors who fork
+  # the repo and tag releases don't accidentally publish. Flip the
+  # variable from the repo settings UI when PyPI trusted publishing is
+  # configured (see the workflow header for the setup steps).
   pypi-publish:
     needs: build
     runs-on: ubuntu-latest
+    if: vars.PUBLISH_TO_PYPI == 'true'
     environment:
       name: pypi
       url: https://pypi.org/p/watchmen
-    if: false
     steps:
       - uses: actions/download-artifact@v4
         with:

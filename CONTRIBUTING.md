@@ -125,8 +125,42 @@ Look at:
   GitHub-style file tree, syntax highlighting, and "what changed in CLAUDE.md"
   callouts would be high-impact.
 - **Tests for adapters** — codex.py and pi.py have one regression fixture
-  each. claude_code.py has none. The fixtures in `tests/fixtures/` make it
-  easy to add more.
+  each. claude_code.py has unit tests but no fixture-driven end-to-end
+  ones. The fixtures in `tests/fixtures/` make it easy to add more.
+
+## Releasing (maintainer)
+
+Releases are tag-triggered. The workflow at `.github/workflows/release.yml`
+builds wheel + sdist, smoke-tests them, attaches them to a GitHub Release,
+and (when configured) publishes to PyPI via OIDC trusted publishing.
+
+**Per-release checklist:**
+
+1. Open a PR that bumps `pyproject.toml` `version = "x.y.z"` and adds an
+   `## [x.y.z] — YYYY-MM-DD` section to `CHANGELOG.md`.
+2. Once CI is green and the PR is merged, pull main and tag:
+   ```bash
+   git pull origin main
+   git tag -a vx.y.z -m "watchmen vx.y.z"
+   git push origin vx.y.z
+   ```
+3. The release workflow fires automatically — watch it in the Actions tab.
+4. If `PUBLISH_TO_PYPI` is set, the `pypi-publish` job will queue for
+   approval in the "pypi" environment. Approve it in the Actions UI.
+
+**One-time PyPI setup** (needed before the first publish):
+
+1. Claim the `watchmen` project on PyPI as a pending trusted publisher
+   at https://pypi.org/manage/account/publishing/.
+   - Owner: `firstbatchxyz`, repo: `watchmen`,
+   - workflow file: `release.yml`, environment: `pypi`.
+2. Create a "pypi" Environment on GitHub: **Settings → Environments → New**.
+   Add at least one required reviewer so prod releases require approval.
+3. Set the repo variable `PUBLISH_TO_PYPI = true`: **Settings →
+   Secrets and variables → Actions → Variables → New repository variable**.
+
+After this is configured, every future `vx.y.z` tag publishes automatically
+once a reviewer approves the environment gate.
 
 ## Reporting bugs
 
