@@ -10,25 +10,37 @@ want to fix it — these notes are aimed at making that fix easy to ship.
 ```bash
 git clone https://github.com/firstbatchxyz/watchmen.git
 cd watchmen
-uv sync                       # install dev deps + editable watchmen
-uv run python tests/smoke.py  # the only test entry point today
+uv sync --extra dev           # editable watchmen + pytest + pytest-cov
+uv run pytest tests/          # full test suite (~4s)
 ```
 
-That's the whole loop. Edit code, rerun the smoke tests. If they pass and
-your manual `watchmen status` / `watchmen show` calls still work, open a PR.
+That's the whole loop. Edit code, rerun pytest. If it passes and your
+manual `watchmen status` / `watchmen show` calls still work, open a PR.
+
+Useful pytest invocations:
+
+```bash
+uv run pytest tests/ -k name           # subset by test name
+uv run pytest tests/test_agent.py -v   # one file, verbose
+uv run pytest --lf                     # rerun last failures only
+uv run pytest --cov=watchmen tests/    # coverage report
+```
 
 ## Project layout (recap from README)
 
 ```
-src/watchmen/         the package — every Python module lives here
-src/watchmen/hooks/   shell hooks the package ships
-plugin/               separate Claude Code plugin (distributed via GitHub)
-tests/smoke.py        the single test entry (Phase 5 will split into pytest)
-tests/fixtures/       adapter fixtures (jsonl session traces)
+src/watchmen/                 the package — every Python module lives here
+src/watchmen/hooks/           shell hooks the package ships
+plugin/                       separate Claude Code plugin (distributed via GitHub)
+tests/test_smoke.py           cold-start + regression sweep (the original smoke suite)
+tests/test_adapter_*.py       per-adapter parser tests (claude_code, codex, pi)
+tests/test_agent.py           mocked OpenRouter retry/cost-ceiling tests
+tests/conftest.py             shared sys.path setup + ROOT/SRC constants
+tests/fixtures/               adapter fixtures (jsonl session traces)
 ```
 
 If you're touching `state.py`, `metrics.py`, `corpus.py`, or `onboard.py`,
-expect the smoke test to gate your merge — those have the densest coverage.
+expect the test suite to gate your merge — those have the densest coverage.
 
 ## Local setup
 
@@ -58,15 +70,16 @@ watchmen <command>             # works after `uv tool install --editable .`
 ## Running tests
 
 ```bash
-uv run python tests/smoke.py
+uv run pytest tests/
 ```
 
-That's it. The smoke tests:
+That's it. The tests:
 
 - Build cleanly without persisted state (they use temp dirs).
 - Cover state.py, corpus.py, curate.py, metrics.py, the CLI dispatch, the
-  viewer, all three adapters (cc / cd / pi).
-- Don't make network calls. The OpenRouter agent loop is mocked away.
+  viewer, all three adapters (cc / cd / pi), and the OpenRouter agent loop.
+- Don't make network calls. `agent.call_openrouter` is exercised via
+  `unittest.mock` stubs of `httpx.Client.post`.
 
 Phase 5 of the handover will port these to pytest with proper fixtures. For
 now: just one big script, one entry point.

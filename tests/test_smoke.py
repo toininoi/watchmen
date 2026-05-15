@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Cold-start smoke tests.
+"""Smoke + regression tests for watchmen — pytest-discovered.
 
 Catches the class of bugs that only appear on a totally fresh install — the
 ones the developer never hits because their dev machine already has corpus.db,
@@ -12,38 +11,15 @@ Specifically covers:
     format, not 'opus-4.7' dot format) and routes to the right tier.
   - turn_cost_usd math matches Anthropic's published worked example.
 
-Run via: `python tests/smoke.py`  (no pytest dep). CI runs the same command.
-Exit code 0 = all pass, 1 = any failure.
+Run via: `pytest tests/` or `pytest tests/test_smoke.py -k <name>`.
+ROOT + SRC come from conftest.py.
 """
 
 import sys
 import tempfile
-import traceback
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent  # repo root (parent of src/)
-# `src/watchmen/` is the package source. Files like onboard.py, launchd_setup.py
-# that some tests inspect via static reads live under SRC.
-SRC = ROOT / "src" / "watchmen"
-# The editable install puts `watchmen` on sys.path automatically (uv handles
-# this via the .pth file). Inserting `src/` here makes the test runnable even
-# without a prior `uv sync` — convenient for CI and one-shot invocations.
-sys.path.insert(0, str(ROOT / "src"))
-
-PASS = 0
-FAIL = 0
-
-
-def check(name: str, fn):
-    global PASS, FAIL
-    try:
-        fn()
-        print(f"  ✓ {name}")
-        PASS += 1
-    except Exception:
-        print(f"  ✗ {name}")
-        traceback.print_exc()
-        FAIL += 1
+from conftest import ROOT, SRC
 
 
 # ─── State / onboard tests ──────────────────────────────────────────────────
@@ -2636,143 +2612,3 @@ def test_cli_bare_invocation_runs_smart_default():
     assert rc == 0, f"bare watchmen on first-run should exit 0, got {rc}"
 
 
-def main() -> int:
-    print(f"watchmen smoke tests · python {sys.version.split()[0]}")
-    print(f"repo: {ROOT}")
-    print()
-    print("State / onboard:")
-    check("state.init_db is idempotent",          test_state_init_idempotent)
-    check("list_projects raises before init",     test_list_projects_without_init_raises)
-    check("onboard.run calls state.init_db first", test_onboard_calls_init_db)
-    print()
-    print("Metrics / pricing:")
-    check("price_for_model handles API dash names", test_price_for_dash_api_names)
-    check("price_for_model falls back cleanly",     test_price_for_unknown_falls_back)
-    check("turn_cost matches docs worked example",  test_turn_cost_worked_example)
-    check("5m vs 1h cache writes priced differently", test_cache_5m_vs_1h_are_different)
-    print()
-    print("Adapters:")
-    check("codex adapter parses fixture cleanly",   test_codex_adapter_parses_fixture)
-    check("codex adapter dedupes user_message",     test_codex_adapter_dedupe_user_message)
-    check("codex adapter silent on missing install", test_codex_adapter_silent_on_missing_install)
-    check("pi adapter parses branching fixture",     test_pi_adapter_parses_branching_fixture)
-    check("pi adapter respects compaction cutoff",   test_pi_adapter_respects_compaction_cutoff)
-    check("pi adapter silent on missing install",    test_pi_adapter_silent_on_missing_install)
-    check("pi adapter rejects unsupported version",  test_pi_adapter_rejects_unsupported_version)
-    check("corpus.sessions has agent column",        test_corpus_schema_has_agent_column)
-    check("decode_project_dir naive fallback",        test_decode_project_dir_naive_fallback)
-    check("decode_project_dir resolves real FS",      test_decode_project_dir_resolves_real_filesystem)
-    check("claude adapter stores decoded paths",      test_claude_adapter_stores_decoded_paths)
-    print()
-    print("CLI settings:")
-    check("settings parser validates inputs",         test_settings_parser_validates_inputs)
-    check("settings set writes to state.db",          test_settings_set_writes_to_state_db)
-    print()
-    print("CLI noun-verb refactor:")
-    check("hooks status new+old forms dispatch",      test_cli_noun_verb_and_deprecated_both_dispatch)
-    check("bare noun (`daemon`) prints help, exits 1", test_cli_bare_noun_prints_help_and_exits_1)
-    print()
-    print("CLI OSS polish:")
-    check("--version prints semver, not 0.0.0 fallback", test_cli_version_flag_prints_version)
-    check("`init` dispatches + `onboard` alias works",   test_cli_init_dispatches_to_onboard_and_onboard_still_works)
-    check("--help groups visible, deprecated hidden",    test_cli_help_renders_groups_and_hides_deprecated)
-    check("unknown command suggests nearest match",      test_cli_unknown_command_suggests_nearest_match)
-    check("`open <p>` builds URL + invokes webbrowser",  test_cli_open_constructs_url_and_invokes_webbrowser)
-    check("`logs` resolves files + exits 1 if missing",  test_cli_logs_resolves_log_files_for_name)
-    check("bare `watchmen` runs smart default (exit 0)", test_cli_bare_invocation_runs_smart_default)
-    print()
-    print("Viewer port config:")
-    check("config.viewer_port respects env→file→default",  test_config_viewer_port_reads_env_then_file_then_default)
-    check("`settings port` get/set + validates input",     test_cli_settings_port_get_and_set_with_validation)
-    print()
-    print("Round 2 — control commands:")
-    check("pin/unpin/drop/restore roundtrip + file cleanup", test_pin_unpin_drop_restore_roundtrip)
-    check("curate._apply_blocklist filters + sweeps bundles", test_curate_apply_blocklist_filters_and_sweeps_bundles)
-    check("curate._load_skill_list tolerates malformed JSON", test_curate_load_skill_list_tolerates_malformed_json)
-    print()
-    print("Round 3 — cycle-time + review:")
-    check("`learn` short-circuits + --full overrides + untracked = 1", test_cli_learn_short_circuits_when_no_new_prompts)
-    check("`review` bails when stdin isn't a tty",                    test_cli_review_bails_when_stdin_not_a_tty)
-    print()
-    print("Round 1 — inspection commands:")
-    check("sparkline + bar handle empty / all-zero series",  test_sparkline_and_bar_edge_cases)
-    check("`show` overview / project / file / skill modes",  test_cli_show_modes_list_overview_and_dump)
-    check("`why` surfaces provenance + curator log excerpt", test_cli_why_shows_provenance_and_curator_excerpt)
-    check("`recent` runs git log inside each bundles/",   test_cli_recent_walks_git_log_of_bundles)
-    check("`insights` digests across repos + cross-link",    test_cli_insights_aggregates_curated_and_uncurated_repos)
-    check("`insights` cache save/view/list + non-tty default", test_cli_insights_save_view_list_roundtrip)
-    print()
-    print("Watchmen aesthetic:")
-    check("doomsday clock buckets stale projects correctly", test_doomsday_clock_brackets_for_status_command)
-    check("doomsday ascii renders 3 lines + correct word",   test_doomsday_ascii_renders_three_lines_with_correct_word)
-    check("Manhattan quote pools have variety + structure",  test_manhattan_quote_pools_are_non_empty_and_in_character)
-    check("Rorschach inkblots are mirror-symmetric pairs",   test_rorschach_inkblots_are_mirror_symmetric)
-    print()
-    print("Curator cache:")
-    check("cache hit when results unchanged",         test_cache_hit_when_results_unchanged)
-    check("cache miss on vanished session/file",      test_cache_miss_on_vanished_session_or_file)
-    check("cache miss on missing cache file",         test_cache_miss_on_missing_cache_file)
-    check("invalidate_all clears every cache file",   test_invalidate_all_clears_every_cache_file)
-    check("only input tools are recorded",            test_only_input_tools_are_recorded)
-    check("stage 2 parallel dispatcher runs concurrently", test_stage_2_parallel_dispatcher_preserves_order_independence)
-    print()
-    print("Session filtering:")
-    check("substantive filter drops trivial sessions",  test_substantive_filter_drops_trivial_sessions)
-    check("substantive filter accepts alias choices",   test_substantive_filter_handles_alias_choices)
-    print()
-    print("Incremental corpus scan:")
-    check("scan is incremental + idempotent",           test_corpus_scan_is_incremental_and_idempotent)
-    check("--full forces a rebuild",                    test_corpus_full_flag_forces_rebuild)
-    check("legacy DB migrates without errors",          test_corpus_migrates_legacy_db_without_file_mtime)
-    check("pre-adapter DB auto-adds `agent` column",    test_corpus_migrate_schema_adds_agent_column_to_pre_adapter_db)
-    check("migrate_schema is safe when corpus.db missing", test_corpus_migrate_schema_is_safe_when_db_missing)
-    print()
-    print("Release notes + hook cleanup (0.2.0):")
-    check("changelog parser splits versioned sections",         test_changelog_parser_extracts_versioned_sections)
-    check("changelog new-entries filter handles fresh/bump/same", test_changelog_new_entries_filters_by_last_seen_version)
-    check("release-notes silent when version unchanged",        test_changelog_show_release_notes_writes_tracker_silently_on_match)
-    check("release-notes announces on bump, silences after",    test_changelog_show_release_notes_announces_on_bump_then_silences)
-    check("hooks scrub legacy paths (install + uninstall)",     test_hooks_scrub_legacy_paths_on_install_and_uninstall)
-    check("brief artifacts removed + don't sneak back",         test_brief_artifacts_no_longer_shipped)
-    print()
-    print("Harness-aware curator + approval queue (0.3.0):")
-    check("harness reader parses SKILL.md frontmatter",        test_harness_installed_skills_reads_skill_md_frontmatter)
-    check("harness.overlaps_existing matches case-insensitive", test_harness_overlaps_existing_matches_case_insensitive)
-    check("finder prompt embeds harness block",                test_curate_finder_prompt_includes_harness_block)
-    check("finder schema accepts `enhancement_of`",            test_curate_finder_schema_accepts_enhancement_of_field)
-    check("per-skill curator respects out_subdir",             test_curate_build_skill_curator_respects_out_subdir)
-    check("enhancement mode prepends harness context",         test_curate_build_skill_curator_enhancement_mode_prepends_context)
-    check("state.init_db migrates approval columns",           test_state_init_db_migrates_approval_columns_on_legacy_db)
-    check("settings parser accepts approval/skip_overlap",     test_cli_settings_parser_accepts_approval_required_and_skip_overlap)
-    check("cmd_curate forwards DB settings to subprocess",     test_cmd_curate_passes_flags_from_db_settings_to_subprocess)
-    print()
-    print("HTML insights viewer (0.4.0):")
-    check("hbar_chart_svg renders rows + handles edges",       test_metrics_hbar_chart_svg_renders_rows_and_handles_edges)
-    check("/insights route returns 200 with key sections",     test_viewer_insights_route_returns_html_with_key_sections)
-    check("Insights nav link wired up in base.html",           test_viewer_base_template_exposes_insights_nav_link)
-    print()
-    print("Service install (launchd / systemd):")
-    check("launchd plists use noun-verb form",                test_launchd_plist_args_use_noun_verb_form)
-    check("systemd units use noun-verb form",                 test_systemd_unit_args_use_noun_verb_form)
-    check("systemd dry-run emits valid unit file",            test_systemd_setup_dry_run_emits_valid_unit_file)
-    check("service dispatcher picks backend per platform",    test_service_dispatcher_picks_backend_per_platform)
-    print()
-    print("API key management:")
-    check("api-key helpers roundtrip + preserve unrelated lines", test_api_key_helpers_roundtrip)
-    print()
-    print("Onboard parallelism:")
-    check("onboard runs multiple projects concurrently",          test_onboard_runs_projects_in_parallel)
-    print()
-    print("Codebase hygiene:")
-    check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)
-
-    print()
-    if FAIL:
-        print(f"  ✗ {FAIL} failed, {PASS} passed")
-        return 1
-    print(f"  ✓ all {PASS} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
