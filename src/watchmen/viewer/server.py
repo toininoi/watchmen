@@ -157,12 +157,13 @@ def dashboard(request: Request):
     changelog_version: str | None = None
     changelog_body_html: str | None = None
     try:
-        import sys
-        sys.path.insert(0, str(ROOT))
-        import cli as _cli  # type: ignore
+        # cli still owns _version + _parse_changelog (kept there because
+        # they're tightly coupled to first-run release-notes notification).
+        from watchmen import cli as _cli
+        from watchmen.util import find_changelog
         changelog_version = _cli._version()
-        changelog_path = ROOT / "CHANGELOG.md"
-        if changelog_path.exists():
+        changelog_path = find_changelog()
+        if changelog_path is not None:
             entries = _cli._parse_changelog(changelog_path.read_text())
             for v, body in entries:
                 if v == changelog_version:
@@ -282,18 +283,15 @@ def insights_page(request: Request):
     activity sparklines, top erroring tools, frustration markers,
     aggregate hour-of-day heatmap) that don't fit a terminal."""
     import json as _json
-    import sys as _sys
     from watchmen import metrics as _metrics
-    # Reach into cli.py for the friction-signal + adapter helpers + the
-    # digest cache reader. Keeps the viewer thin without duplicating those
-    # SQL queries / parser helpers.
-    _sys.path.insert(0, str(ROOT))
-    import cli as _cli  # type: ignore
-
-    state_init = getattr(__import__("state"), "init_db", None)
-    if state_init:
-        state_init()
+    # Friction-signal + adapter helpers moved to watchmen.util during the
+    # Phase 3 split; the digest cache reader lives in commands.insights.
+    # The viewer pulls from the canonical sources rather than re-reaching
+    # into cli.py.
     from watchmen import state as _state
+    from watchmen.util import adapter_breakdown, repo_friction_signals
+
+    _state.init_db()
     projects = _state.list_projects()
     base = BUNDLES
 
@@ -315,8 +313,8 @@ def insights_page(request: Request):
         skills_n = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
         pending_dir = base / key / "_pending"
         pending_n = sum(1 for d in pending_dir.iterdir() if d.is_dir()) if pending_dir.exists() else 0
-        adapter = _cli._adapter_breakdown(key)
-        tool_errors, top_error_tools, frust_count, frust_samples = _cli._repo_friction_signals(key)
+        adapter = adapter_breakdown(key)
+        tool_errors, top_error_tools, frust_count, frust_samples = repo_friction_signals(key)
         daily = _metrics.daily_metrics(key, days=30) or []
         sess_series = [r["sessions"] for r in reversed(daily)]
         try:
@@ -398,9 +396,13 @@ def insights_page(request: Request):
     digest_html = None
     digest_meta: dict = {}
     try:
-        latest = _cli._latest_digest_path()
+        from watchmen.commands.insights import (
+            _latest_digest_path,
+            _read_digest_metadata,
+        )
+        latest = _latest_digest_path()
         if latest is not None:
-            meta, body = _cli._read_digest_metadata(latest)
+            meta, body = _read_digest_metadata(latest)
             digest_meta = meta
             digest_html = render_md(body)
     except Exception:

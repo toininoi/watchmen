@@ -2220,11 +2220,17 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
         }]))
 
         orig_root = cli.ROOT
+        from watchmen.commands import insights as _insights
         orig_list = cli.state.list_projects
         orig_runs = cli.state.recent_runs
         orig_prog = cli.state.get_project_progress
         orig_init = cli.state.init_db
-        orig_breakdown = cli._adapter_breakdown
+        # cmd_insights moved to commands.insights during Phase 3 — the alias
+        # `_adapter_breakdown` lives there now. cli still re-uses its own
+        # alias for cmd_metrics/cmd_doctor, so we patch BOTH binding sites
+        # to keep the test isolated whether or not future code paths drift.
+        orig_breakdown_cli = cli._adapter_breakdown
+        orig_breakdown_insights = _insights._adapter_breakdown
         orig_daily = _m.daily_metrics
 
         cli.ROOT = td_path
@@ -2240,10 +2246,12 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
         cli.state.get_project_progress = lambda key: {
             "new_prompts_since_last_analysis": 12 if key == "p2" else 0
         }
-        cli._adapter_breakdown = lambda key: (
+        fake_breakdown = lambda key: (  # noqa: E731 — local stub
             {"claude_code": 3, "codex": 1, "pi": 0} if key == "p2"
             else {"claude_code": 7, "codex": 0, "pi": 0}
         )
+        cli._adapter_breakdown = fake_breakdown
+        _insights._adapter_breakdown = fake_breakdown
         _m.daily_metrics = lambda key, days=30: [
             {"sessions": 2}, {"sessions": 1}, {"sessions": 0},
         ]
@@ -2261,7 +2269,8 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
             cli.state.recent_runs = orig_runs
             cli.state.get_project_progress = orig_prog
             cli.state.init_db = orig_init
-            cli._adapter_breakdown = orig_breakdown
+            cli._adapter_breakdown = orig_breakdown_cli
+            _insights._adapter_breakdown = orig_breakdown_insights
             _m.daily_metrics = orig_daily
 
         out = buf.getvalue()
@@ -2299,6 +2308,11 @@ def test_cli_insights_save_view_list_roundtrip():
     """
     import io
     from watchmen import cli
+    # Cache + metadata helpers moved to commands.insights during Phase 3 —
+    # call them through the new module. cli.main still dispatches via the
+    # re-exported cmd_insights, so the --list integration step below is
+    # unchanged.
+    from watchmen.commands import insights as _insights
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         # Redirect the cache to a temp dir so we don't pollute the user's
@@ -2309,23 +2323,23 @@ def test_cli_insights_save_view_list_roundtrip():
         _os.environ["HOME"] = str(td_path)
         try:
             # 1. Empty cache → latest is None, --list says "no saved digests"
-            assert cli._latest_digest_path() is None
+            assert _insights._latest_digest_path() is None
 
             # 2. Save two digests with different timestamps; latest should
             #    be the newer one (filenames sort lexicographically, which
             #    works because the timestamp format is zero-padded ISO-ish).
-            p_old = cli._save_digest("old body", "deepseek/deepseek-v4-flash", 2)
+            p_old = _insights._save_digest("old body", "deepseek/deepseek-v4-flash", 2)
             # Force a different mtime/filename by sleeping a hair, but the
             # filename second-resolution may collide — overwrite the older
             # one's name to ensure ordering is stable.
             import time as _t
             _t.sleep(1.1)
-            p_new = cli._save_digest("# new body\n\nhello", "claude-sonnet-4-6", 3)
+            p_new = _insights._save_digest("# new body\n\nhello", "claude-sonnet-4-6", 3)
             assert p_old.exists() and p_new.exists()
-            assert cli._latest_digest_path() == p_new, "latest must be the newest by filename"
+            assert _insights._latest_digest_path() == p_new, "latest must be the newest by filename"
 
             # 3. Frontmatter round-trips
-            meta, body = cli._read_digest_metadata(p_new)
+            meta, body = _insights._read_digest_metadata(p_new)
             assert meta["model"] == "claude-sonnet-4-6"
             assert meta["repos_synthesized"] == "3"
             assert body.startswith("# new body"), f"frontmatter not stripped: {body!r}"
@@ -2354,14 +2368,14 @@ def test_cli_insights_save_view_list_roundtrip():
             class _Args:
                 regenerate = False
                 view = False
-            action = cli._decide_digest_action(_Args(), p_new, _C(file=io.StringIO()))
+            action = _insights._decide_digest_action(_Args(), p_new, _C(file=io.StringIO()))
             assert action == "view", f"expected view fallback for non-tty, got {action!r}"
 
             # 6. --regenerate flag forces "regenerate" regardless of cache.
             class _ArgsRegen:
                 regenerate = True
                 view = False
-            assert cli._decide_digest_action(_ArgsRegen(), p_new, _C(file=io.StringIO())) == "regenerate"
+            assert _insights._decide_digest_action(_ArgsRegen(), p_new, _C(file=io.StringIO())) == "regenerate"
 
             # 7. --view flag with empty cache → "quit" + warning
             (p_new).unlink()
@@ -2370,7 +2384,7 @@ def test_cli_insights_save_view_list_roundtrip():
                 regenerate = False
                 view = True
             stub_console = _C(file=io.StringIO())
-            assert cli._decide_digest_action(_ArgsView(), None, stub_console) == "quit"
+            assert _insights._decide_digest_action(_ArgsView(), None, stub_console) == "quit"
         finally:
             if orig_home is None:
                 _os.environ.pop("HOME", None)
