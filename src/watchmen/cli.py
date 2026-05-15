@@ -127,13 +127,19 @@ class WatchmenParser(argparse.ArgumentParser):
 def _version() -> str:
     """Read version from package metadata if installed, else parse pyproject.toml.
 
-    Two source-tree layouts: editable install (ROOT = src/watchmen/, pyproject
-    two levels up) and dev checkout pre-install (same layout). We try both
-    plausible locations before giving up.
+    We try multiple dist names: the new `dria-watchmen` (PyPI dist, since
+    the bare `watchmen` namespace was claimed) and the legacy `watchmen`
+    (older editable installs predating the rename). Whichever resolves
+    first wins; if both fail we fall back to pyproject.toml parsing for
+    pre-install dev checkouts.
     """
     try:
-        from importlib.metadata import version as _v
-        return _v("watchmen")
+        from importlib.metadata import PackageNotFoundError, version as _v
+        for dist_name in ("dria-watchmen", "watchmen"):
+            try:
+                return _v(dist_name)
+            except PackageNotFoundError:
+                continue
     except Exception:
         pass
     try:

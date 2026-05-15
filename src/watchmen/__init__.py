@@ -18,9 +18,19 @@ as scripts via the CLI dispatcher.
 
 from __future__ import annotations
 
+# PyPI dist name is `dria-watchmen` (the plain `watchmen` namespace was
+# already claimed). Try both names so editable installs from before the
+# rename still resolve a real version.
 try:
-    from importlib.metadata import version as _pkg_version
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
-    __version__ = _pkg_version("watchmen")
+    for _name in ("dria-watchmen", "watchmen"):
+        try:
+            __version__ = _pkg_version(_name)
+            break
+        except PackageNotFoundError:
+            continue
+    else:
+        __version__ = "0.0.0+local"
 except Exception:  # pragma: no cover — happens when run from a non-installed checkout
     __version__ = "0.0.0+local"

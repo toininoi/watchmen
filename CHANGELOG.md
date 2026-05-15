@@ -11,7 +11,10 @@ backend, hardened internals, pytest migration, and 30 new tests filling
 the biggest coverage holes. The CLI surface is unchanged; existing users
 upgrade in place.
 
-Install: `uv tool install watchmen` (or `pip install watchmen`).
+Install: `uv tool install dria-watchmen` (or `pip install dria-watchmen`).
+The CLI binary is still `watchmen` and the import path is still
+`from watchmen import ...` — only the package name on PyPI is
+`dria-watchmen` (the plain `watchmen` namespace was already claimed).
 
 ### Added — Linux daemon backend (systemd --user)
 - `watchmen daemon install` / `watchmen viewer install` now work on Linux,

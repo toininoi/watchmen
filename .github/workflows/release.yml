@@ -57,9 +57,13 @@ jobs:
         run: uv build
 
       - name: Smoke-test the built wheel
+        # Wheel filename uses the dist name with `-` normalized to `_`
+        # per PEP 491 (so `dria-watchmen` → `dria_watchmen-*.whl`). The
+        # installed binary is still `watchmen` — that's the script
+        # entry point name from pyproject.toml, not the dist name.
         run: |
           uv venv /tmp/release-check
-          uv pip install --python /tmp/release-check/bin/python dist/watchmen-*.whl
+          uv pip install --python /tmp/release-check/bin/python dist/dria_watchmen-*.whl
           /tmp/release-check/bin/watchmen --version
           /tmp/release-check/bin/watchmen --help > /dev/null
 
@@ -93,7 +97,7 @@ jobs:
     if: vars.PUBLISH_TO_PYPI == 'true'
     environment:
       name: pypi
-      url: https://pypi.org/p/watchmen
+      url: https://pypi.org/p/dria-watchmen
     steps:
       - uses: actions/download-artifact@v4
         with:
