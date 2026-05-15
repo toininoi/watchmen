@@ -99,8 +99,10 @@ scopes: `cli`, `curate`, `analyze`, `viewer`, `corpus`, `metrics`, `pricing`,
 
 Look at:
 
-- **Linux support** — the daemon is macOS-only today. systemd backend would
-  unlock a large chunk of users. See Phase 4 of the handover plan.
+- **Windows support / WSL polish** — daemon now supports macOS (launchd) and
+  Linux (systemd --user). Windows hasn't been tested — likely needs a Task
+  Scheduler backend or a "just run in foreground" path. WSL should already
+  work since under WSL it's just Linux.
 - **Cursor adapter** — Cursor stores sessions in a SQLite db (`state.vscdb`).
   An adapter at `src/watchmen/adapters/cursor.py` would round out the
   coverage. There are no hooks (post-session polling only).

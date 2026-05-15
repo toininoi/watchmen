@@ -74,7 +74,7 @@ Cost: ~$0.05-0.10 per regeneration with deepseek-flash. Time: ~30-60s depending 
 
 ## Requirements
 
-- macOS
+- macOS or Linux (Windows: WSL works; native untested)
 - [`uv`](https://github.com/astral-sh/uv) (Python toolchain)
 - Python 3.11+
 - An OpenRouter API key (`OPENROUTER_API_KEY`)
@@ -184,10 +184,12 @@ The plugin reads `~/.watchmen/state/<project>.json` (written by the engine at en
 To run watchmen autonomously (incremental analyzer + auto-regen of CLAUDE.md when new prompts come in):
 
 ```bash
-watchmen daemon install                      # launchd agent, autostart on login, keepalive
+watchmen daemon install                      # autostart on login, keepalive
 watchmen viewer install                      # also autostart the viewer at :8979
-watchmen launchd status                      # verify
+watchmen launchd status                      # verify (works on Linux too — checks systemd --user)
 ```
+
+Under the hood this is `launchd` on macOS and `systemd --user` on Linux — same CLI either way. On Linux, run `sudo loginctl enable-linger $USER` once if you want the daemon to keep running after you log out.
 
 Default cadence:
 
@@ -202,10 +204,15 @@ The analyst check is cheap — usually a no-op when there's nothing new. The ful
 Logs:
 
 ```
+# macOS (launchd)
 ~/Library/Logs/watchmen.log                  # primary daemon log
-~/Library/Logs/watchmen.daemon.out.log       # launchd stdout
-~/Library/Logs/watchmen.daemon.err.log       # launchd stderr
+~/Library/Logs/watchmen.daemon.{out,err}.log # launchd stdout/stderr
 ~/Library/Logs/watchmen.viewer.{out,err}.log # viewer logs
+
+# Linux (systemd --user)
+~/.watchmen/logs/daemon.{out,err}.log        # systemd stdout/stderr
+~/.watchmen/logs/viewer.{out,err}.log        # viewer logs
+# also: `journalctl --user -u watchmen-daemon.service`
 ```
 
 To stop:
@@ -403,7 +410,7 @@ Other roadmap items: diff view in the web UI (generated CLAUDE.md vs the repo's 
 - **Hook server must run in a separate terminal.** It's a Python+FastAPI process. If you kill the terminal, hook capture stops. Use `tmux`, `screen`, or a launchd job for it (we don't ship one for the hook server itself, only for the daemon + viewer).
 - **Some skill curators occasionally run long (20+ min)** without calling the `finish_skill` terminal tool. The bundle still lands on disk; just no clean signal. ~15-20% of skills hit this. The artifacts are still usable.
 - **Auto-detection of project_key from `~/.claude/projects/<encoded-dir>/` is heuristic.** Some path-encoded names (e.g., `my-business/marketing` vs `my-business-marketing`) can resolve ambiguously. Use `watchmen track <key> --repo <abs-path>` to be explicit.
-- **macOS-first.** The launchd + log-path conventions assume macOS. Linux support would need a systemd-user equivalent for `watchmen daemon install`; everything else (analyst, curator, viewer, hooks) is portable.
+- **macOS + Linux supported; Windows untested.** `watchmen daemon install` dispatches to `launchd` on macOS and `systemd --user` on Linux. Windows hasn't been tested — WSL should work since under WSL it's just Linux.
 
 ## Layout
 
@@ -425,7 +432,9 @@ watchmen/
 │   ├── adapters/             # cc / cd / pi adapters for the corpus ingest path
 │   ├── hooks/                # watchmen_observe.sh — POSTs hook stdin → localhost:8765
 │   ├── hooks_setup.py        # install / uninstall the Claude Code hook entries
-│   └── launchd_setup.py      # install / uninstall the daemon + viewer launchd agents
+│   ├── service.py            # platform-dispatched install/uninstall (launchd ↔ systemd)
+│   ├── launchd_setup.py      # macOS backend: ~/Library/LaunchAgents/*.plist
+│   └── systemd_setup.py      # Linux backend: ~/.config/systemd/user/*.service
 ├── plugin/                   # Claude Code plugin (separate distribution)
 ├── tests/                    # pytest-runnable smoke suite (Phase 5: full pytest port)
 ├── CHANGELOG.md
