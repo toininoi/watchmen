@@ -45,9 +45,9 @@ def show_welcome(console: Console, total_steps: int) -> None:
     from watchmen import banner
     banner.render(console)
     body = Text.from_markup(
-        "[bold]watchmen[/] mines your Claude Code session history, ships skill\n"
-        "bundles + CLAUDE.md files per project, and surfaces them back into\n"
-        "your sessions via a tiny plugin.\n\n"
+        "[bold]watchmen[/] mines your coding-agent session history\n"
+        "(Claude Code, Codex, pi.dev), ships skill bundles + a workspace brief\n"
+        "per project, and surfaces them back into your sessions via a plugin.\n\n"
         "This wizard walks through setup end-to-end. You can stop at any\n"
         "confirmation gate without leaving partial state behind.\n\n"
         f"[dim]{total_steps} steps. Most takes a few seconds; the LLM passes (analyze + curate)\n"
@@ -129,7 +129,7 @@ def run_ingest(console: Console) -> bool:
 
     rc = stream_subprocess(
         console,
-        "Reading ~/.claude/projects/ into corpus.db",
+        "Scanning coding-agent transcripts into corpus.db",
         [sys.executable, "-m", "watchmen.corpus", "scan"],
     )
     if rc != 0:
@@ -446,14 +446,14 @@ def run() -> int:
         console.print("[dim]Bye for now. Re-run anytime.[/]")
         return 0
 
-    _step(console, 2, TOTAL, "Ingest your Claude Code history")
+    _step(console, 2, TOTAL, "Ingest your coding-agent history")
     if not run_ingest(console):
         return 1
 
     _step(console, 3, TOTAL, "Pick projects to onboard")
     candidates = project_candidates(console)
     if not candidates:
-        console.print("[yellow]No projects detected in your corpus. Have you used Claude Code yet?[/]")
+        console.print("[yellow]No projects detected in your corpus. Have you used a supported coding agent (Claude Code, Codex, pi.dev) yet?[/]")
         return 0
     selected = select_projects(console, candidates)
     if not selected:

@@ -86,7 +86,7 @@ def _file_lock(path: Path):
 # ─── Prompts ────────────────────────────────────────────────────────────────
 
 CANDIDATE_FINDER_PROMPT_TEMPLATE = dedent("""
-    You are identifying real, packageable skill candidates for a Claude Code workspace.
+    You are identifying real, packageable skill candidates for a coding-agent workspace.
 
     {harness_block}
 
@@ -144,12 +144,12 @@ def _build_finder_prompt(installed: list[dict]) -> str:
     from watchmen import harness as _harness
     block = _harness.format_for_prompt(installed)
     if not block:
-        block = "(The user has no skills installed in their Claude Code harness yet.)"
+        block = "(The user has no skills installed in their coding-agent harness yet.)"
     return CANDIDATE_FINDER_PROMPT_TEMPLATE.format(harness_block=block)
 
 
 SKILL_CURATOR_PROMPT_TEMPLATE = dedent("""
-    You are authoring a Claude Code skill bundle for: {skill_name}
+    You are authoring a coding-agent skill bundle for: {skill_name}
 
     Description: {skill_description}
     Trigger / when-to-use: {when_to_use}
@@ -203,7 +203,7 @@ SKILL_CURATOR_PROMPT_TEMPLATE = dedent("""
 
 
 CRITIC_PROMPT = dedent("""
-    You are a critic evaluating a Claude Code skill bundle. The bundle lives at: {skill_dir}
+    You are a critic evaluating a coding-agent skill bundle. The bundle lives at: {skill_dir}
 
     Sample task to consider: {sample_task}
 
@@ -238,7 +238,7 @@ CLAUDE_MD_PROMPT = dedent("""
 
     Output to: bundles/{project_key}/CLAUDE.md
 
-    A good CLAUDE.md is a STANDING BRIEF for any future Claude Code session opened in this repo. It
+    A good CLAUDE.md is a STANDING BRIEF for any future coding-agent session opened in this repo. It
     answers EVERY question a fresh agent might have on day 1: what this project is, how it's structured,
     how to build/test/run it, what conventions exist, what skills are available, what should I know
     before doing anything, what landmines exist, how the user communicates.
@@ -671,9 +671,10 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
         prev = {}
 
     current: dict[str, float] = {}
-    claude_md = out_dir / "CLAUDE.md"
-    if claude_md.exists():
-        current["CLAUDE.md"] = claude_md.stat().st_mtime
+    for brief_name in ("CLAUDE.md", "AGENTS.md"):
+        brief_path = out_dir / brief_name
+        if brief_path.exists():
+            current[brief_name] = brief_path.stat().st_mtime
     skills_dir = out_dir / "skills"
     if skills_dir.exists():
         for p in skills_dir.glob("*/SKILL.md"):
@@ -1201,6 +1202,19 @@ def main():
                 print(f"      done in {time.time()-t0:.1f}s — {(result or {}).get('summary', '')[:80]}", flush=True)
             except Exception as e:
                 print(f"      FAILED: {type(e).__name__}: {e}", flush=True)
+
+        # Mirror CLAUDE.md → AGENTS.md so Codex (which reads AGENTS.md) picks up
+        # the same workspace brief Claude Code reads from CLAUDE.md. Same project
+        # context regardless of which agent opens the repo. Cheap byte-copy; no LLM.
+        agents_md_path = out_dir / "AGENTS.md"
+        if claude_md_path.exists():
+            try:
+                agents_md_path.write_text(
+                    claude_md_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            except OSError as e:
+                print(f"      AGENTS.md mirror failed: {type(e).__name__}: {e}", flush=True)
 
         # ─── Stage 4: write _index.md ─────────────────────────────────────────
         print("[4/4] writing _index.md...", flush=True)

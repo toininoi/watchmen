@@ -4,6 +4,37 @@ All notable changes to watchmen are listed here. The CLI surfaces the latest
 release notes once per version bump (CLI + web viewer) so a `git pull` is
 never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed — agent-agnostic framing
+- README, CLI help text, viewer copy, onboard wizard prompts, and curator LLM
+  prompts no longer single out Claude Code where the behavior is multi-adapter.
+  Strings that genuinely refer to data attribution (per-agent stats, hook
+  installer steps that wire `~/.claude/settings.json`) keep their specific
+  labels; everything else reads as "coding-agent session" / "coding-agent
+  transcripts".
+- `watchmen ingest` help text now reads "re-scan all coding-agent transcripts
+  into corpus.db" — accurate, since the ingest path walks every adapter
+  (`adapters/claude_code.py`, `adapters/codex.py`, `adapters/pi.py`), not
+  just `~/.claude/projects/`.
+
+### Added — `AGENTS.md` mirror alongside `CLAUDE.md`
+- After Stage 3 of the curator writes `bundles/<project>/CLAUDE.md`, watchmen
+  also writes an identical `bundles/<project>/AGENTS.md`. Codex reads
+  `AGENTS.md`; Claude Code reads `CLAUDE.md`. Identical content, single source
+  of truth, both agents pick up the same workspace brief without a
+  per-project copy step.
+- `_changelog.md` manifest tracking widened to follow `AGENTS.md` mtime
+  alongside `CLAUDE.md` so regen events show up in `watchmen recent`.
+
+### Fixed — stale `~/.watchmen/kai_claude/` directory
+- The 0.5 rename `kai_claude → bundles` left some installs with both
+  directories on disk (an older daemon recreated the alias after the
+  migration ran, or a stale checkout copy lingered). On next import,
+  `runtime_path` now archives a coexisting `kai_claude/` to
+  `kai_claude.legacy/` once and prints a one-line stderr notice. Idempotent
+  — the rename is self-deleting, so subsequent runs are silent.
+
 ## [0.5.0] — 2026-05-15
 
 First PyPI release. This rolls up everything since 0.4.0 — Linux daemon
