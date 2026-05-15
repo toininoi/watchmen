@@ -36,6 +36,31 @@ from pathlib import Path
 from watchmen import config
 from watchmen import state
 from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
+# Presentation helpers were inline until Phase 3 — alias them under the
+# `_name` convention the rest of cli.py uses so call sites don't churn.
+from watchmen.ui import (
+    bar as _bar,
+    bold as _bold,
+    cyan as _cyan,
+    dim as _dim,
+    green as _green,
+    red as _red,
+    render_file as _render_file,
+    rich_status as _rich_status,
+    short_path as _short_path,
+    sparkline as _sparkline,
+    ui_header as _ui_header,
+    yellow as _yellow,
+)
+from watchmen.ui import (
+    print_runtime_state_error as _ui_print_runtime_state_error,
+)
+
+
+def _print_runtime_state_error(exc: BaseException, *, stderr: bool = True) -> None:
+    """Thin wrapper so call sites don't have to thread STATE_DB everywhere.
+    The actual rendering lives in watchmen.ui; this just binds the path."""
+    _ui_print_runtime_state_error(STATE_DB, exc, stderr=stderr)
 
 ROOT = Path(__file__).parent
 SOURCE_ROOT = Path(__file__).parent
@@ -89,106 +114,6 @@ def _version() -> str:
     except Exception:
         pass
     return "0.0.0"
-
-
-# ─── Helpers ────────────────────────────────────────────────────────────────
-
-
-def _bold(s: str) -> str:
-    return f"\033[1m{s}\033[0m"
-
-
-def _dim(s: str) -> str:
-    return f"\033[90m{s}\033[0m"
-
-
-def _green(s: str) -> str:
-    return f"\033[32m{s}\033[0m"
-
-
-def _yellow(s: str) -> str:
-    return f"\033[33m{s}\033[0m"
-
-
-def _red(s: str) -> str:
-    return f"\033[31m{s}\033[0m"
-
-
-def _print_runtime_state_error(exc: BaseException, *, stderr: bool = True) -> None:
-    from rich.console import Console
-
-    console = Console(stderr=stderr)
-    console.print("[red]watchmen cannot open its local state database.[/]")
-    console.print(f"[dim]path:[/] {STATE_DB}")
-    console.print(f"[dim]error:[/] {type(exc).__name__}: {exc}")
-    console.print()
-    console.print("[dim]Try setting a writable data directory:[/]")
-    console.print("  WATCHMEN_HOME=/path/to/watchmen-data watchmen status")
-
-
-def _short_path(path: str | Path) -> str:
-    text = str(path)
-    home = str(Path.home())
-    return text.replace(home, "~", 1) if text.startswith(home) else text
-
-
-def _ui_header(console, command: str, subtitle: str | None = None) -> None:
-    console.print(f"[bold]watchmen[/] [dim]{command}[/]")
-    if subtitle:
-        console.print(f"[dim]{subtitle}[/]")
-
-
-def _rich_status(status: str) -> str:
-    if status == "ok":
-        return "[green]ok[/]"
-    if status == "running":
-        return "[yellow]running[/]"
-    if status in {"failed", "error"}:
-        return "[red]failed[/]"
-    return f"[dim]{status or '-'}[/]"
-
-
-def _bright_blue(s: str) -> str:
-    return f"\033[94m{s}\033[0m"
-
-
-def _cyan(s: str) -> str:
-    return f"\033[36m{s}\033[0m"
-
-
-# ─── TUI visualization helpers ──────────────────────────────────────────────
-# Unicode block characters used for compact bar charts + sparklines. No
-# external chart deps — we just print sized strings inside Rich Tables /
-# plain stdout. Both helpers degrade gracefully when their input is empty
-# or all-zero, returning empty strings rather than ZeroDivisionError.
-
-
-_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
-
-
-def _sparkline(values: list[float]) -> str:
-    """Compact one-character-per-data-point trend line. Auto-scales to the
-    max value in the series — useful for showing daily cost or session counts
-    over a 30-day window in 30 visible characters."""
-    if not values:
-        return ""
-    peak = max(values)
-    if peak <= 0:
-        return _SPARK_BLOCKS[0] * len(values)
-    return "".join(_SPARK_BLOCKS[min(7, int((v / peak) * 7))] for v in values)
-
-
-def _bar(value: float, max_value: float, width: int = 30) -> str:
-    """Horizontal bar with half-block precision. Empty when value or max ≤ 0
-    so projects with no spend render cleanly as an empty cell instead of `0`
-    pixels of bar."""
-    if max_value <= 0 or value <= 0:
-        return ""
-    ratio = max(0.0, min(1.0, value / max_value))
-    cells = ratio * width
-    full = int(cells)
-    half = "▌" if (cells - full) >= 0.5 else ""
-    return "█" * full + half
 
 
 # ─── Watchmen aesthetic helpers ─────────────────────────────────────────────
@@ -1344,34 +1269,6 @@ def cmd_show(args) -> int:
             rel = f.relative_to(skill_dir)
             print(f"  {rel}  {_dim(f'({f.stat().st_size:,}B)')}")
     return 0
-
-
-def _render_file(path: Path, raw: bool = False) -> None:
-    """Pretty-print a file based on extension. `.md` → Rich Markdown render
-    (headers/code/tables stylized). `.json` → Rich JSON with syntax colors.
-    Anything else → plain text. `--raw` forces plain text — important when
-    piping output to a file (Rich already strips ANSI when stdout isn't a
-    tty, but `--raw` is the explicit, scriptable opt-out)."""
-    text = path.read_text()
-    if raw:
-        sys.stdout.write(text)
-        return
-    print(_dim(f"# {path.name}\n"))
-    if path.suffix == ".md":
-        # Rich Markdown styles ATX headers, fenced code, lists, blockquotes,
-        # tables. Auto-disables styling when stdout isn't a tty.
-        from rich.console import Console
-        from rich.markdown import Markdown
-        Console().print(Markdown(text))
-    elif path.suffix == ".json":
-        from rich.console import Console
-        from rich.json import JSON
-        try:
-            Console().print(JSON(text))
-        except Exception:
-            sys.stdout.write(text)
-    else:
-        sys.stdout.write(text)
 
 
 def _curation_log_excerpt(proj_dir: Path, skill_slug: str, skill_name: str) -> str:
@@ -3325,38 +3222,29 @@ def main(argv: list[str] | None = None) -> int:
     # line. Plan: remove after 1-2 releases once teammates' scripts update.
     # All deprecated aliases use argparse.SUPPRESS so they don't pollute --help,
     # but still parse correctly for existing scripts.
-    p_id = sub.add_parser("install-daemon", help=argparse.SUPPRESS)
-    _add_daemon_install_args(p_id)
-    p_id.set_defaults(func=_deprecate("daemon install", cmd_install_daemon))
-
-    p_iv = sub.add_parser("install-viewer", help=argparse.SUPPRESS)
-    _add_viewer_install_args(p_iv)
-    p_iv.set_defaults(func=_deprecate("viewer install", cmd_install_viewer))
-
-    sub.add_parser("uninstall-daemon", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("daemon uninstall", cmd_uninstall_daemon))
-    sub.add_parser("uninstall-viewer", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("viewer uninstall", cmd_uninstall_viewer))
-    sub.add_parser("launchd-status", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("launchd status", cmd_launchd_status))
-
-    sub.add_parser("install-hooks", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("hooks install", cmd_install_hooks))
-    sub.add_parser("uninstall-hooks", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("hooks uninstall", cmd_uninstall_hooks))
-    sub.add_parser("hooks-status", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("hooks status", cmd_hooks_status))
-
-    p_isl = sub.add_parser("install-statusline", help=argparse.SUPPRESS)
-    _add_statusline_install_args(p_isl)
-    p_isl.set_defaults(func=_deprecate("statusline install", cmd_install_statusline))
-    sub.add_parser("uninstall-statusline", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("statusline uninstall", cmd_uninstall_statusline))
-
-    sub.add_parser("update-plugin", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("plugin update", cmd_update_plugin))
-    sub.add_parser("plugin-status", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("plugin status", cmd_plugin_status))
+    #
+    # Each tuple = (old_subcommand, new_form, handler, optional arg-adder).
+    # The arg-adder is for the few aliases that need to accept the same args
+    # as the new form (install-daemon, install-viewer, install-statusline).
+    _DEPRECATED_ALIASES: list[tuple[str, str, "object", "object"]] = [
+        ("install-daemon",      "daemon install",       cmd_install_daemon,      _add_daemon_install_args),
+        ("install-viewer",      "viewer install",       cmd_install_viewer,      _add_viewer_install_args),
+        ("uninstall-daemon",    "daemon uninstall",     cmd_uninstall_daemon,    None),
+        ("uninstall-viewer",    "viewer uninstall",     cmd_uninstall_viewer,    None),
+        ("launchd-status",      "launchd status",       cmd_launchd_status,      None),
+        ("install-hooks",       "hooks install",        cmd_install_hooks,       None),
+        ("uninstall-hooks",     "hooks uninstall",      cmd_uninstall_hooks,     None),
+        ("hooks-status",        "hooks status",         cmd_hooks_status,        None),
+        ("install-statusline",  "statusline install",   cmd_install_statusline,  _add_statusline_install_args),
+        ("uninstall-statusline","statusline uninstall", cmd_uninstall_statusline, None),
+        ("update-plugin",       "plugin update",        cmd_update_plugin,       None),
+        ("plugin-status",       "plugin status",        cmd_plugin_status,       None),
+    ]
+    for old, new_form, handler, arg_adder in _DEPRECATED_ALIASES:
+        p_alias = sub.add_parser(old, help=argparse.SUPPRESS)
+        if arg_adder is not None:
+            arg_adder(p_alias)
+        p_alias.set_defaults(func=_deprecate(new_form, handler))
 
     # `onboard` / `reonboard` are hidden aliases — `init` is the canonical name.
     sub.add_parser("onboard", help=argparse.SUPPRESS).set_defaults(func=cmd_onboard)
