@@ -7,8 +7,9 @@ Joins three data sources to build per-day rollups for the metrics viewer + CLI:
   - prompts table          → uptake detection (did /<skill> appear in a later
                               prompt within the same session within 1 hour?)
 
-Cost is computed from a model→price table. Prices are public Anthropic
-list prices per million tokens; update as they change.
+Cost is computed from model→price table. Prices are fetched from OpenRouter
+API (https://openrouter.ai/api/v1/models) and cached locally.
+Falls back to hardcoded defaults if API is unavailable.
 """
 
 import json
@@ -18,44 +19,36 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
-from paths import CORPUS_DB, STATE_DB
+from watchmen.paths import CORPUS_DB, STATE_DB
+from watchmen.model_prices import price_for_model as price_for_model_from_api, turn_cost_usd as turn_cost_usd_from_api
 
 ROOT = Path(__file__).parent
 SUGGESTIONS_LOG = Path.home() / ".watchmen" / "suggestions.jsonl"
 
-# Per 1M tokens. Source: https://platform.claude.com/docs/en/about-claude/pricing
-# Tuple shape: (input, cache_write_5m, cache_write_1h, cache_read, output).
-# Last verified: 2026-05-12.
-MODEL_PRICES: dict[str, tuple[float, float, float, float, float]] = {
-    # Opus 4.5/4.6/4.7 share the new (cheaper) pricing.
-    "opus-4.7":  (5.00,  6.25,  10.00, 0.50, 25.00),
-    "opus-4.6":  (5.00,  6.25,  10.00, 0.50, 25.00),
-    "opus-4.5":  (5.00,  6.25,  10.00, 0.50, 25.00),
-    # Older Opus 4 / 4.1 keep the previous higher rates.
-    "opus-4.1":  (15.00, 18.75, 30.00, 1.50, 75.00),
-    "opus-4":    (15.00, 18.75, 30.00, 1.50, 75.00),
-    # Sonnet family (4 / 4.5 / 4.6 all identical).
-    "sonnet-4.6":(3.00,  3.75,  6.00,  0.30, 15.00),
-    "sonnet-4.5":(3.00,  3.75,  6.00,  0.30, 15.00),
-    "sonnet-4":  (3.00,  3.75,  6.00,  0.30, 15.00),
-    # Haiku family — 4.5 jumped from older 3.5 pricing.
-    "haiku-4.5": (1.00,  1.25,  2.00,  0.10, 5.00),
-    "haiku-3.5": (0.80,  1.00,  1.60,  0.08, 4.00),
-    # ── OpenAI (Codex CLI). Source: https://openai.com/api/pricing
-    # OpenAI doesn't bill cache writes separately, so 5m/1h slots = input rate
-    # (won't be charged — codex adapter sets cc_5m/cc_1h to 0). Cache-read column
-    # used for cached_input_tokens, which OpenAI prices at ~10% of input.
-    # Last verified: 2026-05-12.
-    "gpt-5.5":     (1.25, 1.25, 1.25, 0.125, 10.00),
-    "gpt-5.4":     (1.25, 1.25, 1.25, 0.125, 10.00),
-    "gpt-5-mini":  (0.25, 0.25, 0.25, 0.025, 2.00),
-    "gpt-5":       (1.25, 1.25, 1.25, 0.125, 10.00),
-    "gpt-4.1":     (2.00, 2.00, 2.00, 0.500, 8.00),
-    "gpt-4o":      (2.50, 2.50, 2.50, 1.250, 10.00),
-    "o3":          (2.00, 2.00, 2.00, 0.500, 8.00),
-    "o4-mini":     (1.10, 1.10, 1.10, 0.275, 4.40),
+# Default price used when model is unknown (matches sonnet-4.6 hardcoded fallback)
+DEFAULT_PRICE = (3.00, 3.75, 6.00, 0.30, 15.00)
+
+# Backward-compatible alias for tests (hardcoded fallback prices)
+MODEL_PRICES = {
+    "opus-4.7": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "opus-4.6": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "opus-4.5": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "opus-4.1": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "opus-4": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "sonnet-4.6": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "sonnet-4.5": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "sonnet-4": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "haiku-4.5": (1.00, 1.25, 2.00, 0.10, 5.00),
+    "haiku-3.5": (0.80, 1.00, 1.60, 0.08, 4.00),
+    "gpt-5.5": (1.25, 1.25, 1.25, 0.125, 10.00),
+    "gpt-5.4": (1.25, 1.25, 1.25, 0.125, 10.00),
+    "gpt-5-mini": (0.25, 0.25, 0.25, 0.025, 2.00),
+    "gpt-5": (1.25, 1.25, 1.25, 0.125, 10.00),
+    "gpt-4.1": (2.00, 2.00, 2.00, 0.500, 8.00),
+    "gpt-4o": (2.50, 2.50, 2.50, 1.250, 10.00),
+    "o3": (2.00, 2.00, 2.00, 0.500, 8.00),
+    "o4-mini": (1.10, 1.10, 1.10, 0.275, 4.40),
 }
-DEFAULT_PRICE = MODEL_PRICES["sonnet-4.6"]
 
 
 _VERSION_DASH = re.compile(r"(opus|sonnet|haiku)-(\d+)-(\d+)\b")
@@ -65,30 +58,10 @@ _GPT_DASH = re.compile(r"gpt-(\d+)-(\d+)\b")
 
 
 def price_for_model(model: str | None) -> tuple[float, float, float, float, float]:
-    """Match by lowercase substring. Longest key wins, so 'opus-4.7' matches
-    before 'opus-4'. Anthropic API model names use dashes between version
-    components ('claude-opus-4-7'), so we first normalize 'X-major-minor' to
-    'X-major.minor' to match our dot-separated keys. Falls back to family
-    default, then sonnet."""
-    if not model:
-        return DEFAULT_PRICE
-    m = model.lower()
-    m = _VERSION_DASH.sub(lambda x: f"{x.group(1)}-{x.group(2)}.{x.group(3)}", m)
-    m = _GPT_DASH.sub(lambda x: f"gpt-{x.group(1)}.{x.group(2)}", m)
-    for key in sorted(MODEL_PRICES.keys(), key=len, reverse=True):
-        if key in m:
-            return MODEL_PRICES[key]
-    if "opus" in m:
-        return MODEL_PRICES["opus-4.7"]
-    if "sonnet" in m:
-        return MODEL_PRICES["sonnet-4.6"]
-    if "haiku" in m:
-        return MODEL_PRICES["haiku-4.5"]
-    if "gpt-5" in m or m.startswith("o4"):
-        return MODEL_PRICES["gpt-5"]
-    if "gpt-4" in m or m.startswith("o3"):
-        return MODEL_PRICES["gpt-4.1"]
-    return DEFAULT_PRICE
+    """Get price for a model. Uses model_prices module which fetches from OpenRouter
+    API and caches locally. Falls back to family-based matching if not found.
+    Same normalization as before for compatibility."""
+    return price_for_model_from_api(model)
 
 
 def turn_cost_usd(
@@ -103,14 +76,14 @@ def turn_cost_usd(
     THIS turn's model — not the session's dominant model — which matters when
     a session spans multiple models (e.g. Opus for planning, Sonnet for grunt
     work)."""
-    p_in, p_5m, p_1h, p_cr, p_out = price_for_model(model)
-    return (
-        input_tokens * p_in
-        + cache_creation_5m * p_5m
-        + cache_creation_1h * p_1h
-        + cache_read * p_cr
-        + output_tokens * p_out
-    ) / 1_000_000
+    return turn_cost_usd_from_api(
+        model,
+        input_tokens,
+        cache_creation_5m,
+        cache_creation_1h,
+        cache_read,
+        output_tokens,
+    )
 
 
 def _project_dir_for_key(project_key: str) -> str | None:
@@ -492,7 +465,7 @@ def activity_by_hour_dow_all(days: int = 90, tracked_only: bool = False) -> list
 def per_project_totals(days: int = 30) -> list[dict]:
     """Per-project rollup over the window, sorted by cost descending.
     Used in the aggregated metrics page to show which projects drive the totals."""
-    import state as _state
+    from watchmen import state as _state
     out = []
     for p in _state.list_projects():
         rows = daily_metrics(p["project_key"], days=days)
@@ -509,7 +482,6 @@ def activity_calendar(project_key: str, weeks: int = 26) -> list[tuple[str, int]
     project_dir = _project_dir_for_key(project_key)
     if not project_dir or not CORPUS_DB.exists():
         return []
-    days = weeks * 7
     today = date.today()
     # Sunday-align: roll back to the Sunday of this week, then go N-1 weeks back.
     # weekday(): Mon=0..Sun=6 → days to subtract to reach Sunday

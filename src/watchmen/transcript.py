@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from textwrap import shorten
 
-from paths import EVENTS_DB
+from watchmen.paths import EVENTS_DB
 
 DB_PATH = EVENTS_DB
 PROJECTS_DIR = Path.home() / ".claude" / "projects"

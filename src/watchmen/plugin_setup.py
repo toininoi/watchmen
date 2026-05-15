@@ -94,7 +94,7 @@ def update_marketplace() -> int:
 def install_statusline(force: bool = False) -> int:
     latest = _newest_version_dir()
     if latest is None:
-        print(f"plugin not installed yet. Inside Claude Code, run:")
+        print("plugin not installed yet. Inside Claude Code, run:")
         print("  /plugin marketplace add firstbatchxyz/watchmen")
         print("  /plugin install watchmen@watchmen")
         return 1

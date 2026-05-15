@@ -13,7 +13,7 @@ Apply via AND in the WHERE clause of any sessions/prompts query. The default
 '<alias>.' assumes the sessions table is aliased as 's', matching the existing
 JOIN convention in analyze.py and state.py.
 
-Calibration (kai-hooks-mvp live install, 2026-05-12): filters 9 of 59 main
+Calibration (watchmen calibration run, 2026-05-12): filters 9 of 59 main
 sessions (~15%), all 0-tool, ≤3-message, ≤5-second aborts. Zero substantive
 sessions filtered.
 """

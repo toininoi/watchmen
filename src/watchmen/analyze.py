@@ -13,28 +13,19 @@ Usage:
 
 import argparse
 import json
-import os
 import sqlite3
-import sys
 import time
 from pathlib import Path
 from textwrap import dedent
 
 import httpx
 
-from corpus_filters import substantive_filter
-from paths import ANALYSES_DIR, CORPUS_DB
+from watchmen.agent import call_openrouter, load_api_key
+from watchmen.corpus_filters import substantive_filter
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB
 
 ROOT = Path(__file__).parent
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
-
-
-def load_api_key() -> str:
-    # Use the same lookup as agent.py: env → repo-local .env → ~/.config/watchmen/.env.
-    # Kept as a thin wrapper so analyze.py stays self-runnable from CLI.
-    from agent import load_api_key as _load
-    return _load()
 
 
 # ─── Tools ──────────────────────────────────────────────────────────────────
@@ -43,7 +34,7 @@ def _tracked_source_repo(project_key: str | None) -> str | None:
     if not project_key:
         return None
     try:
-        import state
+        from watchmen import state
         state.init_db()
         proj = state.get_project(project_key)
         return proj.get("source_repo") if proj else None
@@ -273,22 +264,6 @@ SYSTEM_PROMPT = dedent("""
 """).strip()
 
 
-def call_openrouter(client: httpx.Client, headers: dict, payload: dict, max_retries: int = 3):
-    for attempt in range(max_retries):
-        try:
-            r = client.post(OPENROUTER_URL, headers=headers, json=payload)
-            if r.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except httpx.RequestError:
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(2 ** attempt)
-    raise RuntimeError("exhausted retries")
-
-
 def run_day(
     client: httpx.Client,
     headers: dict,
@@ -386,8 +361,9 @@ def main() -> None:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://kai.dria.co/hooks-mvp",
-        "X-Title": "kai-hooks-mvp analyst",
+        # OpenRouter app attribution. Matches agent.py for consistent app=watchmen identity.
+        "HTTP-Referer": "https://github.com/firstbatchxyz/watchmen",
+        "X-Title": "watchmen:analyst",
     }
 
     conn = sqlite3.connect(CORPUS_DB)

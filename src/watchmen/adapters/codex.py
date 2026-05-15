@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from metrics import price_for_model
+from watchmen.metrics import price_for_model
 
 NAME = "codex"
 

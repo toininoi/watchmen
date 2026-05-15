@@ -27,11 +27,11 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
-import state
-from paths import ANALYSES_DIR, KAI_CLAUDE_DIR
+from watchmen import state
+from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR
 
 ROOT = Path(__file__).parent
 DEFAULT_INTERVAL = 7200       # 2 hours between analyst checks
@@ -67,7 +67,7 @@ def handle_signal(signum, frame):
 def _ingest_corpus(log: logging.Logger) -> None:
     log.info("ingest: rescanning ~/.claude/projects")
     r = subprocess.run(
-        [sys.executable, str(ROOT / "corpus.py"), "scan"],
+        [sys.executable, "-m", "watchmen.corpus", "scan"],
         cwd=str(ROOT), capture_output=True, text=True, timeout=600,
     )
     if r.returncode != 0:
@@ -81,7 +81,7 @@ def _run_analyst(project_key: str, model: str, log: logging.Logger) -> bool:
     log.info("analyst[%s] starting (incremental)", project_key)
     progress = state.get_project_progress(project_key)
     from_day = progress.get("last_analyst_day")
-    cmd = [sys.executable, str(ROOT / "analyze.py"), "-p", project_key, "--model", model]
+    cmd = [sys.executable, "-m", "watchmen.analyze", "-p", project_key, "--model", model]
     if from_day:
         cmd.extend(["--from-day", from_day])
 
@@ -108,7 +108,7 @@ def _regen_claude_md(project_key: str, model: str, log: logging.Logger) -> bool:
     if not proj:
         return False
     log.info("regen-claude[%s] starting (stage 3 only)", project_key)
-    cmd = [sys.executable, str(ROOT / "curate.py"),
+    cmd = [sys.executable, "-m", "watchmen.curate",
            "--project", project_key, "--repo", proj["source_repo"],
            "--model", model, "--skip-finder", "--skip-skills"]
     run_id = state.start_run(project_key, "curator-claude-only", notes="daemon")
@@ -129,7 +129,7 @@ def _run_full_curator(project_key: str, model: str, log: logging.Logger) -> bool
     if not proj:
         return False
     log.info("full-curator[%s] starting (stages 1+2+3)", project_key)
-    cmd = [sys.executable, str(ROOT / "curate.py"),
+    cmd = [sys.executable, "-m", "watchmen.curate",
            "--project", project_key, "--repo", proj["source_repo"], "--model", model]
     run_id = state.start_run(project_key, "curator-full", notes="daemon-scheduled")
     r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=21600)  # 6 hour ceiling
@@ -137,7 +137,7 @@ def _run_full_curator(project_key: str, model: str, log: logging.Logger) -> bool
         log.error("full-curator[%s] failed: %s", project_key, (r.stderr or r.stdout)[:500])
         state.finish_run(run_id, "failed", notes=f"exit {r.returncode}")
         return False
-    skills_dir = KAI_CLAUDE_DIR / project_key / "skills"
+    skills_dir = BUNDLES_DIR / project_key / "skills"
     skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
     state.update_project(project_key, last_curator_run=state.now_iso(), last_curator_skill_count=skill_count)
     state.finish_run(run_id, "ok", notes=f"{skill_count} skills")
@@ -200,7 +200,7 @@ def cycle_once(
             log.info("[%s] below threshold — skipping analyst", key)
 
         last_curator = _parse_iso(p.get("last_curator_run"))
-        skills_dir = KAI_CLAUDE_DIR / key / "skills"
+        skills_dir = BUNDLES_DIR / key / "skills"
         has_bundles = skills_dir.exists() and any(d.is_dir() for d in skills_dir.iterdir())
 
         # Scheduled full curator (twice a day by default) — full pipeline incl. skill bundles

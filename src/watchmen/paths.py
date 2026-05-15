@@ -38,13 +38,28 @@ def runtime_dir(*parts: str) -> Path:
     return path
 
 
-def runtime_path(name: str, *, migrate_legacy: bool = True) -> Path:
+def runtime_path(name: str, *, migrate_legacy: bool = True, legacy_alias: str | None = None) -> Path:
     """Path under WATCHMEN_HOME, optionally copied from the old source-root
     location on first use. Copying preserves existing local data without
     destructively moving files out of a checkout.
+
+    `legacy_alias` covers in-place renames: if the new name doesn't exist on
+    disk but the alias does (under WATCHMEN_HOME), move the alias to the new
+    name. Used for the kai_claude → bundles rename in 0.5.
     """
     dest = WATCHMEN_HOME / name
     if migrate_legacy and not dest.exists():
+        # 1. In-place rename inside WATCHMEN_HOME (kai_claude → bundles)
+        if legacy_alias:
+            alias_path = WATCHMEN_HOME / legacy_alias
+            if alias_path.exists():
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    alias_path.rename(dest)
+                    return dest
+                except OSError:
+                    pass
+        # 2. Copy from old source-checkout location into WATCHMEN_HOME
         legacy = PROJECT_ROOT / name
         try:
             if legacy.is_dir():
@@ -64,7 +79,9 @@ CORPUS_DB = runtime_path("corpus.db")
 EVENTS_DB = runtime_path("events.db")
 EVENTS_JSONL = runtime_path("events.jsonl")
 ANALYSES_DIR = runtime_path("analyses")
-KAI_CLAUDE_DIR = runtime_path("kai_claude")
+# Renamed from `kai_claude` → `bundles` in 0.5 (Kai attestation scrub).
+# `legacy_alias` migrates existing installs by renaming the dir on first import.
+BUNDLES_DIR = runtime_path("bundles", legacy_alias="kai_claude")
 OUTPUT_DIR = runtime_path("output")
 INSIGHTS_DIR = runtime_dir("insights")
 

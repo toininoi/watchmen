@@ -2,9 +2,8 @@ import json
 import re
 import sqlite3
 import sys
-from pathlib import Path
 
-from paths import EVENTS_DB
+from watchmen.paths import EVENTS_DB
 
 DB_PATH = EVENTS_DB
 

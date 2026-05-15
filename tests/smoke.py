@@ -21,8 +21,14 @@ import tempfile
 import traceback
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).resolve().parent.parent  # repo root (parent of src/)
+# `src/watchmen/` is the package source. Files like onboard.py, launchd_setup.py
+# that some tests inspect via static reads live under SRC.
+SRC = ROOT / "src" / "watchmen"
+# The editable install puts `watchmen` on sys.path automatically (uv handles
+# this via the .pth file). Inserting `src/` here makes the test runnable even
+# without a prior `uv sync` — convenient for CI and one-shot invocations.
+sys.path.insert(0, str(ROOT / "src"))
 
 PASS = 0
 FAIL = 0
@@ -45,7 +51,7 @@ def check(name: str, fn):
 
 def _with_tmp_state(fn):
     """Run fn() with state.STATE_DB redirected at a fresh temp file."""
-    import state
+    from watchmen import state
     with tempfile.TemporaryDirectory() as td:
         orig = state.STATE_DB
         state.STATE_DB = Path(td) / "state.db"
@@ -56,7 +62,7 @@ def _with_tmp_state(fn):
 
 
 def test_state_init_idempotent():
-    import state
+    from watchmen import state
     def go():
         state.init_db()
         state.init_db()  # second call must not error
@@ -69,7 +75,7 @@ def test_list_projects_without_init_raises():
     """The exact failure mode Eren hit: querying projects on a freshly-created
     state.db before init_db() runs must raise 'no such table'. If this changes
     (e.g. someone makes the conn auto-init), the test catches the silent shift."""
-    import state
+    from watchmen import state
     def go():
         try:
             state.list_projects()
@@ -83,7 +89,7 @@ def test_list_projects_without_init_raises():
 def test_onboard_calls_init_db():
     """The actual fix for Eren's bug: onboard.run must call state.init_db
     before doing anything that touches the projects table."""
-    src = (ROOT / "onboard.py").read_text()
+    src = (SRC / "onboard.py").read_text()
     assert "state.init_db()" in src, "onboard.run must call state.init_db()"
     # Ordering: init_db must appear before project_candidates is invoked.
     init_pos = src.index("state.init_db()")
@@ -97,7 +103,7 @@ def test_onboard_calls_init_db():
 def test_price_for_dash_api_names():
     """Real Anthropic API model names use dashes between version components.
     The normalizer must map these to our dot-separated price keys."""
-    import metrics
+    from watchmen import metrics
     cases = [
         ("claude-opus-4-7",          (5.0,  6.25,  10.0, 0.5,  25.0)),
         ("claude-opus-4-6",          (5.0,  6.25,  10.0, 0.5,  25.0)),
@@ -113,7 +119,7 @@ def test_price_for_dash_api_names():
 
 
 def test_price_for_unknown_falls_back():
-    import metrics
+    from watchmen import metrics
     assert metrics.price_for_model(None) == metrics.DEFAULT_PRICE
     assert metrics.price_for_model("") == metrics.DEFAULT_PRICE
     # Unknown future Claude model falls back via family pattern.
@@ -126,7 +132,7 @@ def test_turn_cost_worked_example():
     bill — so we compare against the pure token portion.
 
     Source: https://platform.claude.com/docs/en/about-claude/pricing#worked-example"""
-    import metrics
+    from watchmen import metrics
     # 50k input + 15k output, no caching → docs $0.705 incl. runtime; tokens-only $0.625
     cost = metrics.turn_cost_usd("claude-opus-4-7", 50_000, 0, 0, 0, 15_000)
     expected = 0.625
@@ -142,7 +148,7 @@ def test_turn_cost_worked_example():
 def test_cache_5m_vs_1h_are_different():
     """5m cache write = 1.25× input. 1h cache write = 2× input. They must not
     be priced the same."""
-    import metrics
+    from watchmen import metrics
     cost_5m = metrics.turn_cost_usd("claude-opus-4-7", 0, 1_000_000, 0, 0, 0)
     cost_1h = metrics.turn_cost_usd("claude-opus-4-7", 0, 0, 1_000_000, 0, 0)
     assert cost_5m < cost_1h, f"5m must cost less than 1h, got 5m=${cost_5m} 1h=${cost_1h}"
@@ -159,9 +165,8 @@ def test_codex_adapter_parses_fixture():
     response_item + event_msg/user_message dedupe (count once), per-turn cost from
     last_token_usage (not cumulative), function_call + custom_tool_call as tool uses,
     reasoning blocks as thinking. If counts drift, the adapter regressed."""
-    from pathlib import Path
 
-    from adapters import codex
+    from watchmen.adapters import codex
 
     fixture = ROOT / "tests" / "fixtures" / "codex_rollout.jsonl"
     assert fixture.exists(), f"fixture missing: {fixture}"
@@ -196,7 +201,7 @@ def test_codex_adapter_dedupe_user_message():
     """The fixture has both a response_item user message AND an event_msg/user_message
     for the same turn — they describe the same prompt. The adapter must NOT
     double-count by ignoring user_message event_msgs."""
-    from adapters import codex
+    from watchmen.adapters import codex
     fixture = ROOT / "tests" / "fixtures" / "codex_rollout.jsonl"
     entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
     session, _, _ = codex.scan(entry)
@@ -207,7 +212,7 @@ def test_codex_adapter_dedupe_user_message():
 
 def test_codex_adapter_silent_on_missing_install():
     """When ~/.codex doesn't exist, discover() must yield nothing — not raise."""
-    from adapters import codex
+    from watchmen.adapters import codex
     # Point the adapter at a non-existent path temporarily.
     orig = codex.SESSIONS_DIR
     codex.SESSIONS_DIR = ROOT / "tests" / "_no_such_codex_dir"
@@ -222,7 +227,7 @@ def test_corpus_schema_has_agent_column():
     files from before the refactor would be missing it. init_db drops + recreates
     so this is also a guard against forgetting to add it back."""
     import tempfile
-    import corpus
+    from watchmen import corpus
     with tempfile.TemporaryDirectory() as td:
         orig = corpus.DB_PATH
         corpus.DB_PATH = Path(td) / "corpus.db"
@@ -239,7 +244,7 @@ def test_decode_project_dir_naive_fallback():
     """When the encoded path doesn't exist on disk, decode_project_dir must still
     return a stable canonical form (leading '-' → '/', remaining '-' → '/').
     Stable means two adapter calls produce the same key for the same vanished project."""
-    from paths import decode_project_dir
+    from watchmen.paths import decode_project_dir
     encoded = "-tmp-watchmen-test-_no_such_path_12345"
     out = decode_project_dir(encoded)
     assert out == "/tmp/watchmen/test/_no_such_path_12345", f"got {out!r}"
@@ -253,7 +258,7 @@ def test_decode_project_dir_resolves_real_filesystem():
     survives the lossy encoding (instead of splitting into 'kai/frontend')."""
     import os
     import tempfile
-    from paths import decode_project_dir
+    from watchmen.paths import decode_project_dir
     with tempfile.TemporaryDirectory() as td:
         nested = Path(td) / "foo-bar" / "baz"
         nested.mkdir(parents=True)
@@ -267,7 +272,7 @@ def test_pi_adapter_parses_branching_fixture():
     """Synthetic pi session with a fork at m3 (branch-a + branch-b). The adapter
     must pick the leaf with the latest timestamp (branch-b) and ignore branch-a
     entirely — counting both branches' user prompts would double-count."""
-    from adapters import pi
+    from watchmen.adapters import pi
     fixture = ROOT / "tests" / "fixtures" / "pi_session.jsonl"
     entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
     session, prompts, tools = pi.scan(entry)
@@ -296,7 +301,7 @@ def test_pi_adapter_respects_compaction_cutoff():
     """A compaction entry summarizes earlier history; its firstKeptEntryId marks
     where the kept window starts. Pre-cutoff prompts/tokens must NOT be ingested
     again or we double-count what the summary already covers."""
-    from adapters import pi
+    from watchmen.adapters import pi
     fixture = ROOT / "tests" / "fixtures" / "pi_session_compacted.jsonl"
     entry = {"path": fixture, "project_dir": None, "is_subagent": False, "parent_session_id": None}
     session, prompts, _ = pi.scan(entry)
@@ -311,7 +316,7 @@ def test_pi_adapter_respects_compaction_cutoff():
 def test_pi_adapter_silent_on_missing_install():
     """No ~/.pi/agent/sessions/ on most dev boxes (yet). discover() must yield
     nothing rather than raise."""
-    from adapters import pi
+    from watchmen.adapters import pi
     orig = pi.SESSIONS_DIR
     pi.SESSIONS_DIR = ROOT / "tests" / "_no_such_pi_dir"
     try:
@@ -325,7 +330,7 @@ def test_pi_adapter_rejects_unsupported_version():
     empty session rather than guess at new fields. Regression test against the
     silent-drift failure mode."""
     import tempfile
-    from adapters import pi
+    from watchmen.adapters import pi
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "future.jsonl"
         # Header claims v4; everything else looks identical to v3.
@@ -344,7 +349,7 @@ def test_claude_adapter_stores_decoded_paths():
     real-path sessions. Regression test for the original split-counts gotcha."""
     import os
     import tempfile
-    from adapters import claude_code
+    from watchmen.adapters import claude_code
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         real_dir = td_path / "foo-bar"
@@ -377,8 +382,7 @@ def test_settings_parser_validates_inputs():
     """_parse_setting must coerce + reject inputs so bad CLI args never reach
     the DB layer. Covers: boolean parsing (truthy + falsy spellings), int
     bounds, path existence, unknown keys."""
-    import cli
-
+    from watchmen import cli
     # enabled: many truthy + falsy spellings.
     for v in ("true", "True", "yes", "Y", "on", "1"):
         col, val = cli._parse_setting("enabled", v)
@@ -404,7 +408,10 @@ def test_settings_parser_validates_inputs():
     # repo: must point at an existing directory.
     col, val = cli._parse_setting("repo", str(ROOT))
     assert col == "source_repo"
-    assert val.endswith("watchmen")
+    # _parse_setting resolves to an absolute path; just verify it round-trips
+    # against ROOT (was previously `endswith("watchmen")`, which broke when
+    # tests ran from a git worktree under a differently-named directory).
+    assert val == str(ROOT.resolve()), f"expected {ROOT.resolve()}, got {val}"
     try:
         cli._parse_setting("repo", "/tmp/_no_such_dir_for_smoke_test")
         raise AssertionError("expected ValueError on missing repo path")
@@ -428,8 +435,8 @@ def test_settings_set_writes_to_state_db():
     db error."""
     import tempfile
     import argparse
-    import cli
-    import state
+    from watchmen import cli
+    from watchmen import state
     with tempfile.TemporaryDirectory() as td:
         orig = state.STATE_DB
         state.STATE_DB = Path(td) / "state.db"
@@ -458,8 +465,7 @@ def test_cli_noun_verb_and_deprecated_both_dispatch():
     soft-deprecation line to stderr naming the new form. If either path
     silently misses, teammates think their command ran when it didn't."""
     import io
-    import cli
-
+    from watchmen import cli
     invoked: list[str] = []
     orig = cli.cmd_hooks_status
     cli.cmd_hooks_status = lambda a: (invoked.append("called"), 0)[1]
@@ -491,7 +497,7 @@ def test_cli_bare_noun_prints_help_and_exits_1():
     UX as `watchmen settings`. If the bare invocation silently does nothing
     (or worse, runs the foreground daemon by accident), users get confused."""
     import io
-    import cli
+    from watchmen import cli
     buf = io.StringIO()
     orig_stdout = cli.sys.stdout
     cli.sys.stdout = buf
@@ -512,7 +518,7 @@ def test_cache_hit_when_results_unchanged():
     same hash on replay, we skip the agent. If this regresses, every curator
     run goes back to re-curating every skill from scratch."""
     import tempfile
-    from cache import ReadRecorder, cache_hit, wrap_handlers, write_cache
+    from watchmen.cache import ReadRecorder, cache_hit, wrap_handlers, write_cache
 
     state = {"counter": 0}
 
@@ -546,7 +552,7 @@ def test_cache_miss_on_vanished_session_or_file():
     drift in corpus.db), cache_hit must return False — NOT crash. Otherwise a
     deleted repo file would tank the entire curator run."""
     import tempfile
-    from cache import ReadRecorder, cache_hit, wrap_handlers, write_cache
+    from watchmen.cache import ReadRecorder, cache_hit, wrap_handlers, write_cache
 
     def fake_read_repo_file(file_path: str) -> str:
         return "ok"
@@ -567,7 +573,7 @@ def test_cache_miss_on_missing_cache_file():
     """Bootstrap path: first run, no cache file. Must return False so the
     agent runs normally and writes the initial cache."""
     import tempfile
-    from cache import cache_hit
+    from watchmen.cache import cache_hit
     with tempfile.TemporaryDirectory() as td:
         assert cache_hit(Path(td) / "nonexistent.json", {}) is False
 
@@ -576,7 +582,7 @@ def test_invalidate_all_clears_every_cache_file():
     """--regen-all must wipe stage 1 + stage 2 (per skill) + stage 3 caches.
     If any tier survives, --regen-all is a lie."""
     import tempfile
-    from cache import invalidate_all
+    from watchmen.cache import invalidate_all
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td) / "myproject"
         (proj / "skills" / "skill-a").mkdir(parents=True)
@@ -629,10 +635,10 @@ def test_stage_2_parallel_dispatcher_preserves_order_independence():
 
 
 def test_only_input_tools_are_recorded():
-    """Effect-side tools (write_kai_claude_file, append_curation_log) must NOT
+    """Effect-side tools (write_bundle_file, append_curation_log) must NOT
     be wrapped — otherwise their results pollute the cache key, and any minor
     write-tool semantic change would force every cache to miss."""
-    from cache import INPUT_TOOLS, ReadRecorder, wrap_handlers
+    from watchmen.cache import INPUT_TOOLS, ReadRecorder, wrap_handlers
     recorded: list[str] = []
 
     def make_handler(name):
@@ -643,7 +649,7 @@ def test_only_input_tools_are_recorded():
 
     handlers = {
         "read_repo_file": make_handler("read_repo_file"),
-        "write_kai_claude_file": make_handler("write_kai_claude_file"),
+        "write_bundle_file": make_handler("write_bundle_file"),
         "append_curation_log": make_handler("append_curation_log"),
     }
     recorder = ReadRecorder()
@@ -651,12 +657,12 @@ def test_only_input_tools_are_recorded():
 
     # All three callable; only read_repo_file should land in the recorder.
     wrapped["read_repo_file"](file_path="x")
-    wrapped["write_kai_claude_file"](file_path="y", content="z")
+    wrapped["write_bundle_file"](file_path="y", content="z")
     wrapped["append_curation_log"](entry="w")
 
     assert len(recorder) == 1
     assert recorder.export()[0]["tool"] == "read_repo_file"
-    assert "write_kai_claude_file" not in INPUT_TOOLS
+    assert "write_bundle_file" not in INPUT_TOOLS
     assert "append_curation_log" not in INPUT_TOOLS
 
 
@@ -666,12 +672,12 @@ def test_only_input_tools_are_recorded():
 def test_substantive_filter_drops_trivial_sessions():
     """The filter keeps sessions with any tool use OR with ≥4 messages and ≥2
     user prompts. Trivial aborts (3-message, 0-tool, single-prompt) get dropped.
-    Calibration on kai-hooks-mvp showed this drops 15% of main sessions, all
+    Calibration on watchmen showed this drops 15% of main sessions, all
     aborts. If this regression-tests the SQL drift, the boundary cases below
     will catch it."""
     import tempfile
     import sqlite3
-    from corpus_filters import substantive_filter
+    from watchmen.corpus_filters import substantive_filter
     with tempfile.TemporaryDirectory() as td:
         db = Path(td) / "test.db"
         conn = sqlite3.connect(str(db))
@@ -711,7 +717,7 @@ def test_substantive_filter_handles_alias_choices():
     """The filter accepts an alias string for the sessions table. Default 's'
     matches the existing JOIN convention in analyze.py + state.py. Empty alias
     works for unqualified column queries."""
-    from corpus_filters import substantive_filter
+    from watchmen.corpus_filters import substantive_filter
     s = substantive_filter("s")
     assert "s.tool_use_count" in s
     assert "s.message_count" in s
@@ -726,8 +732,8 @@ def _isolate_adapters(td_path: Path):
     """Helper for corpus-scan tests: point every adapter at a non-existent or
     fixture path so the real ~/.codex, ~/.pi installs don't leak into the test.
     Returns a restore() callable to put things back."""
-    from adapters import claude_code, codex, pi
-    import corpus
+    from watchmen.adapters import claude_code, codex, pi
+    from watchmen import corpus
     orig = {
         "claude_dir": claude_code.PROJECTS_DIR,
         "codex_dir": codex.SESSIONS_DIR,
@@ -757,9 +763,8 @@ def test_corpus_scan_is_incremental_and_idempotent():
     import tempfile
     import time as _time
 
-    from adapters import claude_code
-    import corpus
-
+    from watchmen.adapters import claude_code
+    from watchmen import corpus
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         # Build a fake ~/.claude/projects with one project + one transcript.
@@ -817,9 +822,8 @@ def test_corpus_full_flag_forces_rebuild():
     parser) and we want every row re-derived from current parsers."""
     import tempfile
 
-    from adapters import claude_code
-    import corpus
-
+    from watchmen.adapters import claude_code
+    from watchmen import corpus
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         proj = td_path / "claude_projects" / "-tmp-fixture"
@@ -856,8 +860,7 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
     import sqlite3
     import tempfile
 
-    import corpus
-
+    from watchmen import corpus
     # The real legacy schema (everything except file_mtime). Pre-this-PR DBs
     # look like this.
     legacy_sessions_schema = """
@@ -941,8 +944,7 @@ def test_corpus_migrate_schema_adds_agent_column_to_pre_adapter_db():
     import sqlite3
     import tempfile
 
-    import corpus
-
+    from watchmen import corpus
     # The genuine pre-adapter schema: no `agent`, no `file_mtime`.
     pre_adapter_sessions = """
         CREATE TABLE sessions (
@@ -1021,7 +1023,7 @@ def test_changelog_parser_extracts_versioned_sections():
     (version, body) tuples. Used by both the auto-announcement on
     version bump and the `watchmen changelog` command — if this parse
     drops sections, users miss release notes silently."""
-    import cli
+    from watchmen import cli
     sample = (
         "# Changelog\n\n"
         "## [0.2.0] — 2026-05-13\n\n"
@@ -1043,7 +1045,7 @@ def test_changelog_new_entries_filters_by_last_seen_version():
     current version), bumped from older (return all newer entries
     inclusive), same version (empty). Loose semver compare so 0.10.0 >
     0.2.0 doesn't trip on lex order."""
-    import cli
+    from watchmen import cli
     sample = (
         "## [0.3.0]\nfoo\n\n"
         "## [0.2.0]\nbar\n\n"
@@ -1075,7 +1077,7 @@ def test_changelog_show_release_notes_writes_tracker_silently_on_match():
     """When the installed version equals the user's last-seen version,
     `_show_release_notes_if_bumped` must be a no-op (no stderr write, no
     tracker rewrite — quietness is the contract on every-day invocations)."""
-    import cli
+    from watchmen import cli
     import io
     with tempfile.TemporaryDirectory() as td:
         tracker = Path(td) / "last_seen_version"
@@ -1097,7 +1099,7 @@ def test_changelog_show_release_notes_announces_on_bump_then_silences():
     """Detector must (a) print release notes on first run after a bump,
     (b) update the tracker, (c) be silent on the very next call. This is
     the contract that makes "exactly once per bump" possible."""
-    import cli
+    from watchmen import cli
     import io
     with tempfile.TemporaryDirectory() as td:
         tracker = Path(td) / "last_seen_version"
@@ -1129,7 +1131,7 @@ def test_hooks_scrub_legacy_paths_on_install_and_uninstall():
     must clean stale _LEGACY_HOOK_PATHS entries — install so a routine
     `watchmen hooks install` after pulling fixes the harness, uninstall
     so a user leaving the project gets fully detached."""
-    import hooks_setup
+    from watchmen import hooks_setup
     legacy = next(iter(hooks_setup._LEGACY_HOOK_PATHS))
     # Hook block as Claude Code stores it: per-event list of entries, each
     # containing inner `hooks` arrays with command strings.
@@ -1169,7 +1171,7 @@ def test_brief_artifacts_no_longer_shipped():
     """Regression guard for the 0.2.0 cleanup: the macOS notification files
     must not come back, and the hooks dispatcher must not list `brief`.
     Catches accidental restores via merge or copy-paste."""
-    import hooks_setup
+    from watchmen import hooks_setup
     assert "brief" not in hooks_setup.WATCHMEN_SCRIPTS, \
         "brief was removed in 0.2.0 — restoring it brings back the popup"
     for _event, scripts in hooks_setup.WATCHMEN_HOOKS.items():
@@ -1188,7 +1190,7 @@ def test_harness_installed_skills_reads_skill_md_frontmatter():
     one record per skill. Skills without a SKILL.md, with malformed
     frontmatter, or in non-directory entries must be skipped silently
     so a single broken file can't poison the candidate-finder prompt."""
-    import harness
+    from watchmen import harness
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         # 1. Well-formed skill with full frontmatter.
@@ -1223,7 +1225,7 @@ def test_harness_overlaps_existing_matches_case_insensitive():
     """overlaps_existing must return the matching installed skill (case-
     insensitive on slug), or None. Used by --skip-overlap to drop
     candidates that genuinely duplicate a harness skill."""
-    import harness
+    from watchmen import harness
     installed = [{"slug": "craft-plan", "name": "craft-plan"}, {"slug": "implement", "name": "implement"}]
     assert harness.overlaps_existing("craft-plan", installed)["slug"] == "craft-plan"
     assert harness.overlaps_existing("CRAFT-PLAN", installed)["slug"] == "craft-plan"
@@ -1236,7 +1238,7 @@ def test_curate_finder_prompt_includes_harness_block():
     list when one is provided — otherwise the LLM can't propose
     `enhancement_of` for overlapping candidates. Empty harness → a clear
     "no harness yet" placeholder so the prompt always parses cleanly."""
-    import curate
+    from watchmen import curate
     installed = [
         {"slug": "craft-plan", "description": "Compile a plan before coding."},
         {"slug": "implement", "description": "Execute a plan into commits."},
@@ -1254,8 +1256,8 @@ def test_curate_finder_schema_accepts_enhancement_of_field():
     valid (but optional) field on each candidate. Without it the LLM
     can't structurally signal 'this is an enhancement of slug X' to
     Stage 2, and the harness-aware pathway degrades to a no-op."""
-    import agent as _agent
-    import curate
+    from watchmen import agent as _agent
+    from watchmen import curate
     import httpx
     # We only need to introspect the tool specs — no actual API call.
     # Stub load_api_key so CI (no OPENROUTER_API_KEY) doesn't raise during
@@ -1286,8 +1288,8 @@ def test_curate_build_skill_curator_respects_out_subdir():
     instead of `skills/<slug>/`. The write tool spec and its scoping
     handler must both use the requested subdir — otherwise the agent
     would still try to write under skills/ and fail/escape the scope."""
-    import agent as _agent
-    import curate
+    from watchmen import agent as _agent
+    from watchmen import curate
     import httpx
     candidate = {
         "slug": "demo-skill", "name": "Demo", "description": "x",
@@ -1306,13 +1308,13 @@ def test_curate_build_skill_curator_respects_out_subdir():
         _agent.load_api_key = _orig_load
     write_spec = next(
         s for s in curator.tool_specs
-        if s["function"]["name"] == "write_kai_claude_file"
+        if s["function"]["name"] == "write_bundle_file"
     )
     desc = write_spec["function"]["description"]
     assert "_pending/demo-skill/" in desc, f"write tool not scoped to _pending/: {desc!r}"
     # Calling the scoped handler with a `skills/...` path must be rejected
     # so the agent can't escape the pending dir.
-    err = curator.tool_handlers["write_kai_claude_file"](file_path="skills/other-skill/SKILL.md", content="x")
+    err = curator.tool_handlers["write_bundle_file"](file_path="skills/other-skill/SKILL.md", content="x")
     assert "ERROR" in err and "can only write under '_pending/demo-skill/'" in err
 
 
@@ -1322,8 +1324,8 @@ def test_curate_build_skill_curator_enhancement_mode_prepends_context():
     agent knows to extend an existing harness skill rather than author
     one from scratch. Without this, `enhancement_of` is a label without
     behavior."""
-    import agent as _agent
-    import curate
+    from watchmen import agent as _agent
+    from watchmen import curate
     import httpx
     candidate = {
         "slug": "demo-extension", "name": "Demo Ext", "description": "x",
@@ -1351,7 +1353,7 @@ def test_state_init_db_migrates_approval_columns_on_legacy_db():
     both columns (default 0) so reading project settings via
     `cli.state.get_project()` never raises `no such column` after pull."""
     import sqlite3
-    import state
+    from watchmen import state
     legacy_projects = """
         CREATE TABLE projects (
             project_key TEXT PRIMARY KEY,
@@ -1396,7 +1398,7 @@ def test_cli_settings_parser_accepts_approval_required_and_skip_overlap():
     `... skip_overlapping_skills 1` must parse cleanly and produce the
     right DB column + coerced bool int. These are the user-facing
     knobs for the harness-aware + approval-mode features."""
-    import cli
+    from watchmen import cli
     col, val = cli._parse_setting("approval_required", "true")
     assert (col, val) == ("approval_required", 1)
     col, val = cli._parse_setting("approval_required", "0")
@@ -1419,8 +1421,7 @@ def test_cmd_curate_passes_flags_from_db_settings_to_subprocess():
     invocation. Otherwise users would have to remember the flag every
     run — the setting becomes ornamental."""
     import argparse as _ap
-    import cli
-
+    from watchmen import cli
     captured = {}
     def fake_run(cmd, cwd=None):
         captured["cmd"] = cmd
@@ -1466,7 +1467,7 @@ def test_metrics_hbar_chart_svg_renders_rows_and_handles_edges():
       - clamp empty input to an empty SVG (no crash)
       - escape HTML-sensitive characters in labels (regression: a repo
         called `kai<>` would otherwise inject markup)"""
-    import metrics
+    from watchmen import metrics
     out = metrics.hbar_chart_svg([("Bash", 100), ("Edit", 40), ("Read", 5)])
     assert out.startswith("<svg") and out.endswith("</svg>")
     # One <rect> per row with a positive value
@@ -1493,7 +1494,7 @@ def test_viewer_insights_route_returns_html_with_key_sections():
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from fastapi.testclient import TestClient
-    from viewer import server as viewer_server
+    from watchmen.viewer import server as viewer_server
 
     client = TestClient(viewer_server.app)
     r = client.get("/insights")
@@ -1518,7 +1519,7 @@ def test_viewer_base_template_exposes_insights_nav_link():
     base.html (visible from every viewer page), not just on the insights
     page itself. Without it, users can land on /metrics or / and have no
     discovery path to the new page."""
-    base = Path(__file__).resolve().parents[1] / "viewer" / "templates" / "base.html"
+    base = SRC / "viewer" / "templates" / "base.html"
     text = base.read_text()
     assert 'href="/insights"' in text, "Insights nav link missing from base.html"
     # And the stale hardcoded port (8888 from before the port-settings PR)
@@ -1532,7 +1533,7 @@ def test_corpus_migrate_schema_is_safe_when_db_missing():
     Must be a silent no-op so first-run `watchmen init` / `watchmen --help`
     don't crash on a missing DB."""
     import tempfile
-    import corpus
+    from watchmen import corpus
     with tempfile.TemporaryDirectory() as td:
         missing = Path(td) / "definitely-not-a-db.db"
         orig_db = corpus.DB_PATH
@@ -1584,9 +1585,8 @@ def test_api_key_helpers_roundtrip():
     import os
     import tempfile
 
-    import cli
-    import config
-
+    from watchmen import cli
+    from watchmen import config
     with tempfile.TemporaryDirectory() as td:
         env_path = Path(td) / ".env"
         env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
@@ -1618,7 +1618,7 @@ def test_launchd_plist_args_use_noun_verb_form():
     `watchmen daemon run`, not the bare form — otherwise launchd loops on
     'invalid choice' errors and the viewer/daemon never starts. Regression
     guard against a teammate adding a new launchd plist that drops `run`."""
-    src = (ROOT / "launchd_setup.py").read_text()
+    src = (SRC / "launchd_setup.py").read_text()
     # Each install_* function builds an args list. The patterns we want to
     # see are the verb-form invocations; the patterns we want to NOT see are
     # the bare noun followed by a flag (the broken pre-fix shape).
@@ -1644,7 +1644,7 @@ def test_no_hardcoded_user_paths():
         "/Users/batuhanaktas",     # absolute home path
     ]
     leaks: list[str] = []
-    for py in ROOT.glob("*.py"):
+    for py in SRC.glob("*.py"):
         if py.name == "smoke.py":  # this file is allowed to mention them
             continue
         text = py.read_text(errors="replace")
@@ -1663,7 +1663,7 @@ def test_cli_version_flag_prints_version():
     'version' action calls sys.exit, so wrap in SystemExit. Regression: ensure the
     pyproject-based fallback works when the package isn't installed via pip metadata."""
     import io
-    import cli
+    from watchmen import cli
     out = io.StringIO()
     orig_stdout = cli.sys.stdout
     cli.sys.stdout = out
@@ -1687,11 +1687,11 @@ def test_cli_init_dispatches_to_onboard_and_onboard_still_works():
     """`watchmen init` is the canonical name; `watchmen onboard` remains as a hidden
     alias. Both must invoke onboard.run(). Regression: if `onboard` ever disappears
     as a subparser, every existing teammate script breaks."""
-    import cli
+    from watchmen import cli
     called: list[str] = []
 
     # Stub onboard.run BEFORE main() imports the module (it's a deferred import).
-    import onboard
+    from watchmen import onboard
     orig = onboard.run
     onboard.run = lambda: (called.append("ran"), 0)[1]
     try:
@@ -1711,7 +1711,7 @@ def test_cli_help_renders_groups_and_hides_deprecated():
     of the 13 deprecated hyphenated aliases. If the SUPPRESS slips off, the help
     screen reverts to the unreadable flat-list."""
     import io
-    import cli
+    from watchmen import cli
     buf = io.StringIO()
     orig_stdout = cli.sys.stdout
     cli.sys.stdout = buf
@@ -1736,7 +1736,7 @@ def test_cli_unknown_command_suggests_nearest_match():
     """Mistyped top-level commands should show a focused suggestion instead of
     argparse's long invalid-choice block."""
     import io
-    import cli
+    from watchmen import cli
     err = io.StringIO()
     orig_stderr = cli.sys.stderr
     cli.sys.stderr = err
@@ -1758,7 +1758,7 @@ def test_cli_open_constructs_url_and_invokes_webbrowser():
     """`watchmen open <project>` must build http://host:port/p/<project> and pass
     it to webbrowser.open. The viewer-down warning must not block the open
     attempt — open is a 'best effort, give me the URL' command, not a gate."""
-    import cli
+    from watchmen import cli
     import webbrowser
     opened: list[str] = []
     orig = webbrowser.open
@@ -1771,7 +1771,7 @@ def test_cli_open_constructs_url_and_invokes_webbrowser():
         opened.clear()
         rc = cli.main(["open"])  # no project, just base URL
         assert rc == 0
-        import config
+        from watchmen import config
         expected_base = f"http://127.0.0.1:{config.VIEWER_DEFAULT_PORT}"
         assert opened and opened[0].rstrip("/") == expected_base, f"unexpected base URL: {opened}"
     finally:
@@ -1783,7 +1783,7 @@ def test_cli_logs_resolves_log_files_for_name():
     + watchmen.log (3 files). `watchmen logs viewer` → 2 files. If a file doesn't exist
     on disk it's silently skipped — but if NONE exist, the command exits 1 with a hint."""
     import io
-    import cli
+    from watchmen import cli
     # Run against a guaranteed-missing log dir by monkey-patching Path.home().
     with tempfile.TemporaryDirectory() as td:
         fake_home = Path(td)
@@ -1810,7 +1810,7 @@ def test_doomsday_clock_brackets_for_status_command():
     active watchmen install (a couple of projects always have new prompts coming
     in). Boundaries matter: if the curve is off, every status command misreports
     urgency."""
-    import cli
+    from watchmen import cli
     # Boundary sweep — same denominator (10), varying numerators.
     # 0/10 stale → 12 (all clear)
     assert cli._doomsday_minutes_to_midnight(0, 10) == 12
@@ -1827,11 +1827,11 @@ def test_doomsday_clock_brackets_for_status_command():
 
 
 def _fake_curated_bundle(td: Path, project_key: str = "fakeproj") -> Path:
-    """Build a tiny `kai_claude/<project>/` skeleton inside td so the show/why/
+    """Build a tiny `bundles/<project>/` skeleton inside td so the show/why/
     recent commands have something to read without touching the user's real
     state. Returns the project dir."""
     import json as _json
-    proj = td / "kai_claude" / project_key
+    proj = td / "bundles" / project_key
     (proj / "skills" / "lint-fixer").mkdir(parents=True)
     (proj / "CLAUDE.md").write_text("# Fake CLAUDE.md\n")
     (proj / "_candidates.json").write_text(_json.dumps([
@@ -1876,7 +1876,7 @@ def test_cli_learn_short_circuits_when_no_new_prompts():
     to analyze (saves the user a $0.50 mistake). When --full is passed, it
     should run the curator anyway — that's the documented escape hatch."""
     import io
-    import cli
+    from watchmen import cli
     calls = {"analyze": 0, "curate": 0}
     orig_analyze = cli.cmd_analyze
     orig_curate = cli.cmd_curate
@@ -1936,7 +1936,7 @@ def test_cli_review_bails_when_stdin_not_a_tty():
     """Piped stdin → review must exit 1 with a hint, NOT block forever waiting
     for keystrokes. Regression: `echo something | watchmen review foo` used to
     hang in development."""
-    import cli
+    from watchmen import cli
     # sys.stdin is not a tty inside our test harness, so cmd_review should
     # detect that and bail. Pass a Namespace with no project lookup needed.
     import argparse as _ap
@@ -1957,7 +1957,7 @@ def test_pin_unpin_drop_restore_roundtrip():
     """Pin/unpin and drop/restore must roundtrip cleanly and remove the
     underlying file when the list becomes empty. Drop must also delete the
     bundle dir on disk so `watchmen show` no longer lists the skill."""
-    import cli
+    from watchmen import cli
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         proj_dir = _fake_curated_bundle(td_path, "fakeproj")
@@ -2009,9 +2009,9 @@ def test_curate_apply_blocklist_filters_and_sweeps_bundles():
     AND deletes any leftover bundle dirs for blocked slugs. Without the sweep,
     a user could drop a skill and still see its bundle in `watchmen show`
     after the next curator run finishes."""
-    import curate
+    from watchmen import curate
     with tempfile.TemporaryDirectory() as td:
-        out_dir = Path(td) / "kai_claude" / "fake"
+        out_dir = Path(td) / "bundles" / "fake"
         (out_dir / "skills" / "lint-fixer").mkdir(parents=True)
         (out_dir / "skills" / "lint-fixer" / "SKILL.md").write_text("stub")
         (out_dir / "skills" / "keep-me").mkdir(parents=True)
@@ -2032,7 +2032,7 @@ def test_curate_apply_blocklist_filters_and_sweeps_bundles():
 def test_curate_load_skill_list_tolerates_malformed_json():
     """A malformed _pinned.json or _blocklist.json must NOT abort the curator
     — an expensive run shouldn't fail because the user fat-fingered an edit."""
-    import curate
+    from watchmen import curate
     with tempfile.TemporaryDirectory() as td:
         out_dir = Path(td)
         (out_dir / "_pinned.json").write_text("not even close to json")
@@ -2046,7 +2046,7 @@ def test_sparkline_and_bar_edge_cases():
     series, all-zero series, zero max for bars). A regression here would mean
     the metrics command crashes for projects with no spend yet — exactly the
     state new users land in for their first hour."""
-    import cli
+    from watchmen import cli
     # Sparkline: empty → empty
     assert cli._sparkline([]) == ""
     # Sparkline: all zeros → all-low block (length preserved)
@@ -2069,7 +2069,7 @@ def test_cli_show_modes_list_overview_and_dump():
     a stable identifying string. Mode 1: 'Curated projects:'. Mode 2: the
     project name + its CLAUDE.md row. Mode 3: dumps the requested file."""
     import io
-    import cli
+    from watchmen import cli
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         _fake_curated_bundle(td_path, "fakeproj")
@@ -2121,7 +2121,7 @@ def test_cli_why_shows_provenance_and_curator_excerpt():
     actually trustworthy — the curator's stated rationale comes from the log,
     not from re-summarizing."""
     import io
-    import cli
+    from watchmen import cli
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         _fake_curated_bundle(td_path, "fakeproj")
@@ -2164,11 +2164,11 @@ def test_cli_why_shows_provenance_and_curator_excerpt():
         assert "lint-fixer" in buf.getvalue(), "should suggest available slugs on miss"
 
 
-def test_cli_recent_walks_git_log_of_kai_claude():
-    """`watchmen recent` must run `git log` inside each kai_claude/<project>/
+def test_cli_recent_walks_git_log_of_bundles():
+    """`watchmen recent` must run `git log` inside each bundles/<project>/
     and produce one section per project with at least the commit subject."""
     import io
-    import cli
+    from watchmen import cli
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         _fake_curated_bundle(td_path, "p1")
@@ -2203,16 +2203,15 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
     import io
     import json as _json
     import re
-    import cli
-    import metrics as _m
-
+    from watchmen import cli
+    from watchmen import metrics as _m
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         _fake_curated_bundle(td_path, "p1")  # has skills/lint-fixer/
         # p2: shares the lint-fixer slug in _candidates.json but has no
         # skills/ dir. That's the pattern we need both for cross-repo
         # detection (✓ curated vs · candidate) and untapped corpora.
-        p2 = td_path / "kai_claude" / "p2"
+        p2 = td_path / "bundles" / "p2"
         p2.mkdir(parents=True)
         (p2 / "_candidates.json").write_text(_json.dumps([{
             "name": "Lint Fixer", "slug": "lint-fixer",
@@ -2299,7 +2298,7 @@ def test_cli_insights_save_view_list_roundtrip():
       - non-tty stdin defaults to view (refuses to silently regenerate)
     """
     import io
-    import cli
+    from watchmen import cli
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         # Redirect the cache to a temp dir so we don't pollute the user's
@@ -2351,7 +2350,6 @@ def test_cli_insights_save_view_list_roundtrip():
             # 5. Non-tty + cache present → _decide_digest_action returns "view"
             #    (refuses to silently spend API credit). stdin in the test
             #    harness is never a tty, so this asserts the safe default.
-            import argparse as _ap
             from rich.console import Console as _C
             class _Args:
                 regenerate = False
@@ -2386,8 +2384,7 @@ def test_doomsday_ascii_renders_three_lines_with_correct_word():
     matches `12 - minutes`. ANSI codes are stripped before assertion so the test
     works in any terminal."""
     import re
-    import cli
-
+    from watchmen import cli
     def _strip(s):
         return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
@@ -2417,7 +2414,7 @@ def test_manhattan_quote_pools_are_non_empty_and_in_character():
     has actual rotation. The header text 'Dr. Manhattan' must stay stable
     across the random-selection rewrite (scripts grep for it; tests use it as
     a regression anchor)."""
-    import cli
+    from watchmen import cli
     assert len(cli._MANHATTAN_QUOTES_OK) >= 3, "OK pool too small — no rotation"
     assert len(cli._MANHATTAN_QUOTES_WARN) >= 3
     assert len(cli._MANHATTAN_QUOTES_FAIL) >= 3
@@ -2434,7 +2431,7 @@ def test_rorschach_inkblots_are_mirror_symmetric():
     is `<left><gap><right>` where right is the mirror of left under a small
     character-flip table. We just verify the visual halves match by length and
     that the pool has enough variety for `random.choice` to feel different."""
-    import cli
+    from watchmen import cli
     assert len(cli._RORSCHACH_BLOTS) >= 6, "pool too small for visible rotation"
     for blot in cli._RORSCHACH_BLOTS:
         # Each blot is "<half>  <half>" (two halves separated by spaces) — both
@@ -2453,8 +2450,7 @@ def test_config_viewer_port_reads_env_then_file_then_default():
     if the precedence flips, a user who sets WATCHMEN_VIEWER_PORT=9999 in
     their shell will get their saved file value instead — surprising."""
     import os
-    import config
-
+    from watchmen import config
     # Isolate to a temp env file so we don't clobber the user's real one.
     with tempfile.TemporaryDirectory() as td:
         orig_env_path = config.ENV_PATH
@@ -2494,9 +2490,8 @@ def test_cli_settings_port_get_and_set_with_validation():
     exit 1 — they'd otherwise crash uvicorn confusingly later."""
     import io
     import os
-    import cli
-    import config
-
+    from watchmen import cli
+    from watchmen import config
     with tempfile.TemporaryDirectory() as td:
         orig_env_path = config.ENV_PATH
         config.ENV_PATH = Path(td) / ".env"
@@ -2539,7 +2534,7 @@ def test_cli_bare_invocation_runs_smart_default():
     print a first-run banner + nudge toward `watchmen init` (exit 0). For a populated
     install, run `cmd_status`. Regression: the old behavior was `print_help; exit 1`,
     which surprised every new user."""
-    import cli
+    from watchmen import cli
     # Force fresh-state path by stubbing _is_first_run → True. The banner module
     # is also rendered; we just need to confirm it doesn't crash.
     orig = cli._is_first_run
@@ -2613,7 +2608,7 @@ def main() -> int:
     check("sparkline + bar handle empty / all-zero series",  test_sparkline_and_bar_edge_cases)
     check("`show` overview / project / file / skill modes",  test_cli_show_modes_list_overview_and_dump)
     check("`why` surfaces provenance + curator log excerpt", test_cli_why_shows_provenance_and_curator_excerpt)
-    check("`recent` runs git log inside each kai_claude/",   test_cli_recent_walks_git_log_of_kai_claude)
+    check("`recent` runs git log inside each bundles/",   test_cli_recent_walks_git_log_of_bundles)
     check("`insights` digests across repos + cross-link",    test_cli_insights_aggregates_curated_and_uncurated_repos)
     check("`insights` cache save/view/list + non-tty default", test_cli_insights_save_view_list_roundtrip)
     print()

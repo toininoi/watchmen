@@ -10,11 +10,11 @@ import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
-from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR, STATE_DB
+from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, STATE_DB
 
-ROOT = Path(__file__).parent.parent  # kai-hooks-mvp/
+ROOT = Path(__file__).parent.parent  # src/watchmen/
 ANALYSES = ANALYSES_DIR
-KAI_CLAUDE = KAI_CLAUDE_DIR
+BUNDLES = BUNDLES_DIR
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
@@ -73,7 +73,7 @@ def get_project_meta(project_key: str) -> dict | None:
 
 
 def list_skills(project_key: str) -> list[dict]:
-    skills_dir = KAI_CLAUDE / project_key / "skills"
+    skills_dir = BUNDLES / project_key / "skills"
     if not skills_dir.exists():
         return []
     out = []
@@ -141,7 +141,7 @@ def dashboard(request: Request):
     for p in projects:
         skills = list_skills(p["project_key"])
         days = list_thesis_days(p["project_key"])
-        claude_md = KAI_CLAUDE / p["project_key"] / "CLAUDE.md"
+        claude_md = BUNDLES / p["project_key"] / "CLAUDE.md"
         summaries.append({
             **p,
             "skill_count": len(skills),
@@ -184,7 +184,7 @@ def project_page(request: Request, project_key: str):
     proj = get_project_meta(project_key)
     if not proj:
         raise HTTPException(404, f"project {project_key} not tracked")
-    claude_md_path = KAI_CLAUDE / project_key / "CLAUDE.md"
+    claude_md_path = BUNDLES / project_key / "CLAUDE.md"
     claude_md_html = render_md(claude_md_path.read_text(encoding="utf-8")) if claude_md_path.exists() else None
     skills = list_skills(project_key)
     days = list_thesis_days(project_key)
@@ -198,7 +198,7 @@ def project_page(request: Request, project_key: str):
 
 @app.get("/p/{project_key}/skills/{skill_slug}", response_class=HTMLResponse)
 def skill_page(request: Request, project_key: str, skill_slug: str):
-    skill_dir = KAI_CLAUDE / project_key / "skills" / skill_slug
+    skill_dir = BUNDLES / project_key / "skills" / skill_slug
     if not skill_dir.exists():
         raise HTTPException(404, f"skill {skill_slug} not found")
     skill_md_path = skill_dir / "SKILL.md"
@@ -220,7 +220,7 @@ def skill_page(request: Request, project_key: str, skill_slug: str):
 
 @app.get("/p/{project_key}/skills/{skill_slug}/files/{file_rel:path}", response_class=HTMLResponse)
 def skill_file(request: Request, project_key: str, skill_slug: str, file_rel: str):
-    skill_dir = KAI_CLAUDE / project_key / "skills" / skill_slug
+    skill_dir = BUNDLES / project_key / "skills" / skill_slug
     target = (skill_dir / file_rel).resolve()
     try:
         target.relative_to(skill_dir.resolve())
@@ -283,8 +283,7 @@ def insights_page(request: Request):
     aggregate hour-of-day heatmap) that don't fit a terminal."""
     import json as _json
     import sys as _sys
-    import metrics as _metrics
-
+    from watchmen import metrics as _metrics
     # Reach into cli.py for the friction-signal + adapter helpers + the
     # digest cache reader. Keeps the viewer thin without duplicating those
     # SQL queries / parser helpers.
@@ -294,10 +293,9 @@ def insights_page(request: Request):
     state_init = getattr(__import__("state"), "init_db", None)
     if state_init:
         state_init()
-    import state as _state
-
+    from watchmen import state as _state
     projects = _state.list_projects()
-    base = KAI_CLAUDE
+    base = BUNDLES
 
     # Adapter totals across the whole corpus.
     adapter_totals: dict[str, int] = {}
@@ -433,8 +431,7 @@ def insights_page(request: Request):
 
 @app.get("/metrics", response_class=HTMLResponse)
 def metrics_all(request: Request, tracked: int = 0):
-    import metrics as _metrics
-
+    from watchmen import metrics as _metrics
     tracked_only = bool(tracked)
     rows = _metrics.daily_metrics_all(days=30, tracked_only=tracked_only)
     last7 = _metrics.summarize_window(rows, 7)
@@ -480,8 +477,7 @@ def metrics_all(request: Request, tracked: int = 0):
 
 @app.get("/p/{project_key}/metrics", response_class=HTMLResponse)
 def project_metrics(request: Request, project_key: str):
-    import metrics as _metrics
-
+    from watchmen import metrics as _metrics
     rows = _metrics.daily_metrics(project_key, days=30)
     last7 = _metrics.summarize_window(rows, 7)
     last30 = _metrics.summarize_window(rows, 30)
@@ -527,7 +523,7 @@ def project_metrics(request: Request, project_key: str):
 
 
 def _project_git_dir(project_key: str) -> Path | None:
-    pdir = KAI_CLAUDE / project_key
+    pdir = BUNDLES / project_key
     if not pdir.exists() or not (pdir / ".git").exists():
         return None
     return pdir
@@ -609,13 +605,12 @@ def project_diff(request: Request, project_key: str, sha: str):
 
 
 def serve(host: str | None = None, port: int | None = None):
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import config
     import uvicorn
+
+    from watchmen import config
     host = host or config.VIEWER_DEFAULT_HOST
     port = port if port is not None else config.viewer_port()
-    print(f"\n  🌐 watchmen viewer running at http://{host}:{port}\n", flush=True)
+    print(f"\n  watchmen viewer running at http://{host}:{port}\n", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

@@ -17,8 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from metrics import turn_cost_usd
-from paths import decode_project_dir
+from watchmen.metrics import turn_cost_usd
+from watchmen.paths import decode_project_dir
 
 NAME = "claude_code"
 

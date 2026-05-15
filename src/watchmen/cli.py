@@ -33,9 +33,34 @@ import subprocess
 import sys
 from pathlib import Path
 
-import config
-import state
-from paths import ANALYSES_DIR, CORPUS_DB, KAI_CLAUDE_DIR, STATE_DB
+from watchmen import config
+from watchmen import state
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
+# Presentation helpers were inline until Phase 3 — alias them under the
+# `_name` convention the rest of cli.py uses so call sites don't churn.
+from watchmen.ui import (
+    bar as _bar,
+    bold as _bold,
+    cyan as _cyan,
+    dim as _dim,
+    green as _green,
+    red as _red,
+    render_file as _render_file,
+    rich_status as _rich_status,
+    short_path as _short_path,
+    sparkline as _sparkline,
+    ui_header as _ui_header,
+    yellow as _yellow,
+)
+from watchmen.ui import (
+    print_runtime_state_error as _ui_print_runtime_state_error,
+)
+
+
+def _print_runtime_state_error(exc: BaseException, *, stderr: bool = True) -> None:
+    """Thin wrapper so call sites don't have to thread STATE_DB everywhere.
+    The actual rendering lives in watchmen.ui; this just binds the path."""
+    _ui_print_runtime_state_error(STATE_DB, exc, stderr=stderr)
 
 ROOT = Path(__file__).parent
 SOURCE_ROOT = Path(__file__).parent
@@ -69,7 +94,12 @@ class WatchmenParser(argparse.ArgumentParser):
 
 
 def _version() -> str:
-    """Read version from package metadata if installed, else parse pyproject.toml."""
+    """Read version from package metadata if installed, else parse pyproject.toml.
+
+    Two source-tree layouts: editable install (ROOT = src/watchmen/, pyproject
+    two levels up) and dev checkout pre-install (same layout). We try both
+    plausible locations before giving up.
+    """
     try:
         from importlib.metadata import version as _v
         return _v("watchmen")
@@ -77,110 +107,13 @@ def _version() -> str:
         pass
     try:
         import tomllib  # 3.11+
-        with (ROOT / "pyproject.toml").open("rb") as fh:
-            return tomllib.load(fh)["project"]["version"]
+        for candidate in (ROOT / "pyproject.toml", ROOT.parents[1] / "pyproject.toml"):
+            if candidate.exists():
+                with candidate.open("rb") as fh:
+                    return tomllib.load(fh)["project"]["version"]
     except Exception:
-        return "0.0.0"
-
-
-# ─── Helpers ────────────────────────────────────────────────────────────────
-
-
-def _bold(s: str) -> str:
-    return f"\033[1m{s}\033[0m"
-
-
-def _dim(s: str) -> str:
-    return f"\033[90m{s}\033[0m"
-
-
-def _green(s: str) -> str:
-    return f"\033[32m{s}\033[0m"
-
-
-def _yellow(s: str) -> str:
-    return f"\033[33m{s}\033[0m"
-
-
-def _red(s: str) -> str:
-    return f"\033[31m{s}\033[0m"
-
-
-def _print_runtime_state_error(exc: BaseException, *, stderr: bool = True) -> None:
-    from rich.console import Console
-
-    console = Console(stderr=stderr)
-    console.print("[red]watchmen cannot open its local state database.[/]")
-    console.print(f"[dim]path:[/] {STATE_DB}")
-    console.print(f"[dim]error:[/] {type(exc).__name__}: {exc}")
-    console.print()
-    console.print("[dim]Try setting a writable data directory:[/]")
-    console.print("  WATCHMEN_HOME=/path/to/watchmen-data watchmen status")
-
-
-def _short_path(path: str | Path) -> str:
-    text = str(path)
-    home = str(Path.home())
-    return text.replace(home, "~", 1) if text.startswith(home) else text
-
-
-def _ui_header(console, command: str, subtitle: str | None = None) -> None:
-    console.print(f"[bold]watchmen[/] [dim]{command}[/]")
-    if subtitle:
-        console.print(f"[dim]{subtitle}[/]")
-
-
-def _rich_status(status: str) -> str:
-    if status == "ok":
-        return "[green]ok[/]"
-    if status == "running":
-        return "[yellow]running[/]"
-    if status in {"failed", "error"}:
-        return "[red]failed[/]"
-    return f"[dim]{status or '-'}[/]"
-
-
-def _bright_blue(s: str) -> str:
-    return f"\033[94m{s}\033[0m"
-
-
-def _cyan(s: str) -> str:
-    return f"\033[36m{s}\033[0m"
-
-
-# ─── TUI visualization helpers ──────────────────────────────────────────────
-# Unicode block characters used for compact bar charts + sparklines. No
-# external chart deps — we just print sized strings inside Rich Tables /
-# plain stdout. Both helpers degrade gracefully when their input is empty
-# or all-zero, returning empty strings rather than ZeroDivisionError.
-
-
-_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
-
-
-def _sparkline(values: list[float]) -> str:
-    """Compact one-character-per-data-point trend line. Auto-scales to the
-    max value in the series — useful for showing daily cost or session counts
-    over a 30-day window in 30 visible characters."""
-    if not values:
-        return ""
-    peak = max(values)
-    if peak <= 0:
-        return _SPARK_BLOCKS[0] * len(values)
-    return "".join(_SPARK_BLOCKS[min(7, int((v / peak) * 7))] for v in values)
-
-
-def _bar(value: float, max_value: float, width: int = 30) -> str:
-    """Horizontal bar with half-block precision. Empty when value or max ≤ 0
-    so projects with no spend render cleanly as an empty cell instead of `0`
-    pixels of bar."""
-    if max_value <= 0 or value <= 0:
-        return ""
-    ratio = max(0.0, min(1.0, value / max_value))
-    cells = ratio * width
-    full = int(cells)
-    half = "▌" if (cells - full) >= 0.5 else ""
-    return "█" * full + half
+        pass
+    return "0.0.0"
 
 
 # ─── Watchmen aesthetic helpers ─────────────────────────────────────────────
@@ -392,8 +325,8 @@ def _show_release_notes_if_bumped(*, interactive: bool | None = None) -> None:
         last_seen = tracker.read_text().strip() if tracker.exists() else None
         if last_seen == current:
             return  # already announced this version
-        changelog_path = ROOT / "CHANGELOG.md"
-        if not changelog_path.exists():
+        changelog_path = _find_changelog()
+        if changelog_path is None:
             tracker.write_text(current)
             return
         entries = _new_changelog_entries(
@@ -418,14 +351,26 @@ def _show_release_notes_if_bumped(*, interactive: bool | None = None) -> None:
         pass
 
 
+def _find_changelog() -> Path | None:
+    """Return the CHANGELOG.md path or None.
+
+    Installed wheel: force-included at watchmen/CHANGELOG.md → next to cli.py.
+    Source checkout: lives at the repo root, two parents above src/watchmen/.
+    """
+    for candidate in (ROOT / "CHANGELOG.md", ROOT.parents[1] / "CHANGELOG.md"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def cmd_changelog(args) -> int:
     """`watchmen changelog` — render CHANGELOG.md anytime. Handy when the
     auto-announcement scrolled off the user's terminal or they want to
     re-read what landed in an older version."""
     from rich.console import Console
     from rich.markdown import Markdown
-    changelog_path = ROOT / "CHANGELOG.md"
-    if not changelog_path.exists():
+    changelog_path = _find_changelog()
+    if changelog_path is None:
         print("CHANGELOG.md not present in this checkout.")
         return 1
     console = Console()
@@ -635,7 +580,7 @@ def cmd_sync(args) -> int:
 
 def cmd_ingest(args) -> int:
     print(_dim("Running corpus.py scan..."))
-    r = subprocess.run([sys.executable, str(ROOT / "corpus.py"), "scan"], cwd=str(ROOT))
+    r = subprocess.run([sys.executable, "-m", "watchmen.corpus", "scan"], cwd=str(ROOT))
     return r.returncode
 
 
@@ -660,7 +605,7 @@ def cmd_analyze(args) -> int:
             print(_green(f"{args.project}: already up to date (last analyst day: {from_day})"))
             return 0
 
-    cmd = [sys.executable, str(ROOT / "analyze.py"), "-p", args.project, "--model", args.model]
+    cmd = [sys.executable, "-m", "watchmen.analyze", "-p", args.project, "--model", args.model]
     if from_day:
         cmd.extend(["--from-day", from_day])
 
@@ -689,7 +634,7 @@ def cmd_curate(args) -> int:
         print(f"ERROR: project '{args.project}' not tracked.")
         return 1
 
-    cmd = [sys.executable, str(ROOT / "curate.py"),
+    cmd = [sys.executable, "-m", "watchmen.curate",
            "--project", args.project, "--repo", proj["source_repo"], "--model", args.model]
     if args.regen_claude:
         cmd.extend(["--skip-finder", "--skip-skills"])
@@ -706,7 +651,7 @@ def cmd_curate(args) -> int:
     print(_dim(f"Running: {' '.join(cmd)}"))
     r = subprocess.run(cmd, cwd=str(ROOT))
     if r.returncode == 0:
-        skills_dir = _kai_claude_base() / args.project / "skills"
+        skills_dir = _bundle_base() / args.project / "skills"
         skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
         state.update_project(args.project, last_curator_run=state.now_iso(), last_curator_skill_count=skill_count)
         state.finish_run(run_id, "ok", notes=f"{skill_count} skills")
@@ -751,85 +696,85 @@ def cmd_config(args) -> int:
 
 def cmd_viewer(args) -> int:
     state.init_db()
-    from viewer.server import serve
+    from watchmen.viewer.server import serve
     serve(host=args.host, port=args.port)
     return 0
 
 
 def cmd_daemon(args) -> int:
-    import daemon as _daemon
+    from watchmen import daemon as _daemon
     return _daemon.run(args)
 
 
 def cmd_install_daemon(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.install_daemon(model=args.model, interval=args.interval, dry_run=args.dry_run)
 
 
 def cmd_install_viewer(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.install_viewer(host=args.host, port=args.port, dry_run=args.dry_run)
 
 
 def cmd_uninstall_daemon(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.uninstall_daemon()
 
 
 def cmd_uninstall_viewer(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.uninstall_viewer()
 
 
 def cmd_launchd_status(args) -> int:
-    import launchd_setup
+    from watchmen import launchd_setup
     return launchd_setup.status()
 
 
 def cmd_install_hooks(args) -> int:
-    import hooks_setup
+    from watchmen import hooks_setup
     return hooks_setup.install()
 
 
 def cmd_uninstall_hooks(args) -> int:
-    import hooks_setup
+    from watchmen import hooks_setup
     return hooks_setup.uninstall()
 
 
 def cmd_hooks_status(args) -> int:
-    import hooks_setup
+    from watchmen import hooks_setup
     return hooks_setup.status()
 
 
 def cmd_update_plugin(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.update_marketplace()
 
 
 def cmd_install_statusline(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.install_statusline(force=args.force)
 
 
 def cmd_uninstall_statusline(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.uninstall_statusline()
 
 
 def cmd_plugin_status(args) -> int:
-    import plugin_setup
+    from watchmen import plugin_setup
     return plugin_setup.status()
 
 
 def cmd_onboard(args) -> int:
-    import onboard
+    from watchmen import onboard
     return onboard.run()
 
 
 def cmd_reonboard(args) -> int:
     """Re-run the onboarding wizard. Same code path as `onboard` — onboard.run()
     is already idempotent (existing projects show up tracked, get refreshed)."""
-    import onboard
+    from watchmen import onboard
     print(_dim("Re-running onboarding wizard. Tracked projects survive — new ones are added."))
     return onboard.run()
 
@@ -987,7 +932,7 @@ def cmd_settings_port(args) -> int:
         source = "default" if current == config.VIEWER_DEFAULT_PORT and not config.read_env_var("WATCHMEN_VIEWER_PORT") else "config"
         console.print(f"viewer port: [bold]{current}[/] [dim]({source})[/]")
         if source == "default":
-            console.print(f"  [dim]set with: watchmen settings port <N>[/]")
+            console.print("  [dim]set with: watchmen settings port <N>[/]")
         return 0
 
     try:
@@ -996,7 +941,7 @@ def cmd_settings_port(args) -> int:
         console.print(f"[red]✗[/] port must be an integer (got {args.value!r})")
         return 1
     if not (1024 <= port <= 65535):
-        console.print(f"[red]✗[/] port must be in 1024–65535")
+        console.print("[red]✗[/] port must be in 1024–65535")
         return 1
 
     path = config.write_env_var("WATCHMEN_VIEWER_PORT", str(port))
@@ -1005,9 +950,9 @@ def cmd_settings_port(args) -> int:
     # The launchd plist is baked at install time — port changes don't propagate
     # until reinstall. Make the next step obvious.
     try:
-        import launchd_setup
+        from watchmen import launchd_setup
         if launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL):
-            console.print(f"  [yellow]![/] viewer launchd agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
+            console.print("  [yellow]![/] viewer launchd agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
     except Exception:
         pass
     return 0
@@ -1064,12 +1009,14 @@ def cmd_settings_api_key(args) -> int:
 _ADAPTER_SHORT = {"claude_code": "cc", "codex": "cd", "pi": "pi"}
 
 
-def _kai_claude_dir(project_key: str) -> Path:
-    return _kai_claude_base() / project_key
+def _bundle_dir(project_key: str) -> Path:
+    return _bundle_base() / project_key
 
 
-def _kai_claude_base() -> Path:
-    return ROOT / "kai_claude" if ROOT != SOURCE_ROOT else KAI_CLAUDE_DIR
+def _bundle_base() -> Path:
+    # When tests or alternate installs override ROOT, look for bundles/ there;
+    # fall through to the canonical WATCHMEN_HOME/bundles/ via paths.BUNDLES_DIR.
+    return ROOT / "bundles" if ROOT != SOURCE_ROOT else BUNDLES_DIR
 
 
 def _analyses_base() -> Path:
@@ -1094,10 +1041,10 @@ def _project_dir_predicate(project_key: str, alias: str = "s") -> tuple[str, tup
 
 
 def _tracked_project_keys() -> list[str]:
-    """Project keys that have at least a `kai_claude/<key>/` dir on disk —
+    """Project keys that have at least a `bundles/<key>/` dir on disk —
     used as the universe for `show` and `recent` without a project arg.
     Falls back to state.list_projects() when nothing is on disk yet."""
-    base = _kai_claude_base()
+    base = _bundle_base()
     if base.exists():
         keys = sorted(d.name for d in base.iterdir() if d.is_dir() and (d / "skills").exists())
         if keys:
@@ -1220,9 +1167,9 @@ def cmd_show(args) -> int:
       watchmen show <project> <skill|file>   # dump that skill/file
 
     Disambiguation: second arg ending in `.md` or `.json` is read as a file
-    path under kai_claude/<project>/; anything else is treated as a skill slug
-    and resolved to kai_claude/<project>/skills/<slug>/SKILL.md."""
-    base = _kai_claude_base()
+    path under bundles/<project>/; anything else is treated as a skill slug
+    and resolved to bundles/<project>/skills/<slug>/SKILL.md."""
+    base = _bundle_base()
     if not args.project:
         # Mode 1 — overview of every project that has a curated bundle.
         keys = _tracked_project_keys()
@@ -1324,34 +1271,6 @@ def cmd_show(args) -> int:
     return 0
 
 
-def _render_file(path: Path, raw: bool = False) -> None:
-    """Pretty-print a file based on extension. `.md` → Rich Markdown render
-    (headers/code/tables stylized). `.json` → Rich JSON with syntax colors.
-    Anything else → plain text. `--raw` forces plain text — important when
-    piping output to a file (Rich already strips ANSI when stdout isn't a
-    tty, but `--raw` is the explicit, scriptable opt-out)."""
-    text = path.read_text()
-    if raw:
-        sys.stdout.write(text)
-        return
-    print(_dim(f"# {path.name}\n"))
-    if path.suffix == ".md":
-        # Rich Markdown styles ATX headers, fenced code, lists, blockquotes,
-        # tables. Auto-disables styling when stdout isn't a tty.
-        from rich.console import Console
-        from rich.markdown import Markdown
-        Console().print(Markdown(text))
-    elif path.suffix == ".json":
-        from rich.console import Console
-        from rich.json import JSON
-        try:
-            Console().print(JSON(text))
-        except Exception:
-            sys.stdout.write(text)
-    else:
-        sys.stdout.write(text)
-
-
 def _curation_log_excerpt(proj_dir: Path, skill_slug: str, skill_name: str) -> str:
     """Pull the relevant block from _curation_log.md for a given skill. The
     log alternates timestamp headers (`## 2026-...`) and skill headers
@@ -1382,8 +1301,9 @@ def cmd_why(args) -> int:
 
     This is the trust-building command — without it, every skill is "trust me,
     this is from your data" with no way to verify."""
-    import sqlite3, json as _json
-    proj_dir = _kai_claude_dir(args.project)
+    import sqlite3
+    import json as _json
+    proj_dir = _bundle_dir(args.project)
     candidates_path = proj_dir / "_candidates.json"
     if not candidates_path.exists():
         print(_yellow(f"no candidates file at {candidates_path} — has the curator run for this project?"))
@@ -1478,12 +1398,12 @@ def cmd_why(args) -> int:
 
 
 def cmd_recent(args) -> int:
-    """Git log of kai_claude/ artifact commits in the last N days. Every curator
+    """Git log of bundles/ artifact commits in the last N days. Every curator
     run lands as a commit, so this is a fast 'what changed lately' view that
     doesn't require the web viewer."""
     days = args.days
     keys = [args.project] if args.project else _tracked_project_keys()
-    base = _kai_claude_base()
+    base = _bundle_base()
     if not keys:
         print(_dim("no curated projects yet."))
         return 0
@@ -1535,10 +1455,10 @@ _BLOCKLIST_FILE = "_blocklist.json"
 
 
 def _read_skill_list(project: str, filename: str) -> set[str]:
-    """Load a JSON list of skill slugs from kai_claude/<project>/<filename>.
+    """Load a JSON list of skill slugs from bundles/<project>/<filename>.
     Empty/missing/invalid → empty set."""
     import json as _json
-    p = _kai_claude_dir(project) / filename
+    p = _bundle_dir(project) / filename
     if not p.exists():
         return set()
     try:
@@ -1552,7 +1472,7 @@ def _write_skill_list(project: str, filename: str, values: set[str]) -> Path:
     list becomes empty (last unpin or restore), delete the file instead of
     leaving an empty `[]` behind — keeps the bundle dir tidy."""
     import json as _json
-    proj_dir = _kai_claude_dir(project)
+    proj_dir = _bundle_dir(project)
     proj_dir.mkdir(parents=True, exist_ok=True)
     p = proj_dir / filename
     if not values:
@@ -1565,12 +1485,12 @@ def _write_skill_list(project: str, filename: str, values: set[str]) -> Path:
 
 def _resolve_skill_slug(project: str, target: str) -> str | None:
     """Find the canonical slug for a user-supplied skill identifier. Accepts:
-      - exact slug matching kai_claude/<project>/skills/<slug>/
+      - exact slug matching bundles/<project>/skills/<slug>/
       - display name from _candidates.json (case-insensitive)
     Returns None if neither matches — the caller is expected to suggest
     available slugs in that case."""
     import json as _json
-    proj_dir = _kai_claude_dir(project)
+    proj_dir = _bundle_dir(project)
     skills_dir = proj_dir / "skills"
     if skills_dir.exists() and (skills_dir / target).is_dir():
         return target
@@ -1588,7 +1508,7 @@ def _resolve_skill_slug(project: str, target: str) -> str | None:
 
 def _available_skills(project: str) -> list[str]:
     """List slugs present on disk — used to suggest valid options on miss."""
-    skills_dir = _kai_claude_dir(project) / "skills"
+    skills_dir = _bundle_dir(project) / "skills"
     if not skills_dir.exists():
         return []
     return sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
@@ -1626,7 +1546,7 @@ def cmd_learn(args) -> int:
     # 1. Analyst — incremental by default, so only new days get processed.
     #    If nothing new and we're not --full, bail cheaply.
     if new_prompts == 0:
-        print(_dim(f"  no new prompts to analyze."))
+        print(_dim("  no new prompts to analyze."))
         if not args.full:
             print(_dim(f"  use --full to refresh CLAUDE.md anyway, or `watchmen show {args.project} CLAUDE.md` to view current."))
             return 0
@@ -1652,7 +1572,7 @@ def cmd_learn(args) -> int:
 
     print()
     if rc == 0:
-        print(_green(f"  ✓ learn complete"))
+        print(_green("  ✓ learn complete"))
         print(_dim(f"  view: watchmen show {args.project} CLAUDE.md"))
         if not args.full:
             print(_dim(f"  for new skills: watchmen learn {args.project} --full"))
@@ -1679,7 +1599,7 @@ def cmd_review(args) -> int:
         print(_dim("  inspect non-interactively with `watchmen show <project>` instead."))
         return 1
 
-    proj_dir = _kai_claude_dir(args.project)
+    proj_dir = _bundle_dir(args.project)
     if not proj_dir.exists():
         print(_yellow(f"no curated bundle for '{args.project}'"))
         return 1
@@ -1870,7 +1790,7 @@ def cmd_pin(args) -> int:
     path = _write_skill_list(args.project, _PINNED_FILE, pinned)
     print(_green(f"✓ pinned {slug}"))
     print(_dim(f"  wrote → {path}"))
-    print(_dim(f"  the next curator run will skip re-curating this skill"))
+    print(_dim("  the next curator run will skip re-curating this skill"))
     return 0
 
 
@@ -1897,7 +1817,7 @@ def cmd_drop(args) -> int:
     is also stored so candidate-finder output for the same skill (under a
     different generated slug) gets caught."""
     slug = _resolve_skill_slug(args.project, args.skill) or args.skill
-    proj_dir = _kai_claude_dir(args.project)
+    proj_dir = _bundle_dir(args.project)
     skill_dir = proj_dir / "skills" / slug
     blocklist = _read_skill_list(args.project, _BLOCKLIST_FILE)
     already_blocked = slug in blocklist
@@ -2000,12 +1920,13 @@ def cmd_doctor(args) -> int:
 
     # 4. daemon launchd state
     try:
-        import launchd_setup
+        from watchmen import launchd_setup
         daemon_loaded = launchd_setup._is_loaded(launchd_setup.DAEMON_LABEL)
         viewer_loaded = launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL)
     except Exception:
         daemon_loaded = viewer_loaded = False
     row("daemon (launchd)", daemon_loaded, "loaded" if daemon_loaded else "not loaded — `watchmen daemon install`", severity="warn")
+    row("viewer (launchd)", viewer_loaded, "loaded" if viewer_loaded else "not loaded — `watchmen viewer install`", severity="warn")
 
     # 5. viewer responding
     try:
@@ -2020,7 +1941,8 @@ def cmd_doctor(args) -> int:
 
     # 6. hooks installed
     try:
-        import hooks_setup, json as _json
+        from watchmen import hooks_setup
+        import json as _json
         settings = _json.loads(hooks_setup.SETTINGS_FILE.read_text()) if hooks_setup.SETTINGS_FILE.exists() else {}
         wired = sum(
             1 for entries in (settings.get("hooks") or {}).values()
@@ -2127,12 +2049,12 @@ def cmd_logs(args) -> int:
 def cmd_init(args) -> int:
     """Alias for onboard — `init` is the discoverable name; `onboard` kept as a
     hidden alias for muscle memory."""
-    import onboard
+    from watchmen import onboard
     return onboard.run()
 
 
 def cmd_metrics(args) -> int:
-    import metrics as _metrics
+    from watchmen import metrics as _metrics
     from rich.console import Console
     from rich.table import Table
 
@@ -2192,7 +2114,7 @@ def _cmd_metrics_global(args) -> int:
     """Global rollup across all tracked projects. Aggregates tokens/cost from
     metrics.daily_metrics per project + adapter session counts from corpus.db.
     Shown when `watchmen metrics` is invoked without a project arg."""
-    import metrics as _metrics
+    from watchmen import metrics as _metrics
     from rich.console import Console
     from rich.table import Table
     state.init_db()
@@ -2293,7 +2215,7 @@ def cmd_insights(args) -> int:
     call, fully local."""
     import json
     import sqlite3
-    import metrics as _metrics
+    from watchmen import metrics as _metrics
     from rich.console import Console
     from rich.table import Table
 
@@ -2305,7 +2227,7 @@ def cmd_insights(args) -> int:
 
     state.init_db()
     projects = state.list_projects()
-    base = _kai_claude_base()
+    base = _bundle_base()
 
     if not projects:
         print(_dim("No projects tracked yet — run `watchmen init` to add one."))
@@ -2779,7 +2701,7 @@ def _repo_synthesis(repo_row: dict, model: str) -> str | None:
     budget; the value is in citing actual dates/slugs/patterns, not
     in exhaustive coverage."""
     key = repo_row["key"]
-    proj_dir = _kai_claude_base() / key
+    proj_dir = _bundle_base() / key
     thesis_path = _analyses_base() / key / "_running.md"
     log_path = proj_dir / "_curation_log.md"
     cand_path = proj_dir / "_candidates.json"
@@ -2885,7 +2807,7 @@ def _one_shot_llm(
     error (missing key, network, malformed response). Never raises so
     callers can run inside a parallel dispatcher without aborting peers."""
     try:
-        import agent as _ag
+        from watchmen import agent as _ag
         import httpx
         api_key = _ag.load_api_key()
     except Exception:
@@ -3113,7 +3035,7 @@ def _bare_default() -> int:
     `init` nudge; users with state see `status` directly."""
     if _is_first_run():
         try:
-            import banner
+            from watchmen import banner
             from rich.console import Console
             banner.render(Console())
         except Exception:
@@ -3208,7 +3130,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("ingest", help="re-scan ~/.claude/projects into corpus.db").set_defaults(func=cmd_ingest)
 
-    p_sync = sub.add_parser("sync", help="bootstrap state from existing analyses/ + kai_claude/ on disk")
+    p_sync = sub.add_parser("sync", help="bootstrap state from existing analyses/ + bundles/ on disk")
     p_sync.add_argument("--project", help="just one project (default: all tracked)")
     p_sync.set_defaults(func=cmd_sync)
 
@@ -3228,7 +3150,7 @@ def main(argv: list[str] | None = None) -> int:
              "(default: propose them as enhancements). Per-project alternative: "
              "`watchmen settings set <p> skip_overlapping_skills true`")
     p_cu.add_argument("--approval-required", dest="approval_required", action="store_true",
-        help="route new bundles to kai_claude/<p>/_pending/ for review via "
+        help="route new bundles to bundles/<p>/_pending/ for review via "
              "`watchmen review`. Per-project alternative: "
              "`watchmen settings set <p> approval_required true`")
     p_cu.set_defaults(func=cmd_curate)
@@ -3300,38 +3222,29 @@ def main(argv: list[str] | None = None) -> int:
     # line. Plan: remove after 1-2 releases once teammates' scripts update.
     # All deprecated aliases use argparse.SUPPRESS so they don't pollute --help,
     # but still parse correctly for existing scripts.
-    p_id = sub.add_parser("install-daemon", help=argparse.SUPPRESS)
-    _add_daemon_install_args(p_id)
-    p_id.set_defaults(func=_deprecate("daemon install", cmd_install_daemon))
-
-    p_iv = sub.add_parser("install-viewer", help=argparse.SUPPRESS)
-    _add_viewer_install_args(p_iv)
-    p_iv.set_defaults(func=_deprecate("viewer install", cmd_install_viewer))
-
-    sub.add_parser("uninstall-daemon", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("daemon uninstall", cmd_uninstall_daemon))
-    sub.add_parser("uninstall-viewer", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("viewer uninstall", cmd_uninstall_viewer))
-    sub.add_parser("launchd-status", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("launchd status", cmd_launchd_status))
-
-    sub.add_parser("install-hooks", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("hooks install", cmd_install_hooks))
-    sub.add_parser("uninstall-hooks", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("hooks uninstall", cmd_uninstall_hooks))
-    sub.add_parser("hooks-status", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("hooks status", cmd_hooks_status))
-
-    p_isl = sub.add_parser("install-statusline", help=argparse.SUPPRESS)
-    _add_statusline_install_args(p_isl)
-    p_isl.set_defaults(func=_deprecate("statusline install", cmd_install_statusline))
-    sub.add_parser("uninstall-statusline", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("statusline uninstall", cmd_uninstall_statusline))
-
-    sub.add_parser("update-plugin", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("plugin update", cmd_update_plugin))
-    sub.add_parser("plugin-status", help=argparse.SUPPRESS).set_defaults(
-        func=_deprecate("plugin status", cmd_plugin_status))
+    #
+    # Each tuple = (old_subcommand, new_form, handler, optional arg-adder).
+    # The arg-adder is for the few aliases that need to accept the same args
+    # as the new form (install-daemon, install-viewer, install-statusline).
+    _DEPRECATED_ALIASES: list[tuple[str, str, "object", "object"]] = [
+        ("install-daemon",      "daemon install",       cmd_install_daemon,      _add_daemon_install_args),
+        ("install-viewer",      "viewer install",       cmd_install_viewer,      _add_viewer_install_args),
+        ("uninstall-daemon",    "daemon uninstall",     cmd_uninstall_daemon,    None),
+        ("uninstall-viewer",    "viewer uninstall",     cmd_uninstall_viewer,    None),
+        ("launchd-status",      "launchd status",       cmd_launchd_status,      None),
+        ("install-hooks",       "hooks install",        cmd_install_hooks,       None),
+        ("uninstall-hooks",     "hooks uninstall",      cmd_uninstall_hooks,     None),
+        ("hooks-status",        "hooks status",         cmd_hooks_status,        None),
+        ("install-statusline",  "statusline install",   cmd_install_statusline,  _add_statusline_install_args),
+        ("uninstall-statusline","statusline uninstall", cmd_uninstall_statusline, None),
+        ("update-plugin",       "plugin update",        cmd_update_plugin,       None),
+        ("plugin-status",       "plugin status",        cmd_plugin_status,       None),
+    ]
+    for old, new_form, handler, arg_adder in _DEPRECATED_ALIASES:
+        p_alias = sub.add_parser(old, help=argparse.SUPPRESS)
+        if arg_adder is not None:
+            arg_adder(p_alias)
+        p_alias.set_defaults(func=_deprecate(new_form, handler))
 
     # `onboard` / `reonboard` are hidden aliases — `init` is the canonical name.
     sub.add_parser("onboard", help=argparse.SUPPRESS).set_defaults(func=cmd_onboard)
@@ -3389,7 +3302,7 @@ def main(argv: list[str] | None = None) -> int:
     # is current. Means users only need to pull + rerun to pick up schema
     # changes; no separate `watchmen ingest --full` step required.
     try:
-        import corpus as _corpus
+        from watchmen import corpus as _corpus
         _corpus.migrate_schema()
     except Exception:
         pass

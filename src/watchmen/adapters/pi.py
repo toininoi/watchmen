@@ -39,7 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from metrics import turn_cost_usd
+from watchmen.metrics import turn_cost_usd
 
 NAME = "pi"
 

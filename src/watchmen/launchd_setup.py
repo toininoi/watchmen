@@ -132,7 +132,7 @@ def install_daemon(model: str = "deepseek/deepseek-v4-flash", interval: int = 72
 
 
 def install_viewer(host: str | None = None, port: int | None = None, dry_run: bool = False) -> int:
-    import config
+    from watchmen import config
     host = host or config.VIEWER_DEFAULT_HOST
     port = port if port is not None else config.viewer_port()
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
