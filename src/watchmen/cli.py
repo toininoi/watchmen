@@ -669,28 +669,28 @@ def cmd_daemon(args) -> int:
 
 
 def cmd_install_daemon(args) -> int:
-    from watchmen import launchd_setup
-    return launchd_setup.install_daemon(model=args.model, interval=args.interval, dry_run=args.dry_run)
+    from watchmen import service
+    return service.install_daemon(model=args.model, interval=args.interval, dry_run=args.dry_run)
 
 
 def cmd_install_viewer(args) -> int:
-    from watchmen import launchd_setup
-    return launchd_setup.install_viewer(host=args.host, port=args.port, dry_run=args.dry_run)
+    from watchmen import service
+    return service.install_viewer(host=args.host, port=args.port, dry_run=args.dry_run)
 
 
 def cmd_uninstall_daemon(args) -> int:
-    from watchmen import launchd_setup
-    return launchd_setup.uninstall_daemon()
+    from watchmen import service
+    return service.uninstall_daemon()
 
 
 def cmd_uninstall_viewer(args) -> int:
-    from watchmen import launchd_setup
-    return launchd_setup.uninstall_viewer()
+    from watchmen import service
+    return service.uninstall_viewer()
 
 
 def cmd_launchd_status(args) -> int:
-    from watchmen import launchd_setup
-    return launchd_setup.status()
+    from watchmen import service
+    return service.status()
 
 
 def cmd_install_hooks(args) -> int:
@@ -912,9 +912,9 @@ def cmd_settings_port(args) -> int:
     # The launchd plist is baked at install time — port changes don't propagate
     # until reinstall. Make the next step obvious.
     try:
-        from watchmen import launchd_setup
-        if launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL):
-            console.print("  [yellow]![/] viewer launchd agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
+        from watchmen import service
+        if service.is_viewer_loaded():
+            console.print(f"  [yellow]![/] viewer {service.BACKEND_NAME} agent is running on its old port — run [bold]watchmen viewer install[/] to move it")
     except Exception:
         pass
     return 0
@@ -1110,15 +1110,13 @@ def cmd_doctor(args) -> int:
     else:
         row("tracked projects", True, f"{len(projects)} project(s)")
 
-    # 4. daemon launchd state
-    try:
-        from watchmen import launchd_setup
-        daemon_loaded = launchd_setup._is_loaded(launchd_setup.DAEMON_LABEL)
-        viewer_loaded = launchd_setup._is_loaded(launchd_setup.VIEWER_LABEL)
-    except Exception:
-        daemon_loaded = viewer_loaded = False
-    row("daemon (launchd)", daemon_loaded, "loaded" if daemon_loaded else "not loaded — `watchmen daemon install`", severity="warn")
-    row("viewer (launchd)", viewer_loaded, "loaded" if viewer_loaded else "not loaded — `watchmen viewer install`", severity="warn")
+    # 4. daemon/viewer service state (launchd on macOS, systemd --user on Linux)
+    from watchmen import service
+    daemon_loaded = service.is_daemon_loaded()
+    viewer_loaded = service.is_viewer_loaded()
+    backend = service.BACKEND_NAME
+    row(f"daemon ({backend})", daemon_loaded, "loaded" if daemon_loaded else "not loaded — `watchmen daemon install`", severity="warn")
+    row(f"viewer ({backend})", viewer_loaded, "loaded" if viewer_loaded else "not loaded — `watchmen viewer install`", severity="warn")
 
     # 5. viewer responding
     try:

@@ -74,6 +74,14 @@ def _is_loaded(label: str) -> bool:
     return r.returncode == 0
 
 
+def is_daemon_loaded() -> bool:
+    return _is_loaded(DAEMON_LABEL)
+
+
+def is_viewer_loaded() -> bool:
+    return _is_loaded(VIEWER_LABEL)
+
+
 def _bootstrap(label: str, plist_path: Path) -> int:
     """Use launchctl bootstrap if available (modern), fall back to load (older)."""
     uid = os.getuid()

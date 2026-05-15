@@ -1631,6 +1631,75 @@ def test_launchd_plist_args_use_noun_verb_form():
     assert '"watchmen", "daemon", "--interval"' not in src
 
 
+def test_systemd_unit_args_use_noun_verb_form():
+    """Parallel of the launchd test for the Linux backend. systemd unit
+    ExecStart lines must invoke `watchmen viewer run` / `watchmen daemon run`
+    or the unit will crashloop on argparse 'invalid choice' the same way
+    launchd did before PR #10."""
+    src = (SRC / "systemd_setup.py").read_text()
+    assert '"watchmen", "viewer", "run"' in src, \
+        "install_viewer must invoke `watchmen viewer run`"
+    assert '"watchmen", "daemon", "run"' in src, \
+        "install_daemon must invoke `watchmen daemon run`"
+    assert '"watchmen", "viewer", "--host"' not in src
+    assert '"watchmen", "daemon", "--interval"' not in src
+
+
+def test_systemd_setup_dry_run_emits_valid_unit_file():
+    """`watchmen daemon install --dry-run` on Linux should print a well-formed
+    systemd unit file: required sections present, ExecStart properly quoted,
+    StandardOutput/Error pointing to ~/.watchmen/logs/."""
+    import io
+    import contextlib
+    from watchmen import systemd_setup
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = systemd_setup.install_daemon(model="x/y-test", interval=3600, dry_run=True)
+    assert rc == 0
+    out = buf.getvalue()
+
+    for section in ("[Unit]", "[Service]", "[Install]"):
+        assert section in out, f"missing section {section!r} in unit file"
+
+    assert "ExecStart=" in out
+    assert "watchmen daemon run" in out
+    assert "--interval 3600" in out
+    assert "--model x/y-test" in out
+    assert "Restart=on-failure" in out
+    assert "WantedBy=default.target" in out
+    assert "StandardOutput=append:" in out and "daemon.out.log" in out
+    assert "StandardError=append:" in out and "daemon.err.log" in out
+
+
+def test_service_dispatcher_picks_backend_per_platform():
+    """`watchmen.service` is a thin dispatcher that picks launchd_setup on
+    macOS and systemd_setup on Linux. The public API must be present on the
+    selected backend so cli.py call sites don't blow up at runtime."""
+    import platform
+    from watchmen import service
+
+    assert service.BACKEND_NAME in {"launchd", "systemd", "darwin", "linux", "unknown"}
+
+    system = platform.system()
+    if system == "Darwin":
+        from watchmen import launchd_setup as backend
+        assert service.BACKEND_NAME == "launchd"
+    elif system == "Linux":
+        from watchmen import systemd_setup as backend
+        assert service.BACKEND_NAME == "systemd"
+    else:
+        # No backend on Windows/etc. — _backend() should raise on use.
+        try:
+            service.install_daemon(dry_run=True)
+        except RuntimeError:
+            return
+        raise AssertionError("expected RuntimeError on unsupported platform")
+
+    for fn in ("install_daemon", "install_viewer", "uninstall_daemon", "uninstall_viewer", "status", "is_daemon_loaded", "is_viewer_loaded"):
+        assert callable(getattr(backend, fn)), f"backend missing {fn}"
+
+
 # ─── Codebase hygiene tests ─────────────────────────────────────────────────
 
 
@@ -2677,8 +2746,11 @@ def main() -> int:
     check("/insights route returns 200 with key sections",     test_viewer_insights_route_returns_html_with_key_sections)
     check("Insights nav link wired up in base.html",           test_viewer_base_template_exposes_insights_nav_link)
     print()
-    print("Launchd plist sanity:")
-    check("plists use noun-verb form (viewer/daemon run)", test_launchd_plist_args_use_noun_verb_form)
+    print("Service install (launchd / systemd):")
+    check("launchd plists use noun-verb form",                test_launchd_plist_args_use_noun_verb_form)
+    check("systemd units use noun-verb form",                 test_systemd_unit_args_use_noun_verb_form)
+    check("systemd dry-run emits valid unit file",            test_systemd_setup_dry_run_emits_valid_unit_file)
+    check("service dispatcher picks backend per platform",    test_service_dispatcher_picks_backend_per_platform)
     print()
     print("API key management:")
     check("api-key helpers roundtrip + preserve unrelated lines", test_api_key_helpers_roundtrip)

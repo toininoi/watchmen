@@ -379,10 +379,11 @@ def run_pipeline_parallel(console: Console, selected: list, concurrency: int = 3
 
 
 def install_autostart(console: Console) -> None:
-    if Confirm.ask("\nInstall launchd autostart for daemon + viewer?", default=True):
-        from watchmen import launchd_setup
-        launchd_setup.install_daemon()
-        launchd_setup.install_viewer()
+    from watchmen import service
+    prompt = f"\nInstall {service.BACKEND_NAME} autostart for daemon + viewer?"
+    if Confirm.ask(prompt, default=True):
+        service.install_daemon()
+        service.install_viewer()
     else:
         console.print(f"[dim]Skipped. You can run `{_exec_name()} daemon install` later.[/]")
 

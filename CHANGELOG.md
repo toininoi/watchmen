@@ -4,6 +4,28 @@ All notable changes to watchmen are listed here. The CLI surfaces the latest
 release notes once per version bump (CLI + web viewer) so a `git pull` is
 never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.1] — 2026-05-15
+
+### Added — Linux daemon backend (systemd --user)
+- `watchmen daemon install` / `watchmen viewer install` now work on Linux,
+  writing systemd `--user` units to `~/.config/systemd/user/` and calling
+  `systemctl --user enable --now`. macOS continues to use launchd; the CLI
+  is identical on either platform.
+- New `watchmen.service` module dispatches to the right backend
+  (`launchd_setup` on Darwin, `systemd_setup` on Linux) based on
+  `platform.system()`. Status rows show "(launchd)" or "(systemd)"
+  contextually. `BACKEND_NAME` is exported for UI strings.
+- On Linux, install output prints `loginctl enable-linger $USER` as the
+  one-time setup if you want the daemon to run after logout (otherwise
+  user units stop with the session, matching launchd's user-agent
+  semantics).
+- Linux logs go to `~/.watchmen/logs/{daemon,viewer}.{out,err}.log` (also
+  available via `journalctl --user -u watchmen-daemon.service`).
+- `--dry-run` for both backends now skips all preflight + filesystem
+  side effects so you can audit the generated unit/plist on any platform.
+- Three new smoke tests guard the systemd unit shape (noun-verb form,
+  dry-run output, dispatcher routing).
+
 ## [0.4.0] — 2026-05-13
 
 ### Added — HTML insights viewer page (`/insights`)
