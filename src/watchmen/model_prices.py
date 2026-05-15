@@ -8,19 +8,23 @@ Cached data: ~/.watchmen/cache/model_prices.json (expires after 24h)
 If the API is unavailable (no key, network error, quota exceeded), we fall back
 to the hardcoded HARDCODED_PRICES dict (per-million convention).
 
+Lookup order in `price_for_model`:
+  1. normalize the model name + exact match against HARDCODED_PRICES (the
+     authoritative path for every Claude / OpenAI model we ship support for)
+  2. fuzzy match against the API-fetched DB (catches models we don't yet
+     hardcode but OpenRouter knows about)
+  3. family-pattern fallback (claude-opus-99-99 → current Opus pricing)
+
 TODO(phase-3 pricing cleanup):
-  - `_parse_pricing` stores OpenRouter prices verbatim (per-token), while the
-    hardcoded fallback + `turn_cost_usd` math assume per-million. Today this is
-    harmless because `find_price` never substring-matches an API slug against
-    short Claude names like 'claude-opus-4-7' (different separators), so we
-    always fall through to `_normalize_exact_name`. But the moment a substring
-    match DOES hit, costs report 1,000,000× too low. Fix: multiply by 1M in
-    `_parse_pricing` so all internal math uses one convention.
-  - `find_price` substring matching is fragile (longest-key-wins picks
-    'opus-4' over 'opus-4.7' when keys have dots and the query has dashes).
-    Normalize both sides first, then exact-match.
+  - `_parse_pricing` stores OpenRouter prices verbatim (per-token), while
+    the hardcoded fallback + `turn_cost_usd` math assume per-million. Step 1
+    above means this currently has no observable effect (we never use API
+    pricing for any supported model), but step 2 will start using API pricing
+    once we start querying unknown models. Multiply by 1M in `_parse_pricing`
+    before that becomes a hot path.
   - First metrics call blocks on a 30s API request when the cache is cold;
-    pre-warm the cache during `watchmen init` or move the fetch off the hot path.
+    pre-warm the cache during `watchmen init` or move the fetch off the hot
+    path.
 """
 
 import json
@@ -325,17 +329,30 @@ def price_for_model(model: str | None) -> tuple[float, float, float, float, floa
     if not model:
         return DEFAULT_HARDCODED
 
+    # Step 1 — normalize to our canonical key shape and try an exact lookup
+    # against the hardcoded table. This is the AUTHORITATIVE path for every
+    # Claude / OpenAI model we explicitly support, and it runs first because
+    # the substring fallback in step 2 (against the API-fetched db, which
+    # may not even be populated) cannot tell `opus-4.7` from `opus-4` when
+    # the query string uses dashes instead of dots — picking the wrong one
+    # under-bills Opus 4.7 / over-bills Opus 4 by 3×. Bug caught in CI on
+    # PR #26 when the API cache was empty and substring match resolved
+    # "claude-opus-4-7" → "opus-4" instead of "opus-4.7".
+    normalized = _normalize_exact_name(model)
+    if normalized in HARDCODED_PRICES:
+        return HARDCODED_PRICES[normalized]
+
+    # Step 2 — fuzzy lookup against the (possibly OpenRouter-populated)
+    # database. Useful for models we don't have hardcoded yet but the API
+    # knows about.
     db = get_price_database()
     pricing = db.find_price(model)
     if pricing:
         return pricing.as_tuple()
 
-    # Exact name matching with normalization (replicating original metrics.py logic)
-    normalized = _normalize_exact_name(model)
-    if normalized in HARDCODED_PRICES:
-        return HARDCODED_PRICES[normalized]
-    
-    # Fallback to family pattern matching for unknown models (like claude-opus-99-99)
+    # Step 3 — family-pattern fallback for unknown future variants
+    # (e.g. claude-opus-99-99). Worst case we over-bill by mapping to the
+    # current generation's price; never silently zero.
     m = model.lower()
     if "opus" in m:
         return HARDCODED_PRICES["opus-4.7"]
@@ -347,7 +364,7 @@ def price_for_model(model: str | None) -> tuple[float, float, float, float, floa
         return HARDCODED_PRICES["gpt-5"]
     if "gpt-4" in m or m.startswith("o3"):
         return HARDCODED_PRICES["gpt-4.1"]
-    
+
     return DEFAULT_HARDCODED
 
 
