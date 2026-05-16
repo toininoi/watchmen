@@ -15,6 +15,7 @@ Run via: `pytest tests/` or `pytest tests/test_smoke.py -k <name>`.
 ROOT + SRC come from conftest.py.
 """
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -1100,47 +1101,87 @@ def test_changelog_show_release_notes_announces_on_bump_then_silences():
             cli._LAST_SEEN_VERSION_FILE = orig_tracker
 
 
-def test_hooks_scrub_legacy_paths_on_install_and_uninstall():
-    """When a release retires a hook script (e.g., watchmen_brief.sh in
-    0.2.0), the user's existing settings.json keeps pointing at the
-    removed path until install/uninstall scrubs it. Both code paths
-    must clean stale _LEGACY_HOOK_PATHS entries — install so a routine
-    `watchmen hooks install` after pulling fixes the harness, uninstall
-    so a user leaving the project gets fully detached."""
+def test_hooks_scrub_watchmen_entries_matches_by_basename():
+    """`_scrub_watchmen_hooks` must catch every entry whose command's
+    basename is one of watchmen's hook scripts, regardless of the
+    absolute path. That's what lets install/uninstall self-heal stale
+    paths from older releases (different checkout, pre-reorg layout,
+    different uv tool venv) instead of leaving entries that fail with
+    "No such file or directory" on every event.
+    Retired scripts (watchmen_brief.sh in 0.2.0) get scrubbed by the
+    same path — they're in WATCHMEN_SCRIPT_NAMES."""
     from watchmen import hooks_setup
-    legacy = next(iter(hooks_setup._LEGACY_HOOK_PATHS))
-    # Hook block as Claude Code stores it: per-event list of entries, each
-    # containing inner `hooks` arrays with command strings.
+    # Non-watchmen entry that must be preserved (e.g. user's own hook).
+    foreign = "/usr/local/bin/my-other-hook.sh"
+    # Stale watchmen paths from an older install (different absolute path)
+    # plus the canonical current one and a retired-script path.
+    stale_observe = "/Users/somebody/old-checkout/hooks/watchmen_observe.sh"
+    retired = "/some/path/watchmen_brief.sh"
+    current = str(hooks_setup.HOOK_SCRIPT)
     settings = {
         "hooks": {
             "SessionStart": [
-                {"hooks": [{"type": "command", "command": legacy}]},
-                {"hooks": [{"type": "command", "command": str(hooks_setup.HOOK_SCRIPT)}]},
+                {"hooks": [{"type": "command", "command": stale_observe}]},
+                {"hooks": [{"type": "command", "command": retired}]},
+                {"hooks": [{"type": "command", "command": foreign}]},
             ],
             "PreToolUse": [
                 {"matcher": "", "hooks": [
-                    {"type": "command", "command": legacy},
-                    {"type": "command", "command": str(hooks_setup.HOOK_SCRIPT)},
+                    {"type": "command", "command": stale_observe},
+                    {"type": "command", "command": current},
                 ]},
             ],
         }
     }
-    removed = hooks_setup._scrub_legacy_hooks(settings["hooks"])
-    # Two stale references should be removed (one per event).
-    assert removed == 2, f"expected 2 removed, got {removed}"
-    # SessionStart kept the observe entry, dropped the brief entry.
+    removed = hooks_setup._scrub_watchmen_hooks(settings["hooks"])
+    # 4 inner entries removed: 2 in SessionStart (stale + retired) + 2 in
+    # PreToolUse (stale + current — both are ours).
+    assert removed == 4, f"expected 4 removed, got {removed}"
+    # SessionStart kept only the foreign entry.
     ss = settings["hooks"]["SessionStart"]
     cmds = [h["command"] for e in ss for h in e["hooks"]]
-    assert legacy not in cmds
-    assert str(hooks_setup.HOOK_SCRIPT) in cmds
-    # PreToolUse kept the entry but inner array is now observe-only.
-    pre = settings["hooks"]["PreToolUse"]
-    pre_cmds = [h["command"] for e in pre for h in e["hooks"]]
-    assert legacy not in pre_cmds and str(hooks_setup.HOOK_SCRIPT) in pre_cmds
+    assert cmds == [foreign]
+    # PreToolUse: the matcher entry's inner hooks all got scrubbed, so the
+    # whole entry dropped — and since that was the only PreToolUse entry,
+    # the event key got removed entirely.
+    assert "PreToolUse" not in settings["hooks"]
+    # Idempotent: nothing left to scrub.
+    assert hooks_setup._scrub_watchmen_hooks(settings["hooks"]) == 0
 
-    # Calling again is idempotent (nothing left to remove).
-    removed_again = hooks_setup._scrub_legacy_hooks(settings["hooks"])
-    assert removed_again == 0
+
+def test_hooks_install_self_heals_stale_paths():
+    """End-to-end: a settings.json containing a stale watchmen entry from
+    an older install (different absolute path) must come out of `install()`
+    with the stale entry removed and the canonical one in its place.
+    Regression guard for the issue where a pre-reorg layout left settings
+    pointing at a non-existent watchmen_observe.sh on every event."""
+    import tempfile
+    from watchmen import hooks_setup
+    stale = "/tmp/never-existed-checkout/hooks/watchmen_observe.sh"
+    with tempfile.TemporaryDirectory() as td:
+        fake_settings = Path(td) / "settings.json"
+        fake_settings.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": stale}]}],
+                "PreToolUse":   [{"matcher": "", "hooks": [{"type": "command", "command": stale}]}],
+            }
+        }))
+        orig = hooks_setup.SETTINGS_FILE
+        hooks_setup.SETTINGS_FILE = fake_settings
+        try:
+            rc = hooks_setup.install()
+            assert rc == 0
+            written = json.loads(fake_settings.read_text())
+            all_cmds = [
+                h.get("command", "")
+                for event_entries in written.get("hooks", {}).values()
+                for e in event_entries
+                for h in e.get("hooks", [])
+            ]
+            assert stale not in all_cmds, "stale path survived install — self-heal broken"
+            assert str(hooks_setup.HOOK_SCRIPT) in all_cmds, "canonical path missing"
+        finally:
+            hooks_setup.SETTINGS_FILE = orig
 
 
 def test_brief_artifacts_no_longer_shipped():
