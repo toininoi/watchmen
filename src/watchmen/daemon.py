@@ -10,8 +10,9 @@ Cycle (default 30 min):
 Stage 1+2 (skill bundles) is intentionally NOT periodic — too expensive to run unattended,
 needs human review. Run manually via `watchmen curate <project>`.
 
-Logs to a file (default ~/Library/Logs/watchmen.log) so launchd output survives across runs.
-Graceful shutdown on SIGTERM/SIGINT.
+Logs to the platform-conventional location (~/Library/Logs on macOS,
+%LOCALAPPDATA%\\watchmen\\logs on Windows, ~/.watchmen/logs on Linux) so
+scheduler output survives across runs. Graceful shutdown on SIGTERM/SIGINT.
 
 Usage:
   uv run watchmen daemon                  # run forever
@@ -39,7 +40,22 @@ DEFAULT_CURATOR_AGE = 86400   # 24 h — minimum age before stage 3 regen is all
 DEFAULT_FULL_CURATOR_HOURS = "2,14"  # full curator runs at 02:00 and 14:00 daily
 DEFAULT_FULL_CURATOR_MIN_AGE = 28800  # min 8 h between full curator runs per project
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
-DEFAULT_LOG = Path.home() / "Library" / "Logs" / "watchmen.log"
+def _default_log_path() -> Path:
+    """Platform-conventional location for the daemon's primary log file.
+
+    macOS: ~/Library/Logs/watchmen.log (where `Console.app` looks).
+    Windows: %LOCALAPPDATA%\\watchmen\\logs\\watchmen.log.
+    Linux + everything else: ~/.watchmen/logs/watchmen.log.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "watchmen.log"
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        return base / "watchmen" / "logs" / "watchmen.log"
+    return Path.home() / ".watchmen" / "logs" / "watchmen.log"
+
+
+DEFAULT_LOG = _default_log_path()
 
 _shutdown = False
 

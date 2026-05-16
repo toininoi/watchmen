@@ -1,22 +1,47 @@
-"""Hook installer — wires watchmen_observe.sh into ~/.claude/settings.json so every
-Claude Code session pipes its hook events to the local observer at 127.0.0.1:8765.
+"""Hook installer — wires the watchmen observer into ~/.claude/settings.json
+so every Claude Code session pipes its hook events to the local observer at
+127.0.0.1:8765.
 
-Backs up the existing settings.json before mutating it. Idempotent — re-running just
-ensures the watchmen entries are present without duplicating them.
+Two hook scripts ship — `watchmen_observe.sh` for POSIX shells and
+`watchmen_observe.ps1` for PowerShell — and the installer picks the one
+that matches the host's native shell. Backs up settings.json before mutating
+it. Idempotent — re-running just ensures the watchmen entries are present
+without duplicating them.
 """
 
 import json
+import sys
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-HOOK_SCRIPT = (ROOT / "hooks" / "watchmen_observe.sh").resolve()
+
+# Each platform invokes the settings.json "command" field through its native
+# shell (bash/zsh on POSIX, cmd.exe on Windows), so the hook script matches.
+_HOOK_SCRIPTS = {
+    "win32":  ROOT / "hooks" / "watchmen_observe.ps1",
+    "posix":  ROOT / "hooks" / "watchmen_observe.sh",
+}
+HOOK_SCRIPT = (_HOOK_SCRIPTS["win32"] if sys.platform == "win32" else _HOOK_SCRIPTS["posix"]).resolve()
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
 # All hook scripts watchmen installs. Keys used internally; values are absolute paths.
 WATCHMEN_SCRIPTS: dict[str, Path] = {
     "observe": HOOK_SCRIPT,
 }
+
+
+def _settings_command_for(script_path: Path) -> str:
+    """Render the `command` string that goes into settings.json.
+
+    For .sh scripts the shebang dispatches to bash, so the path alone is
+    enough. For .ps1 scripts we wrap with `powershell -NoProfile
+    -ExecutionPolicy Bypass -File "..."` so cmd.exe can launch them without
+    the user having to lower their execution policy globally. The path is
+    quoted because user-profile dirs commonly contain spaces."""
+    if script_path.suffix.lower() == ".ps1":
+        return f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
+    return str(script_path)
 
 # Per-event: list of (script_key, matcher_or_None). matcher=None omits the matcher key
 # entirely (Claude Code treats absent matcher as "all"); matcher="" means an explicit
@@ -93,8 +118,11 @@ def install() -> int:
     if missing:
         print(f"ERROR: hook script(s) not found: {', '.join(missing)}")
         return 1
+    # The executable bit only matters for the .sh scripts — .ps1 files don't
+    # carry one, and Windows ignores chmod silently anyway.
     for p in WATCHMEN_SCRIPTS.values():
-        p.chmod(0o755)
+        if p.suffix == ".sh":
+            p.chmod(0o755)
 
     settings = _load_settings()
     hooks = settings.setdefault("hooks", {})
@@ -113,7 +141,7 @@ def install() -> int:
     for event, scripts in WATCHMEN_HOOKS.items():
         existing = hooks.setdefault(event, [])
         for script_key, matcher in scripts:
-            cmd_str = str(WATCHMEN_SCRIPTS[script_key])
+            cmd_str = _settings_command_for(WATCHMEN_SCRIPTS[script_key])
             already = any(
                 any(h.get("command") == cmd_str for h in e.get("hooks", []))
                 for e in existing
@@ -151,7 +179,9 @@ def uninstall() -> int:
     # Scrub both current scripts AND retired-but-still-referenced ones, so
     # uninstall fully cleans up after older releases.
     watchmen_cmds = (
-        {str(p) for p in WATCHMEN_SCRIPTS.values()} | _LEGACY_HOOK_PATHS
+        {str(p) for p in WATCHMEN_SCRIPTS.values()}
+        | {_settings_command_for(p) for p in WATCHMEN_SCRIPTS.values()}
+        | _LEGACY_HOOK_PATHS
     )
     removed = 0
     for event, entries in list(hooks.items()):
@@ -191,7 +221,7 @@ def status() -> int:
     for event, scripts in WATCHMEN_HOOKS.items():
         entries = hooks.get(event) or []
         for script_key, _matcher in scripts:
-            cmd_str = str(WATCHMEN_SCRIPTS[script_key])
+            cmd_str = _settings_command_for(WATCHMEN_SCRIPTS[script_key])
             present = any(
                 any(h.get("command") == cmd_str for h in e.get("hooks", []))
                 for e in entries

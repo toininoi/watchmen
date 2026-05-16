@@ -4,7 +4,7 @@ Local coding-agent session intelligence. Observes your Claude Code, Codex, and p
 
 The premise: every coding-agent session leaves a transcript on disk (`~/.claude/projects/` for Claude Code, `~/.codex/sessions/` for Codex, pi.dev's session export). Across weeks of work this becomes a corpus of how you actually use those agents. watchmen mines that corpus, runs a longitudinal LLM analyst day by day with a carry-forward thesis, then curates the recurring procedural patterns into runnable skill bundles plus a workspace brief for each repo (`CLAUDE.md` + `AGENTS.md`, identical content).
 
-Runs continuously via a launchd daemon (macOS) or systemd user unit (Linux). Comes with a local web viewer at `http://127.0.0.1:8979` (changeable via `watchmen settings port <N>`).
+Runs continuously via the host's native scheduler — launchd on macOS, systemd --user on Linux, Task Scheduler on Windows. Comes with a local web viewer at `http://127.0.0.1:8979` (changeable via `watchmen settings port <N>`).
 
 ## What you get
 
@@ -75,7 +75,7 @@ Cost: ~$0.05-0.10 per regeneration with deepseek-flash. Time: ~30-60s depending 
 
 ## Requirements
 
-- macOS or Linux (Windows: WSL works; native untested)
+- macOS, Linux, or Windows 10/11
 - [`uv`](https://github.com/astral-sh/uv) (Python toolchain)
 - Python 3.11+
 - An OpenRouter API key (`OPENROUTER_API_KEY`)
@@ -94,7 +94,7 @@ uv sync && uv tool install --editable .
 watchmen init
 ```
 
-The wizard handles everything: prompts for your `OPENROUTER_API_KEY` (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the launchd daemon + viewer for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
+The wizard handles everything: prompts for your `OPENROUTER_API_KEY` (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the daemon + viewer into the host's scheduler for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
 
 Runtime data lives under `~/.watchmen/` by default (`state.db`, `corpus.db`, `analyses/`, `bundles/`, event logs). Set `WATCHMEN_HOME=/path/to/dir` if you need an alternate data directory for testing or a separate install. On first use, watchmen copies any legacy source-tree runtime files into the new location so existing local data is preserved.
 
@@ -187,10 +187,10 @@ To run watchmen autonomously (incremental analyzer + auto-regen of CLAUDE.md whe
 ```bash
 watchmen daemon install                      # autostart on login, keepalive
 watchmen viewer install                      # also autostart the viewer at :8979
-watchmen launchd status                      # verify (works on Linux too — checks systemd --user)
+watchmen launchd status                      # verify (also reports systemd --user / Task Scheduler state)
 ```
 
-Under the hood this is `launchd` on macOS and `systemd --user` on Linux — same CLI either way. On Linux, run `sudo loginctl enable-linger $USER` once if you want the daemon to keep running after you log out.
+Same CLI on every platform; under the hood it installs a launchd agent on macOS, a systemd --user unit on Linux, or a Task Scheduler task on Windows. On Linux, run `sudo loginctl enable-linger $USER` once if you want the daemon to keep running after you log out.
 
 Default cadence:
 
@@ -206,14 +206,19 @@ Logs:
 
 ```
 # macOS (launchd)
-~/Library/Logs/watchmen.log                  # primary daemon log
-~/Library/Logs/watchmen.daemon.{out,err}.log # launchd stdout/stderr
-~/Library/Logs/watchmen.viewer.{out,err}.log # viewer logs
+~/Library/Logs/watchmen.log                          # primary daemon log
+~/Library/Logs/watchmen.daemon.{out,err}.log         # launchd stdout/stderr
+~/Library/Logs/watchmen.viewer.{out,err}.log         # viewer logs
 
 # Linux (systemd --user)
-~/.watchmen/logs/daemon.{out,err}.log        # systemd stdout/stderr
-~/.watchmen/logs/viewer.{out,err}.log        # viewer logs
+~/.watchmen/logs/daemon.{out,err}.log                # systemd stdout/stderr
+~/.watchmen/logs/viewer.{out,err}.log                # viewer logs
 # also: `journalctl --user -u watchmen-daemon.service`
+
+# Windows (Task Scheduler)
+%LOCALAPPDATA%\watchmen\logs\watchmen.log            # primary daemon log
+%LOCALAPPDATA%\watchmen\logs\daemon.{out,err}.log    # scheduler stdout/stderr
+%LOCALAPPDATA%\watchmen\logs\viewer.{out,err}.log    # viewer logs
 ```
 
 To stop:
@@ -259,7 +264,7 @@ watchmen why <key> <skill>       Provenance: source sessions (w/ adapter), curat
 watchmen recent [<key>]          Git log of curator runs (last 7d by default)
 watchmen insights                Cross-repo digest — pairs with Anthropic's /insights
 watchmen open [<key>]            Open viewer in browser (jumps to project page)
-watchmen logs [daemon|viewer]    Tail launchd logs (-f to follow)
+watchmen logs [daemon|viewer]    Tail scheduler logs (-f to follow)
 
 # Control (steer the curator)
 watchmen pin <key> <skill>       Freeze a skill — next curator run skips it
@@ -370,7 +375,7 @@ Approving moves `_pending/<slug>/` → `skills/<slug>/`. If a previously-approve
 ┌──────────────────────────────────────────────────────────────────┐
 │  Viewer + daemon                                                 │
 │   FastAPI dashboard at 127.0.0.1:8979 renders all artifacts      │
-│   launchd daemon wakes every 30 min, runs incremental pipeline   │
+│   Scheduler-managed daemon wakes every 30 min, runs pipeline     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -384,7 +389,7 @@ Three lanes by latency budget:
 
 ## Cost
 
-Per project, a full curator run (analyst + 6-8 skill bundles + CLAUDE.md) is typically `$3-8` in deepseek-v4-flash token costs. Incremental runs (daemon mode) are much cheaper — usually $0.10-0.50 per cycle since they only process new days. Set a daily cap if you want via the launchd plist environment.
+Per project, a full curator run (analyst + 6-8 skill bundles + CLAUDE.md) is typically `$3-8` in deepseek-v4-flash token costs. Incremental runs (daemon mode) are much cheaper — usually $0.10-0.50 per cycle since they only process new days. Set a daily cap if you want via the daemon's environment block in whichever scheduler unit it's installed under.
 
 ## Privacy
 
@@ -408,10 +413,9 @@ Other roadmap items: diff view in the web UI (generated CLAUDE.md vs the repo's 
 
 ## Limitations + caveats
 
-- **Hook server must run in a separate terminal.** It's a Python+FastAPI process. If you kill the terminal, hook capture stops. Use `tmux`, `screen`, or a launchd job for it (we don't ship one for the hook server itself, only for the daemon + viewer).
+- **Hook server must run in a separate terminal.** It's a Python+FastAPI process. If you kill the terminal, hook capture stops. Use `tmux`/`screen`, a launchd job, a systemd --user unit, or a Task Scheduler task for it (we don't ship one for the hook server itself, only for the daemon + viewer).
 - **Some skill curators occasionally run long (20+ min)** without calling the `finish_skill` terminal tool. The bundle still lands on disk; just no clean signal. ~15-20% of skills hit this. The artifacts are still usable.
 - **Auto-detection of project_key from `~/.claude/projects/<encoded-dir>/` is heuristic.** Some path-encoded names (e.g., `my-business/marketing` vs `my-business-marketing`) can resolve ambiguously. Use `watchmen track <key> --repo <abs-path>` to be explicit.
-- **macOS + Linux supported; Windows untested.** `watchmen daemon install` dispatches to `launchd` on macOS and `systemd --user` on Linux. Windows hasn't been tested — WSL should work since under WSL it's just Linux.
 
 ## Layout
 
@@ -433,9 +437,10 @@ watchmen/
 │   ├── adapters/             # cc / cd / pi adapters for the corpus ingest path
 │   ├── hooks/                # watchmen_observe.sh — POSTs hook stdin → localhost:8765
 │   ├── hooks_setup.py        # install / uninstall the Claude Code hook entries
-│   ├── service.py            # platform-dispatched install/uninstall (launchd ↔ systemd)
+│   ├── service.py            # platform-dispatched install/uninstall (launchd ↔ systemd ↔ schtasks)
 │   ├── launchd_setup.py      # macOS backend: ~/Library/LaunchAgents/*.plist
-│   └── systemd_setup.py      # Linux backend: ~/.config/systemd/user/*.service
+│   ├── systemd_setup.py      # Linux backend: ~/.config/systemd/user/*.service
+│   └── schtasks_setup.py     # Windows backend: Task Scheduler XML via schtasks
 ├── plugin/                   # Claude Code plugin (separate distribution)
 ├── tests/                    # pytest-runnable smoke suite (Phase 5: full pytest port)
 ├── CHANGELOG.md

@@ -1,18 +1,22 @@
 """Project path normalization.
 
-Claude Code encodes the working directory into a folder name by replacing every
-"/" with "-" and prefixing with "-": `/Users/x/dev/kai-frontend` →
-`-Users-x-dev-kai-frontend`. The replacement is lossy — a dir name that already
-contains "-" (like `kai-frontend`) ends up indistinguishable from a path
-separator. We undo it by walking the real filesystem and trying the longest
-possible joined segment at each level.
+Claude Code encodes the working directory into a folder name by flattening
+every path separator to "-":
+
+  /Users/x/dev/kai-frontend            → -Users-x-dev-kai-frontend
+  C:\\Users\\x\\dev\\kai-frontend      → C--Users-x-dev-kai-frontend
+
+The replacement is lossy — a dir name that already contains "-" (like
+`kai-frontend`) ends up indistinguishable from a path separator. We undo
+it by walking the real filesystem and trying the longest possible joined
+segment at each level.
 
 Codex stores the real cwd verbatim in `session_meta.cwd`, so no decoding needed.
 
 When the original directory no longer exists on disk (project deleted, moved,
-etc.), we fall back to a best-effort decode: leading "-" → "/", remaining "-"
-→ "/". This is wrong for dirs with dashes in their names, but it's stable —
-two transcripts from the same vanished project will still group together.
+etc.), we fall back to a naive decode (each "-" becomes a separator). That
+loses ambiguity for dashed dir names, but it's stable — two transcripts from
+the same vanished project still group together.
 """
 
 from __future__ import annotations
@@ -112,28 +116,61 @@ INSIGHTS_DIR = runtime_dir("insights")
 def decode_project_dir(encoded: str) -> str:
     """Map a Claude Code encoded project dir back to a real cwd.
 
-    Returns a real path if the directory still exists on disk; otherwise
-    returns the naive decode (leading "-" → "/", remaining "-" → "/")."""
-    if not encoded.startswith("-"):
-        return encoded  # already a real path
-    resolved = _try_resolve_real_path("/" + encoded.lstrip("-").replace("-", "/"))
-    if resolved:
-        return str(resolved)
-    return "/" + encoded.lstrip("-").replace("-", "/")
+    The encoding family is detected from the prefix:
+      "-..."        → POSIX, root is "/"
+      "<Letter>--"  → Windows, drive letter followed by flattened separators
+
+    For each family we first try a filesystem-grounded resolve (walk the real
+    tree, preferring the longest dash-joined segment at each level) so dirs
+    like `kai-frontend` survive the round-trip. If that fails (project moved
+    or deleted) we fall back to a naive split that's lossy but stable.
+    """
+    if _looks_windows_encoded(encoded):
+        return _decode_windows(encoded)
+    if encoded.startswith("-"):
+        return _decode_posix(encoded)
+    return encoded  # already a real path
 
 
-def _try_resolve_real_path(decoded: str) -> Path | None:
-    parts = Path(decoded).parts
-    if not parts or parts[0] != "/":
-        return None
-    cur = Path("/")
-    i = 1
-    while i < len(parts):
-        children = [p for p in cur.iterdir() if p.is_dir()] if cur.exists() else []
+def _looks_windows_encoded(encoded: str) -> bool:
+    return len(encoded) >= 3 and encoded[0].isalpha() and encoded[1:3] == "--"
+
+
+def _decode_posix(encoded: str) -> str:
+    naive = "/" + encoded.lstrip("-").replace("-", "/")
+    resolved = _walk_dashes(Path("/"), list(Path(naive).parts[1:]))
+    return str(resolved) if resolved else naive
+
+
+def _decode_windows(encoded: str) -> str:
+    drive = encoded[0].upper()
+    tail = encoded[3:]
+    root = Path(f"{drive}:\\")
+    if root.exists():
+        segments = tail.split("-") if tail else []
+        resolved = _walk_dashes(root, segments)
+        if resolved:
+            return str(resolved)
+    return f"{drive}:\\" + tail.replace("-", "\\")
+
+
+def _walk_dashes(root: Path, segments: list[str]) -> Path | None:
+    """Walk `root` matching the merged-by-dash `segments` against real dirs.
+
+    Tries the longest possible dash-joined segment at each level so that
+    `kai-frontend` (a real dir with a dash) is preferred over the split
+    `kai`/`frontend` interpretation."""
+    cur = root
+    i = 0
+    while i < len(segments):
+        try:
+            children = [p for p in cur.iterdir() if p.is_dir()] if cur.exists() else []
+        except (OSError, PermissionError):
+            return None
         best = None
         best_j = i
-        for j in range(len(parts), i, -1):
-            candidate = "-".join(parts[i:j])
+        for j in range(len(segments), i, -1):
+            candidate = "-".join(segments[i:j])
             for ch in children:
                 if ch.name == candidate:
                     best = ch
