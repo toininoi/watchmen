@@ -331,7 +331,7 @@ def insights_page(request: Request):
             "top_error_tools": top_error_tools,
             "frust_count": frust_count,
             "frust_samples": frust_samples,
-            "sess_spark": _metrics.sparkline_svg(sess_series, color="#4f46e5", width=140, height=30),
+            "sess_spark": _metrics.sparkline_svg(sess_series, color="#2563eb", width=140, height=30),
             "pending_prompts": pending_prompts,
             "total_sess": sum(adapter.values()),
             "tool_chart": _metrics.hbar_chart_svg(
@@ -384,7 +384,7 @@ def insights_page(request: Request):
     last30 = _metrics.summarize_window(aggregate_rows, 30)
     series = list(reversed(aggregate_rows))
     sparks = {
-        "sessions":    _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "sessions":    _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
         "prompts":     _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
         "tool_errors": _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
         "cost_usd":    _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
@@ -440,7 +440,7 @@ def metrics_all(request: Request, tracked: int = 0):
     last30 = _metrics.summarize_window(rows, 30)
     series = list(reversed(rows))
     sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
         "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
         "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
         "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
@@ -480,7 +480,7 @@ def metrics_all(request: Request, tracked: int = 0):
     top_tool_rows = card_stats.get("top_tools", [])[:5]
     card_top_tools = _metrics.hbar_chart_svg(
         [(name, float(n)) for name, n in top_tool_rows],
-        width=340, color="#6366f1", label_width=90,
+        width=340, color="#3b82f6", label_width=90,
     ) if top_tool_rows else ""
     # Daily activity series — slice from daily_metrics_all (already loaded
     # above) so we don't re-query corpus.db just for the sparklines.
@@ -489,7 +489,7 @@ def metrics_all(request: Request, tracked: int = 0):
     card_activity = {
         "sessions": _metrics.sparkline_svg(
             [r["sessions"] for r in activity_series],
-            width=320, height=46, color="#6366f1",
+            width=320, height=46, color="#3b82f6",
         ),
         "cost": _metrics.sparkline_svg(
             [r["cost_usd"] for r in activity_series],
@@ -534,7 +534,7 @@ def project_metrics(request: Request, project_key: str):
     # Daily series in chronological order for sparklines (rows is newest-first).
     series = list(reversed(rows))
     sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
         "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
         "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
         "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),

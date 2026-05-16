@@ -27,7 +27,7 @@
     </div>
     <div class="text-xs text-gray-500 mt-2">
       Looking for raw numbers? See
-      <a href="/metrics" class="text-indigo-600 font-medium hover:underline">↗ aggregated metrics</a>
+      <a href="/metrics" class="text-blue-600 font-medium hover:underline">↗ aggregated metrics</a>
       — sessions, cost, tool errors, per-agent breakdown.
     </div>
   </div>
@@ -62,7 +62,7 @@
     {% for r in repos %}
       <tr class="repo-row">
         <td>
-          <a href="/p/{{ r.key }}" class="text-indigo-600 font-medium">{{ r.key }}</a>
+          <a href="/p/{{ r.key }}" class="text-blue-600 font-medium">{{ r.key }}</a>
         </td>
         <td class="text-sm">
           {% if r.skills_n %}<span class="font-semibold">{{ r.skills_n }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}

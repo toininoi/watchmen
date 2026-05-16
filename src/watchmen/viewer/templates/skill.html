@@ -15,7 +15,7 @@
   <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Files in this bundle</div>
   <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
     {% for f in files %}
-    <a href="/p/{{ project_key }}/skills/{{ skill_slug }}/files/{{ f.rel }}" class="text-sm text-indigo-600 font-mono hover:underline flex justify-between">
+    <a href="/p/{{ project_key }}/skills/{{ skill_slug }}/files/{{ f.rel }}" class="text-sm text-blue-600 font-mono hover:underline flex justify-between">
       <span>{{ f.rel }}</span>
       <span class="text-xs text-gray-500">{{ "%.1f"|format(f.size/1024) }} KB</span>
     </a>

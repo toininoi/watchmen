@@ -120,7 +120,7 @@
       <td class="py-1.5 pr-3 font-mono text-gray-700 whitespace-nowrap" style="width: 1%;">{{ t.tool }}</td>
       <td class="py-1.5">
         <div class="bg-gray-100 rounded-sm h-3 overflow-hidden relative">
-          <div class="bg-indigo-500 h-full absolute top-0 left-0" style="width: {{ (100 * t.count / top_count)|round(1) }}%;"></div>
+          <div class="bg-blue-500 h-full absolute top-0 left-0" style="width: {{ (100 * t.count / top_count)|round(1) }}%;"></div>
           {% if t.errors %}
           <div class="bg-red-400 h-full absolute top-0" style="left: {{ (100 * (t.count - t.errors) / top_count)|round(1) }}%; width: {{ (100 * t.errors / top_count)|round(1) }}%;"></div>
           {% endif %}

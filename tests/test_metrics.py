@@ -384,6 +384,6 @@ def test_agent_donut_legend_orders_by_share_and_assigns_colors(fresh_metrics):
     assert rows[0]["share"] == pytest.approx(12 / 20)
     # Known-agent colors are fixed.
     by_slug = {r["slug"]: r["color"] for r in rows}
-    assert by_slug["claude_code"] == "#6366f1"
-    assert by_slug["codex"] == "#0891b2"
-    assert by_slug["pi"] == "#a855f7"
+    assert by_slug["claude_code"] == "#3b82f6"  # blue-500
+    assert by_slug["codex"] == "#06b6d4"        # cyan-500
+    assert by_slug["pi"] == "#14b8a6"           # teal-500

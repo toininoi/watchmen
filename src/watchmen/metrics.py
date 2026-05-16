@@ -799,7 +799,7 @@ def hbar_chart_svg(
     width: int = 360,
     bar_height: int = 18,
     gap: int = 4,
-    color: str = "#4f46e5",
+    color: str = "#2563eb",
     label_width: int = 110,
     value_fmt: str = "{:,.0f}",
 ) -> str:
@@ -841,7 +841,7 @@ def _xml_escape(s) -> str:
     )
 
 
-def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, color: str = "#4f46e5") -> str:
+def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, color: str = "#2563eb") -> str:
     """Tiny inline-SVG line/area sparkline. Zero-deps, renders in any browser."""
     vals = list(values)
     if not vals:
@@ -1240,12 +1240,14 @@ def agent_donut_svg(agent_counts: dict, *, size: int = 220, total_label: str = "
     r_outer = size * 0.42
     r_inner = size * 0.28
 
+    # Adapter palette tuned to match the page's blue/cyan/teal accent
+    # trio rather than the prior indigo-everywhere look.
     colors = {
-        "claude_code": "#6366f1",   # indigo
-        "codex":       "#0891b2",   # cyan
-        "pi":          "#a855f7",   # purple
+        "claude_code": "#3b82f6",   # blue-500
+        "codex":       "#06b6d4",   # cyan-500
+        "pi":          "#14b8a6",   # teal-500
     }
-    fallback_palette = ["#22c55e", "#f59e0b", "#ef4444", "#14b8a6", "#ec4899"]
+    fallback_palette = ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
 
     total = sum(agent_counts.values())
     if total == 0:
@@ -1306,8 +1308,8 @@ def agent_donut_legend(agent_counts: dict) -> list[dict]:
     count, share (0..1), color. Template renders the legend with the
     same color order the donut uses."""
     total = sum(agent_counts.values()) or 1
-    colors = {"claude_code": "#6366f1", "codex": "#0891b2", "pi": "#a855f7"}
-    fallback = ["#22c55e", "#f59e0b", "#ef4444", "#14b8a6", "#ec4899"]
+    colors = {"claude_code": "#3b82f6", "codex": "#06b6d4", "pi": "#14b8a6"}
+    fallback = ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
     out, fb_i = [], 0
     for slug, n in sorted(agent_counts.items(), key=lambda kv: kv[1], reverse=True):
         if not n:
@@ -1392,12 +1394,18 @@ def card_svg(stats: dict, *, size: int = 440) -> str:
     user_poly = " ".join(user_pts)
 
     return f'''<svg viewBox="0 0 {size} {size + 36}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="watchmen profile spider chart">
+  <defs>
+    <linearGradient id="spider-fill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="hsl(217 91% 60%)" stop-opacity="0.75"/>
+      <stop offset="100%" stop-color="hsl(189 94% 50%)" stop-opacity="0.55"/>
+    </linearGradient>
+  </defs>
   {''.join(ring_polys)}
   {''.join(spokes)}
-  <polygon points="{user_poly}"
-           fill="hsl(243 75% 59% / 0.65)"
-           stroke="hsl(243 75% 45%)" stroke-width="2.5" stroke-linejoin="round"/>
-  {''.join(f'<circle cx="{cx + r * max(0.02, stats["axes"][CARD_AXES[i]]) * math.cos(a):.1f}" cy="{cy + r * max(0.02, stats["axes"][CARD_AXES[i]]) * math.sin(a):.1f}" r="3" fill="white" stroke="hsl(243 75% 45%)" stroke-width="2"/>' for i, a in enumerate(angles))}
+  <polygon points="{user_poly}" data-user="1"
+           fill="url(#spider-fill)"
+           stroke="hsl(217 91% 50%)" stroke-width="2.5" stroke-linejoin="round"/>
+  {''.join(f'<circle cx="{cx + r * max(0.02, stats["axes"][CARD_AXES[i]]) * math.cos(a):.1f}" cy="{cy + r * max(0.02, stats["axes"][CARD_AXES[i]]) * math.sin(a):.1f}" r="3.5" fill="white" stroke="hsl(217 91% 50%)" stroke-width="2"/>' for i, a in enumerate(angles))}
   {''.join(labels)}
 </svg>'''
 
@@ -1415,8 +1423,8 @@ def card_tier_colors(rating: int) -> dict:
     if rating >= 70:
         return {"name": "bronze", "from": "#fed7aa", "to": "#c2410c",
                 "text": "#7c2d12", "border": "#9a3412"}
-    return {"name": "indigo", "from": "#e0e7ff", "to": "#6366f1",
-            "text": "#3730a3", "border": "#4f46e5"}
+    return {"name": "indigo", "from": "#e0e7ff", "to": "#3b82f6",
+            "text": "#3730a3", "border": "#2563eb"}
 
 
 if __name__ == "__main__":

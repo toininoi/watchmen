@@ -61,7 +61,7 @@
       {% for p in projects %}
       <tr>
         <td>
-          <a href="/p/{{ p.project_key }}" class="text-indigo-600 font-medium">{{ p.project_key }}</a>
+          <a href="/p/{{ p.project_key }}" class="text-blue-600 font-medium">{{ p.project_key }}</a>
         </td>
         <td class="text-sm">{{ p.skill_count }}</td>
         <td class="text-sm">{{ p.thesis_day_count }}</td>
@@ -100,7 +100,7 @@
       {% for r in runs %}
       <tr>
         <td class="text-xs text-gray-600 font-mono">{{ r.started_at[:19] }}</td>
-        <td class="text-sm"><a href="/p/{{ r.project_key }}" class="text-indigo-600">{{ r.project_key }}</a></td>
+        <td class="text-sm"><a href="/p/{{ r.project_key }}" class="text-blue-600">{{ r.project_key }}</a></td>
         <td class="text-sm">{{ r.kind }}</td>
         <td class="text-sm">
           {% if r.status == 'ok' %}<span class="wm-pill wm-pill-ok">✓ ok</span>

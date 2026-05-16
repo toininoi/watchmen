@@ -38,10 +38,13 @@
   <style>
     /* ── Design tokens ────────────────────────────────────────────────
        Loose shadcn-light palette mapped to HSL so future variants
-       (dark mode, accent themes) only need to swap these triples. */
+       (dark mode, accent themes) only need to swap these triples.
+       The accent shifted from indigo to a cleaner blue → the cyan /
+       teal supporting colors give the profile card its "elegant
+       productivity app" vibe without going full dark mode. */
     :root {
       --max: 1100px;
-      --background:        220 14% 98%;  /* page bg, slightly cooler than gray-50 */
+      --background:        220 14% 98%;
       --foreground:        222  9% 15%;
       --muted:             220 13% 95%;
       --muted-foreground:  220  9% 46%;
@@ -49,8 +52,11 @@
       --card-foreground:   222  9% 15%;
       --border:            220 13% 91%;
       --border-strong:     220 13% 82%;
-      --accent:            243 75% 59%;  /* indigo-600 — keep the existing brand */
-      --accent-soft:       243 80% 96%;
+      --accent:            217 91% 60%;  /* blue-500 — replaces indigo */
+      --accent-strong:     221 83% 53%;  /* blue-600 — for hover states */
+      --accent-soft:       213 100% 96%; /* blue-50 — for active pills */
+      --cyan:              189 94% 43%;  /* cyan-500 */
+      --teal:              173 80% 40%;  /* teal-500 */
     }
 
     /* ── Typography rhythm ────────────────────────────────────────── */
@@ -201,16 +207,29 @@
     .wm-profile__arch { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
     .wm-profile__flavor { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
     .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--muted-foreground)); margin-top: 6px; text-transform: uppercase; }
-    /* Hero row: spider chart (pinned 440px) + 3-column stat grid on the right. */
+    /* Hero row: spider chart (pinned ~380px) + 3-column stat grid.
+       Spider sized so it visually balances the stat columns instead
+       of leaving a void below the (short) stat rows. */
     .wm-profile__hero {
       display: grid;
-      grid-template-columns: 460px 1fr;
+      grid-template-columns: 380px 1fr;
       gap: 28px;
       padding: 24px 28px 12px;
-      align-items: start;
+      align-items: center;
     }
-    .wm-profile__spider { width: 100%; max-width: 460px; }
+    .wm-profile__spider { width: 100%; max-width: 380px; }
     .wm-profile__spider svg { display: block; width: 100%; height: auto; }
+    .wm-profile__spider polygon[data-user="1"] {
+      animation: wm-spider-pulse 4s ease-in-out infinite;
+      transform-origin: center;
+    }
+    @keyframes wm-spider-pulse {
+      0%, 100% { filter: drop-shadow(0 0 0 hsl(var(--accent) / 0)); }
+      50%      { filter: drop-shadow(0 0 6px hsl(var(--accent) / 0.45)); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .wm-profile__spider polygon[data-user="1"] { animation: none; }
+    }
     .wm-profile__grid {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
@@ -218,11 +237,18 @@
     }
     @media (max-width: 1100px) {
       .wm-profile__hero { grid-template-columns: 1fr; }
-      .wm-profile__spider { justify-self: center; max-width: 380px; }
+      .wm-profile__spider { justify-self: center; max-width: 320px; }
     }
     @media (max-width: 720px) {
       .wm-profile__grid { grid-template-columns: 1fr 1fr; }
     }
+
+    /* Hover lift for stat pills — subtle scale + accent border to reward
+       reading. Skipped when reduce-motion is set. */
+    .wm-profile__stat-value {
+      transition: transform 140ms ease, background-color 140ms ease, color 140ms ease;
+    }
+    .wm-profile__stat-value:hover { transform: scale(1.05); }
 
     /* Mini-visualization row: agent donut + top tools bars + activity sparks. */
     .wm-profile__visuals {
@@ -239,6 +265,12 @@
       border: 1px solid hsl(var(--border));
       border-radius: 12px;
       padding: 14px 16px;
+      transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+    }
+    .wm-profile__visual:hover {
+      border-color: hsl(var(--accent) / 0.45);
+      box-shadow: 0 4px 12px hsl(var(--accent) / 0.08);
+      transform: translateY(-1px);
     }
     .wm-profile__visual-label {
       font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
@@ -291,6 +323,13 @@
       border: 1px solid hsl(var(--border));
       font-size: 12px; font-weight: 500;
       color: hsl(var(--foreground));
+      transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease;
+      cursor: default;
+    }
+    .wm-profile__trait:hover {
+      transform: translateY(-1px);
+      border-color: hsl(var(--accent) / 0.6);
+      background: hsl(var(--accent-soft));
     }
     .wm-profile__spider { display: block; }
 
