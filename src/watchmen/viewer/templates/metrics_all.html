@@ -56,7 +56,21 @@
   <!-- Hero row: big spider chart on the left, color-coded stat grid on the right. -->
   <div class="wm-profile__hero">
     <div class="wm-profile__spider">
-      {{ card_svg|safe }}
+      <div class="wm-chart" style="height: 360px;"
+           data-wm-chart="radar"
+           data-color="hsl(217, 91%, 60%)"
+           data-points='{{ card_radar_data|tojson }}'></div>
+      <dl class="wm-axis-legend">
+        {% for a in card_axis_legend %}
+        <div class="wm-axis-legend__row">
+          <dt>{{ a.name }}</dt>
+          <dd>
+            <span class="wm-axis-legend__desc">{{ a.desc }}</span>
+            <span class="wm-axis-legend__elite">elite ≈ {{ a.elite }}</span>
+          </dd>
+        </div>
+        {% endfor %}
+      </dl>
     </div>
     <div class="wm-profile__grid">
       {% for group in card_stats.attribute_groups %}
@@ -78,7 +92,11 @@
     <div class="wm-profile__visual">
       <div class="wm-profile__visual-label">Agent mix</div>
       <div class="flex items-center gap-4">
-        <div style="flex: 0 0 auto;">{{ card_donut|safe }}</div>
+        <div class="wm-chart" style="width: 130px; height: 130px; flex: 0 0 130px;"
+             data-wm-chart="donut"
+             data-center-value="{{ "{:,}".format(card_donut_center_value) }}"
+             data-center-label="sessions"
+             data-points='{{ card_donut_data|tojson }}'></div>
         <div class="flex-1 text-xs space-y-1.5">
           {% for row in card_donut_legend %}
           <div class="flex items-center gap-2">
@@ -96,8 +114,11 @@
 
     <div class="wm-profile__visual">
       <div class="wm-profile__visual-label">Top tools</div>
-      {% if card_top_tools %}
-        {{ card_top_tools|safe }}
+      {% if card_top_tools_data %}
+        <div class="wm-chart" style="height: 150px;"
+             data-wm-chart="bar"
+             data-color="hsl(217, 91%, 60%)"
+             data-points='{{ card_top_tools_data|tojson }}'></div>
       {% else %}
         <div class="text-sm text-gray-400">No tool calls recorded in window.</div>
       {% endif %}
@@ -105,27 +126,39 @@
 
     <div class="wm-profile__visual">
       <div class="wm-profile__visual-label">Activity ({{ card_days }}d)</div>
-      <div class="space-y-2">
+      <div class="space-y-3">
         <div>
           <div class="flex items-baseline justify-between text-xs">
             <span class="text-gray-500">Sessions / day</span>
             <span class="font-semibold tabular">{{ "{:,}".format(card_stats.sessions) }}</span>
           </div>
-          {{ card_activity.sessions|safe }}
+          <div class="wm-chart wm-chart--sm" data-wm-chart="area"
+               data-color="hsl(217, 91%, 60%)"
+               data-label="Sessions"
+               data-value-fmt="int"
+               data-points='{{ card_activity_data.sessions|tojson }}'></div>
         </div>
         <div>
           <div class="flex items-baseline justify-between text-xs">
             <span class="text-gray-500">Cost / day</span>
             <span class="font-semibold tabular">${{ "%.2f"|format(card_stats.cost_usd) }}</span>
           </div>
-          {{ card_activity.cost|safe }}
+          <div class="wm-chart wm-chart--sm" data-wm-chart="area"
+               data-color="hsl(38, 92%, 50%)"
+               data-label="Cost"
+               data-value-fmt="usd"
+               data-points='{{ card_activity_data.cost|tojson }}'></div>
         </div>
         <div>
           <div class="flex items-baseline justify-between text-xs">
             <span class="text-gray-500">Tool errors / day</span>
             <span class="font-semibold tabular {% if card_stats.tool_errors %}text-red-700{% endif %}">{{ "{:,}".format(card_stats.tool_errors) }}</span>
           </div>
-          {{ card_activity.tool_errors|safe }}
+          <div class="wm-chart wm-chart--sm" data-wm-chart="area"
+               data-color="hsl(0, 84%, 60%)"
+               data-label="Errors"
+               data-value-fmt="int"
+               data-points='{{ card_activity_data.tool_errors|tojson }}'></div>
         </div>
       </div>
     </div>
@@ -227,37 +260,49 @@
     <div class="label">Sessions / 7d</div>
     <div class="value">{{ last7.sessions }}</div>
     <div class="sub">{{ last30.sessions }} in last 30d</div>
-    <div class="spark">{{ sparks.sessions|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(217, 91%, 60%)" data-label="Sessions" data-value-fmt="int"
+         data-points='{{ sparks_data.sessions|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Prompts / 7d</div>
     <div class="value">{{ last7.prompts }}</div>
     <div class="sub">{{ "%.1f"|format(last7.prompts / last7.sessions if last7.sessions else 0) }} per session</div>
-    <div class="spark">{{ sparks.prompts|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(189, 94%, 43%)" data-label="Prompts" data-value-fmt="int"
+         data-points='{{ sparks_data.prompts|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Tool errors / 7d</div>
     <div class="value">{{ last7.tool_errors }}</div>
     <div class="sub">{{ "%.2f"|format(last7.tool_errors / last7.sessions if last7.sessions else 0) }} per session</div>
-    <div class="spark">{{ sparks.tool_errors|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(0, 84%, 60%)" data-label="Errors" data-value-fmt="int"
+         data-points='{{ sparks_data.tool_errors|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Cost / 7d</div>
     <div class="value">${{ "%.2f"|format(last7.cost_usd) }}</div>
     <div class="sub">${{ "%.2f"|format(last30.cost_usd) }} in last 30d</div>
-    <div class="spark">{{ sparks.cost_usd|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(25, 95%, 53%)" data-label="Cost" data-value-fmt="usd"
+         data-points='{{ sparks_data.cost_usd|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Input tokens / 7d</div>
     <div class="value">{{ "{:,}".format(last7.input_tokens) }}</div>
     <div class="sub">{{ "{:,}".format(last7.cache_read_tokens) }} from cache</div>
-    <div class="spark">{{ sparks.input_tokens|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(189, 94%, 43%)" data-label="Input tokens" data-value-fmt="int"
+         data-points='{{ sparks_data.input_tokens|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Output tokens / 7d</div>
     <div class="value">{{ "{:,}".format(last7.output_tokens) }}</div>
     <div class="sub">{{ "%.2f"|format(last7.output_tokens / last7.sessions if last7.sessions else 0) }}k per session avg</div>
-    <div class="spark">{{ sparks.output_tokens|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(142, 71%, 35%)" data-label="Output tokens" data-value-fmt="int"
+         data-points='{{ sparks_data.output_tokens|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Skill suggestions / 7d</div>
@@ -269,7 +314,9 @@
         no fires yet
       {% endif %}
     </div>
-    <div class="spark">{{ sparks.suggestions|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(280, 70%, 60%)" data-label="Suggestions" data-value-fmt="int"
+         data-points='{{ sparks_data.suggestions|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Cache hit ratio / 7d</div>
@@ -336,7 +383,8 @@
       </span>
     </div>
     {% endif %}
-    {{ calendar_svg|safe }}
+    <div class="wm-chart" style="height: 180px;" data-wm-chart="calendar"
+         data-points='{{ calendar_data|tojson }}'></div>
   </div>
   <div class="stat-card overflow-x-auto lg:col-span-3">
     <div class="label">Day × hour (last 90 days)</div>
@@ -347,7 +395,8 @@
         not enough data yet
       {% endif %}
     </div>
-    {{ hour_dow_svg|safe }}
+    <div class="wm-chart" style="height: 200px;" data-wm-chart="hourdow"
+         data-points='{{ hour_dow_data|tojson }}'></div>
   </div>
 </div>
 
