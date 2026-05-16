@@ -51,6 +51,30 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
   from `metrics.py` so every UI surface can render friendly names
   consistently and unknown slugs fall through verbatim.
 
+### Changed — viewer aesthetic upgrade (Tailwind via CDN, shadcn-inspired)
+- Switched the viewer's body font from system fonts to Inter (loaded via
+  Bunny Fonts, a GDPR-safe Google Fonts mirror). Sets a consistent visual
+  baseline across macOS, Linux, and Windows.
+- Introduced a small design-token layer in `base.html` (CSS custom
+  properties for `--background` / `--foreground` / `--card` / `--border`
+  / `--accent`) so future dark-mode + theme variants only need to swap
+  the HSL triples.
+- New utility classes: `.wm-card` (the polished card baseline), `.wm-card-table`
+  (a card that hosts a flush table with no edge padding), `.wm-pill` +
+  `.wm-pill-ok`/`-running`/`-fail`/`-muted` (shadcn-style status badges),
+  `.wm-nav-link` (pill-style nav with active-route highlight via
+  `request.url.path`). Existing `.stat-card` rules promoted to use the
+  same tokens so legacy templates pick up the upgrade without rewriting.
+- Templates migrated to the new primitives: dashboard, runs, insights,
+  metrics_all. Per-template `<style>` blocks that duplicated the global
+  card baseline got pruned; only page-specific bits stay local
+  (`.daily` table on metrics, `.badge-curated`/`.badge-candidate` on
+  insights, etc.).
+- Nav now highlights the active section. Bigger border radius on cards
+  (12px → "rounded-card") + subtler shadows + a smoother hover state
+  on table rows pull the look closer to shadcn's default light theme
+  without dragging in a Node build step or React.
+
 ### Changed — sharpened the Metrics vs Insights split
 - `/insights` is now the LLM-driven view only: cross-repo digest,
   friction signals, untapped corpora, frustration samples, deep digest

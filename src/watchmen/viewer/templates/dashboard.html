@@ -45,69 +45,69 @@
 </div>
 
 {% if projects %}
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-8">
-  <table class="w-full">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
-        <th class="px-4 py-3">Project</th>
-        <th class="px-4 py-3">Skills</th>
-        <th class="px-4 py-3">Thesis days</th>
-        <th class="px-4 py-3">CLAUDE.md</th>
-        <th class="px-4 py-3">Last analyst</th>
-        <th class="px-4 py-3">Repo</th>
+<div class="wm-card wm-card-table mb-8 tabular">
+  <table>
+    <thead>
+      <tr>
+        <th>Project</th>
+        <th>Skills</th>
+        <th>Thesis days</th>
+        <th>CLAUDE.md</th>
+        <th>Last analyst</th>
+        <th>Repo</th>
       </tr>
     </thead>
     <tbody>
       {% for p in projects %}
-      <tr class="border-b border-gray-100 hover:bg-gray-50">
-        <td class="px-4 py-3">
+      <tr>
+        <td>
           <a href="/p/{{ p.project_key }}" class="text-indigo-600 font-medium">{{ p.project_key }}</a>
         </td>
-        <td class="px-4 py-3 text-sm">{{ p.skill_count }}</td>
-        <td class="px-4 py-3 text-sm">{{ p.thesis_day_count }}</td>
-        <td class="px-4 py-3 text-sm">
+        <td class="text-sm">{{ p.skill_count }}</td>
+        <td class="text-sm">{{ p.thesis_day_count }}</td>
+        <td class="text-sm">
           {% if p.claude_md_size %}
             {{ "%.1f"|format(p.claude_md_size/1024) }} KB
           {% else %}<span class="text-gray-400">—</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-sm text-gray-600">{{ p.last_analyst_day or "—" }}</td>
-        <td class="px-4 py-3 text-xs text-gray-500 font-mono">{{ p.source_repo|replace("/Users/batuhanaktas", "~") }}</td>
+        <td class="text-sm text-gray-600">{{ p.last_analyst_day or "—" }}</td>
+        <td class="text-xs text-gray-500 font-mono">{{ p.source_repo|replace("/Users/batuhanaktas", "~") }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
 {% else %}
-<div class="bg-white rounded p-6 text-gray-600 text-sm border border-gray-200">
-  No tracked projects yet. Run <code>watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
+<div class="wm-card text-gray-600 text-sm">
+  No tracked projects yet. Run <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
 </div>
 {% endif %}
 
 <h2 class="text-lg font-semibold mb-3 mt-8">Recent runs</h2>
 {% if runs %}
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-  <table class="w-full">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
-        <th class="px-4 py-2">Started</th>
-        <th class="px-4 py-2">Project</th>
-        <th class="px-4 py-2">Kind</th>
-        <th class="px-4 py-2">Status</th>
-        <th class="px-4 py-2">Notes</th>
+<div class="wm-card wm-card-table tabular">
+  <table>
+    <thead>
+      <tr>
+        <th>Started</th>
+        <th>Project</th>
+        <th>Kind</th>
+        <th>Status</th>
+        <th>Notes</th>
       </tr>
     </thead>
     <tbody>
       {% for r in runs %}
-      <tr class="border-b border-gray-100">
-        <td class="px-4 py-2 text-xs text-gray-600 font-mono">{{ r.started_at[:19] }}</td>
-        <td class="px-4 py-2 text-sm"><a href="/p/{{ r.project_key }}" class="text-indigo-600">{{ r.project_key }}</a></td>
-        <td class="px-4 py-2 text-sm">{{ r.kind }}</td>
-        <td class="px-4 py-2 text-sm">
-          {% if r.status == 'ok' %}<span class="text-green-700">✓ ok</span>
-          {% elif r.status == 'running' %}<span class="text-yellow-700">● running</span>
-          {% else %}<span class="text-red-700">✗ {{ r.status }}</span>{% endif %}
+      <tr>
+        <td class="text-xs text-gray-600 font-mono">{{ r.started_at[:19] }}</td>
+        <td class="text-sm"><a href="/p/{{ r.project_key }}" class="text-indigo-600">{{ r.project_key }}</a></td>
+        <td class="text-sm">{{ r.kind }}</td>
+        <td class="text-sm">
+          {% if r.status == 'ok' %}<span class="wm-pill wm-pill-ok">✓ ok</span>
+          {% elif r.status == 'running' %}<span class="wm-pill wm-pill-running">● running</span>
+          {% else %}<span class="wm-pill wm-pill-fail">✗ {{ r.status }}</span>{% endif %}
         </td>
-        <td class="px-4 py-2 text-xs text-gray-600">{{ r.notes or "" }}</td>
+        <td class="text-xs text-gray-600">{{ r.notes or "" }}</td>
       </tr>
       {% endfor %}
     </tbody>
