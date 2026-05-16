@@ -25,7 +25,7 @@
         <td class="text-xs text-gray-500">{{ r.id }}</td>
         <td class="text-xs text-gray-700 font-mono">{{ r.started_at[:19] }}</td>
         <td class="text-xs text-gray-700 font-mono">{{ r.ended_at[:19] if r.ended_at else "running" }}</td>
-        <td class="text-sm"><a href="/p/{{ r.project_key }}" class="text-indigo-600">{{ r.project_key }}</a></td>
+        <td class="text-sm"><a href="/p/{{ r.project_key }}" class="text-blue-600">{{ r.project_key }}</a></td>
         <td class="text-sm">{{ r.kind }}</td>
         <td class="text-sm">
           {% if r.status == 'ok' %}<span class="wm-pill wm-pill-ok">✓ ok</span>

@@ -1528,6 +1528,37 @@ def test_viewer_insights_route_returns_html_with_key_sections():
     assert "/insights" in html
 
 
+def test_viewer_metrics_route_includes_profile_card():
+    """The profile card (FM-style spider + stats columns + traits +
+    agent-mix donut + top-tools bars + activity sparklines) is inlined
+    into /metrics. Smoke-test that the route renders with the landmarks
+    regardless of corpus state — empty corpus produces a Newcomer card."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/metrics?card_days=90")
+    assert r.status_code == 200, f"/metrics returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    # Card-section anchors.
+    assert "wm-profile" in html
+    assert "OVR" in html
+    # Hero row layout — spider chart + 3-column stat grid.
+    assert "wm-profile__hero" in html and "wm-profile__spider" in html
+    for axis in ("THROUGHPUT", "FRUGALITY", "RELIABILITY", "CURIOSITY", "RANGE", "MASTERY"):
+        assert axis in html, f"axis label {axis} missing from /metrics profile card"
+    for col in ("Volume", "Efficiency", "Breadth"):
+        assert col in html, f"column header {col} missing"
+    # Mini-visualization row.
+    assert "Agent mix" in html and "Top tools" in html
+    assert "Sessions / day" in html  # activity sparklines
+    # Window selector for the card.
+    assert 'name="card_days"' in html
+    assert "Player traits" in html
+
+
 def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
     """The /metrics route is the raw-numbers dashboard. It should render
     cleanly with or without corpus data. When corpus.db has sessions, the

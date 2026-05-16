@@ -38,10 +38,13 @@
   <style>
     /* ── Design tokens ────────────────────────────────────────────────
        Loose shadcn-light palette mapped to HSL so future variants
-       (dark mode, accent themes) only need to swap these triples. */
+       (dark mode, accent themes) only need to swap these triples.
+       The accent shifted from indigo to a cleaner blue → the cyan /
+       teal supporting colors give the profile card its "elegant
+       productivity app" vibe without going full dark mode. */
     :root {
       --max: 1100px;
-      --background:        220 14% 98%;  /* page bg, slightly cooler than gray-50 */
+      --background:        220 14% 98%;
       --foreground:        222  9% 15%;
       --muted:             220 13% 95%;
       --muted-foreground:  220  9% 46%;
@@ -49,8 +52,11 @@
       --card-foreground:   222  9% 15%;
       --border:            220 13% 91%;
       --border-strong:     220 13% 82%;
-      --accent:            243 75% 59%;  /* indigo-600 — keep the existing brand */
-      --accent-soft:       243 80% 96%;
+      --accent:            217 91% 60%;  /* blue-500 — replaces indigo */
+      --accent-strong:     221 83% 53%;  /* blue-600 — for hover states */
+      --accent-soft:       213 100% 96%; /* blue-50 — for active pills */
+      --cyan:              189 94% 43%;  /* cyan-500 */
+      --teal:              173 80% 40%;  /* teal-500 */
     }
 
     /* ── Typography rhythm ────────────────────────────────────────── */
@@ -174,6 +180,173 @@
     .wm-pill-running { background: hsl(45  90% 92%); color: hsl(35  70% 32%); }
     .wm-pill-fail    { background: hsl(0   75% 95%); color: hsl(0   75% 38%); }
     .wm-pill-muted   { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
+
+    /* ── Profile card (top of /metrics) — Football-Manager-style ── */
+    .wm-profile {
+      position: relative;
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: 16px;
+      padding: 0;
+      overflow: hidden;
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+    }
+    .wm-profile__header {
+      padding: 22px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid hsl(var(--border));
+    }
+    .wm-profile__rating {
+      font-size: 64px; font-weight: 800; line-height: 1;
+      letter-spacing: -0.04em; font-variant-numeric: tabular-nums;
+    }
+    .wm-profile__ovr { font-size: 10px; font-weight: 700; letter-spacing: 0.18em; margin-top: 4px; }
+    .wm-profile__arch { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
+    .wm-profile__flavor { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+    .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--muted-foreground)); margin-top: 6px; text-transform: uppercase; }
+    /* Hero row: compact spider chart (~320px) on the left, 3-column
+       stat grid expanding into the freed space on the right. */
+    .wm-profile__hero {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 32px;
+      padding: 24px 28px 12px;
+      align-items: center;
+    }
+    .wm-profile__spider {
+      width: 100%; max-width: 320px;
+      cursor: pointer;
+    }
+    .wm-profile__spider svg { display: block; width: 100%; height: auto; }
+
+    /* All the eye-candy lives on the spider now — no hover/lift on the
+       stat pills or visual tiles, since those should read as
+       informational rather than interactive. */
+    .wm-profile__spider polygon[data-user="1"] {
+      transform-origin: center;
+      animation: wm-spider-load 900ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
+      transition: filter 220ms ease, fill-opacity 220ms ease;
+    }
+    .wm-profile__spider circle {
+      transform-origin: center;
+      transform-box: fill-box;  /* per-circle, so each dot scales around its own center */
+      transition: r 220ms ease, stroke-width 220ms ease;
+      animation: wm-spider-dot-load 900ms cubic-bezier(0.34, 1.4, 0.64, 1) both 200ms;
+    }
+    @keyframes wm-spider-load {
+      0%   { transform: scale(0.45); opacity: 0; }
+      55%  { transform: scale(1.04); opacity: 1; }
+      100% { transform: scale(1.0);  opacity: 1; }
+    }
+    @keyframes wm-spider-dot-load {
+      0%   { opacity: 0; }
+      60%  { opacity: 0; }
+      100% { opacity: 1; }
+    }
+    /* Hover the spider container — polygon brightens + glows, dots
+       enlarge. Pulled into a single hover root so the whole chart
+       responds together. */
+    .wm-profile__spider:hover polygon[data-user="1"] {
+      fill-opacity: 0.9;
+      filter: drop-shadow(0 0 10px hsl(var(--accent) / 0.55));
+    }
+    .wm-profile__spider:hover circle {
+      r: 5;
+      stroke-width: 2.5;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .wm-profile__spider polygon[data-user="1"],
+      .wm-profile__spider circle { animation: none; }
+    }
+
+    .wm-profile__grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 24px;
+    }
+    @media (max-width: 1100px) {
+      .wm-profile__hero { grid-template-columns: 1fr; }
+      .wm-profile__spider { justify-self: center; max-width: 280px; }
+    }
+    @media (max-width: 720px) {
+      .wm-profile__grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    /* Mini-visualization row: agent donut + top tools bars + activity sparks.
+       Static — no hover lift, the spider is the only interactive showpiece. */
+    .wm-profile__visuals {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+      padding: 12px 28px 22px;
+    }
+    @media (max-width: 1000px) {
+      .wm-profile__visuals { grid-template-columns: 1fr; }
+    }
+    .wm-profile__visual {
+      background: hsl(var(--muted) / 0.5);
+      border: 1px solid hsl(var(--border));
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .wm-profile__visual-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground));
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .wm-profile__col-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground));
+      padding-bottom: 8px;
+      border-bottom: 1px solid hsl(var(--border));
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    .wm-profile__stat {
+      display: flex; align-items: baseline; justify-content: space-between;
+      padding: 5px 0;
+      font-size: 13px;
+      gap: 12px;
+    }
+    .wm-profile__stat-label { color: hsl(var(--muted-foreground)); }
+    .wm-profile__stat-value {
+      font-weight: 600; font-variant-numeric: tabular-nums;
+      letter-spacing: -0.01em;
+      padding: 1px 8px; border-radius: 4px;
+      white-space: nowrap;
+      /* Intentionally no hover transform — the spider is the only
+         element on the page meant to respond to interaction. */
+    }
+    .wm-profile__stat-value--elite   { background: hsl(142 60% 92%); color: hsl(142 60% 26%); }
+    .wm-profile__stat-value--mid     { background: hsl(45  90% 92%); color: hsl(35  70% 30%); }
+    .wm-profile__stat-value--low     { background: hsl(0   75% 95%); color: hsl(0   65% 40%); }
+    .wm-profile__stat-value--neutral { color: hsl(var(--foreground)); }
+
+    .wm-profile__traits {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      padding: 16px 28px 22px;
+      border-top: 1px solid hsl(var(--border));
+      background: hsl(var(--muted) / 0.4);
+    }
+    .wm-profile__traits-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground)); text-transform: uppercase;
+      align-self: center; margin-right: 4px;
+    }
+    .wm-profile__trait {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: white;
+      border: 1px solid hsl(var(--border));
+      font-size: 12px; font-weight: 500;
+      color: hsl(var(--foreground));
+    }
+    .wm-profile__spider { display: block; }
 
     /* ── Table-card variant: a .wm-card that hosts a flush table with
        no padding around the edge so the table header bg meets the

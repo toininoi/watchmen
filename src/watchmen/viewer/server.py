@@ -331,7 +331,7 @@ def insights_page(request: Request):
             "top_error_tools": top_error_tools,
             "frust_count": frust_count,
             "frust_samples": frust_samples,
-            "sess_spark": _metrics.sparkline_svg(sess_series, color="#4f46e5", width=140, height=30),
+            "sess_spark": _metrics.sparkline_svg(sess_series, color="#2563eb", width=140, height=30),
             "pending_prompts": pending_prompts,
             "total_sess": sum(adapter.values()),
             "tool_chart": _metrics.hbar_chart_svg(
@@ -384,7 +384,7 @@ def insights_page(request: Request):
     last30 = _metrics.summarize_window(aggregate_rows, 30)
     series = list(reversed(aggregate_rows))
     sparks = {
-        "sessions":    _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "sessions":    _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
         "prompts":     _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
         "tool_errors": _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
         "cost_usd":    _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
@@ -440,7 +440,7 @@ def metrics_all(request: Request, tracked: int = 0):
     last30 = _metrics.summarize_window(rows, 30)
     series = list(reversed(rows))
     sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
         "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
         "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
         "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
@@ -463,6 +463,44 @@ def metrics_all(request: Request, tracked: int = 0):
     streak = _metrics.streak_stats(project_key=None, weeks=26, tracked_only=tracked_only)
     adapters = _metrics.adapter_breakdown_all(days=30, tracked_only=tracked_only)
 
+    # Profile card lives at the top of /metrics. Tracked-only mode is a
+    # numeric-aggregation filter; the card uses the full corpus (the
+    # window comes from ?card_days=N, default 90 to match the user's
+    # mental model of "the last few months").
+    card_days = int(request.query_params.get("card_days", "90") or "90")
+    card_days = max(7, min(card_days, 730))
+    card_stats = _metrics.compute_card_stats(days=card_days)
+    card_svg = _metrics.card_svg(card_stats)
+    card_tier = _metrics.card_tier_colors(card_stats["rating"])
+    # Companion visualizations: agent-mix donut, top-tools horizontal
+    # bars, daily activity sparklines. Each pulls from card_stats so
+    # data and visuals stay in sync.
+    card_donut = _metrics.agent_donut_svg(card_stats["agents"])
+    card_donut_legend = _metrics.agent_donut_legend(card_stats["agents"])
+    top_tool_rows = card_stats.get("top_tools", [])[:5]
+    card_top_tools = _metrics.hbar_chart_svg(
+        [(name, float(n)) for name, n in top_tool_rows],
+        width=340, color="#3b82f6", label_width=90,
+    ) if top_tool_rows else ""
+    # Daily activity series — slice from daily_metrics_all (already loaded
+    # above) so we don't re-query corpus.db just for the sparklines.
+    activity_window = _metrics.daily_metrics_all(days=card_days, tracked_only=False)
+    activity_series = list(reversed(activity_window))
+    card_activity = {
+        "sessions": _metrics.sparkline_svg(
+            [r["sessions"] for r in activity_series],
+            width=320, height=46, color="#3b82f6",
+        ),
+        "cost": _metrics.sparkline_svg(
+            [r["cost_usd"] for r in activity_series],
+            width=320, height=46, color="#f59e0b",
+        ),
+        "tool_errors": _metrics.sparkline_svg(
+            [r["tool_errors"] for r in activity_series],
+            width=320, height=46, color="#ef4444",
+        ),
+    }
+
     return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
         "rows": rows,
         "last7": last7,
@@ -476,6 +514,14 @@ def metrics_all(request: Request, tracked: int = 0):
         "tool_usage": tool_usage,
         "streak": streak,
         "adapters": adapters,
+        "card_stats": card_stats,
+        "card_svg": card_svg,
+        "card_tier": card_tier,
+        "card_days": card_days,
+        "card_donut": card_donut,
+        "card_donut_legend": card_donut_legend,
+        "card_top_tools": card_top_tools,
+        "card_activity": card_activity,
     })
 
 
@@ -488,7 +534,7 @@ def project_metrics(request: Request, project_key: str):
     # Daily series in chronological order for sparklines (rows is newest-first).
     series = list(reversed(rows))
     sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
+        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
         "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
         "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
         "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
