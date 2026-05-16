@@ -359,3 +359,31 @@ def test_card_tier_colors_match_rating_bands(fresh_metrics):
     assert fresh_metrics.card_tier_colors(79)["name"] == "bronze"
     assert fresh_metrics.card_tier_colors(70)["name"] == "bronze"
     assert fresh_metrics.card_tier_colors(40)["name"] == "indigo"
+
+
+def test_agent_donut_svg_segments_and_empty(fresh_metrics):
+    """agent_donut_svg renders one <path> per non-zero agent and a muted
+    fallback when the input is empty. Center text shows the total +
+    'sessions' label so the chart reads without a separate caption."""
+    svg = fresh_metrics.agent_donut_svg({"claude_code": 6, "codex": 4, "pi": 0})
+    assert svg.count("<path") == 2, "zero-count agents should be skipped"
+    assert "10" in svg or "SESSIONS" in svg, "total + label missing from center"
+
+    empty = fresh_metrics.agent_donut_svg({})
+    assert "no data" in empty
+    assert "<path" not in empty
+
+
+def test_agent_donut_legend_orders_by_share_and_assigns_colors(fresh_metrics):
+    """Legend rows come back sorted by count desc, with friendly labels
+    and a stable color per known adapter. Unknown adapters cycle through
+    a fallback palette so future agents render without a code change."""
+    rows = fresh_metrics.agent_donut_legend({"claude_code": 5, "codex": 12, "pi": 3})
+    assert [r["slug"] for r in rows] == ["codex", "claude_code", "pi"]
+    assert rows[0]["label"] == "Codex"
+    assert rows[0]["share"] == pytest.approx(12 / 20)
+    # Known-agent colors are fixed.
+    by_slug = {r["slug"]: r["color"] for r in rows}
+    assert by_slug["claude_code"] == "#6366f1"
+    assert by_slug["codex"] == "#0891b2"
+    assert by_slug["pi"] == "#a855f7"

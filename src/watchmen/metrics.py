@@ -967,6 +967,7 @@ def compute_card_stats(days: int = 90) -> dict:
         "input_tokens": 0, "cache_creation_tokens": 0,
         "cache_read_tokens": 0, "output_tokens": 0,
         "agents": {},
+        "top_tools": [],
         "first_seen": None, "last_seen": None,
         "top_agent": None, "top_tool": None,
     }
@@ -1021,17 +1022,18 @@ def compute_card_stats(days: int = 90) -> dict:
             out["agents"] = {r["agent"]: r["n"] for r in agent_rows}
             if agent_rows:
                 out["top_agent"] = (agent_rows[0]["agent"], agent_rows[0]["n"])
-            top_tool_row = conn.execute(
+            tool_rows = conn.execute(
                 """SELECT tc.tool_name AS t, COUNT(*) AS n
                      FROM tool_calls tc
                      JOIN sessions s ON s.session_id = tc.session_id
                     WHERE s.is_subagent = 0
                       AND date(s.started_at, 'localtime') >= ?
-                 GROUP BY tc.tool_name ORDER BY n DESC LIMIT 1""",
+                 GROUP BY tc.tool_name ORDER BY n DESC LIMIT 8""",
                 [cutoff],
-            ).fetchone()
-            if top_tool_row:
-                out["top_tool"] = (top_tool_row["t"], top_tool_row["n"])
+            ).fetchall()
+            out["top_tools"] = [(r["t"], r["n"]) for r in tool_rows]
+            if tool_rows:
+                out["top_tool"] = (tool_rows[0]["t"], tool_rows[0]["n"])
 
     # Mastery from on-disk bundles, independent of the corpus window. A
     # curated skill stays curated even if the source sessions aged out.
@@ -1228,7 +1230,101 @@ def _format_kn(n: int) -> str:
     return f"{n:,}"
 
 
-def card_svg(stats: dict, *, size: int = 360) -> str:
+def agent_donut_svg(agent_counts: dict, *, size: int = 220, total_label: str = "sessions") -> str:
+    """Donut chart of per-agent session shares. Each agent is a colored
+    segment, center shows the total + label. Empty input renders a
+    muted "no data" donut so the layout doesn't collapse on empty
+    corpora."""
+    import math
+    cx = cy = size / 2
+    r_outer = size * 0.42
+    r_inner = size * 0.28
+
+    colors = {
+        "claude_code": "#6366f1",   # indigo
+        "codex":       "#0891b2",   # cyan
+        "pi":          "#a855f7",   # purple
+    }
+    fallback_palette = ["#22c55e", "#f59e0b", "#ef4444", "#14b8a6", "#ec4899"]
+
+    total = sum(agent_counts.values())
+    if total == 0:
+        return (
+            f'<svg viewBox="0 0 {size} {size}" xmlns="http://www.w3.org/2000/svg" role="img">'
+            f'<circle cx="{cx}" cy="{cy}" r="{r_outer}" fill="hsl(var(--muted))"/>'
+            f'<circle cx="{cx}" cy="{cy}" r="{r_inner}" fill="white"/>'
+            f'<text x="{cx}" y="{cy + 4}" text-anchor="middle" font-size="11" '
+            f'fill="hsl(var(--muted-foreground))">no data</text>'
+            f'</svg>'
+        )
+
+    segs: list[str] = []
+    angle = -math.pi / 2
+    fallback_i = 0
+    sorted_agents = sorted(agent_counts.items(), key=lambda kv: kv[1], reverse=True)
+    for slug, n in sorted_agents:
+        if not n:
+            continue
+        frac = n / total
+        next_angle = angle + 2 * math.pi * frac
+        # Avoid a single-segment "Z" arc rendering as nothing — when one
+        # agent owns 100%, force a tiny gap so the path is well-formed.
+        if frac >= 0.9999:
+            next_angle = angle + 2 * math.pi * 0.9999
+        large_arc = 1 if frac > 0.5 else 0
+        x1 = cx + r_outer * math.cos(angle);    y1 = cy + r_outer * math.sin(angle)
+        x2 = cx + r_outer * math.cos(next_angle); y2 = cy + r_outer * math.sin(next_angle)
+        ix1 = cx + r_inner * math.cos(next_angle); iy1 = cy + r_inner * math.sin(next_angle)
+        ix2 = cx + r_inner * math.cos(angle);    iy2 = cy + r_inner * math.sin(angle)
+        color = colors.get(slug)
+        if not color:
+            color = fallback_palette[fallback_i % len(fallback_palette)]
+            fallback_i += 1
+        path = (
+            f"M {x1:.1f},{y1:.1f} "
+            f"A {r_outer:.1f},{r_outer:.1f} 0 {large_arc} 1 {x2:.1f},{y2:.1f} "
+            f"L {ix1:.1f},{iy1:.1f} "
+            f"A {r_inner:.1f},{r_inner:.1f} 0 {large_arc} 0 {ix2:.1f},{iy2:.1f} Z"
+        )
+        segs.append(f'<path d="{path}" fill="{color}" stroke="white" stroke-width="2"/>')
+        angle = next_angle
+
+    total_str = _format_kn(total)
+    return (
+        f'<svg viewBox="0 0 {size} {size}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="agent mix donut">'
+        f'{"".join(segs)}'
+        f'<text x="{cx}" y="{cy - 4}" text-anchor="middle" font-size="24" font-weight="700" '
+        f'fill="hsl(220 9% 18%)" font-variant-numeric="tabular-nums">{total_str}</text>'
+        f'<text x="{cx}" y="{cy + 14}" text-anchor="middle" font-size="9" font-weight="600" '
+        f'fill="hsl(220 9% 46%)" letter-spacing="0.14em">{total_label.upper()}</text>'
+        f'</svg>'
+    )
+
+
+def agent_donut_legend(agent_counts: dict) -> list[dict]:
+    """Companion data for the donut: list of dicts with slug, label,
+    count, share (0..1), color. Template renders the legend with the
+    same color order the donut uses."""
+    total = sum(agent_counts.values()) or 1
+    colors = {"claude_code": "#6366f1", "codex": "#0891b2", "pi": "#a855f7"}
+    fallback = ["#22c55e", "#f59e0b", "#ef4444", "#14b8a6", "#ec4899"]
+    out, fb_i = [], 0
+    for slug, n in sorted(agent_counts.items(), key=lambda kv: kv[1], reverse=True):
+        if not n:
+            continue
+        if slug in colors:
+            color = colors[slug]
+        else:
+            color = fallback[fb_i % len(fallback)]
+            fb_i += 1
+        out.append({
+            "slug": slug, "label": adapter_label(slug),
+            "count": n, "share": n / total, "color": color,
+        })
+    return out
+
+
+def card_svg(stats: dict, *, size: int = 440) -> str:
     """Hex spider chart with FM-style tinted concentric rings.
 
     Red core (0.0–0.25) → orange (0.25–0.5) → yellow (0.5–0.75) →

@@ -53,20 +53,81 @@
     </form>
   </div>
 
-  <div class="wm-profile__body">
-    {% for group in card_stats.attribute_groups %}
-    <div>
-      <div class="wm-profile__col-label">{{ group.label }}</div>
-      {% for item in group.stats %}
-      <div class="wm-profile__stat">
-        <span class="wm-profile__stat-label">{{ item.label }}</span>
-        <span class="wm-profile__stat-value wm-profile__stat-value--{{ item.kind }}">{{ item.raw }}</span>
+  <!-- Hero row: big spider chart on the left, color-coded stat grid on the right. -->
+  <div class="wm-profile__hero">
+    <div class="wm-profile__spider">
+      {{ card_svg|safe }}
+    </div>
+    <div class="wm-profile__grid">
+      {% for group in card_stats.attribute_groups %}
+      <div>
+        <div class="wm-profile__col-label">{{ group.label }}</div>
+        {% for item in group.stats %}
+        <div class="wm-profile__stat">
+          <span class="wm-profile__stat-label">{{ item.label }}</span>
+          <span class="wm-profile__stat-value wm-profile__stat-value--{{ item.kind }}">{{ item.raw }}</span>
+        </div>
+        {% endfor %}
       </div>
       {% endfor %}
     </div>
-    {% endfor %}
-    <div class="wm-profile__spider">
-      {{ card_svg|safe }}
+  </div>
+
+  <!-- Mini-visualization row: agent donut · top tools bars · activity sparklines. -->
+  <div class="wm-profile__visuals">
+    <div class="wm-profile__visual">
+      <div class="wm-profile__visual-label">Agent mix</div>
+      <div class="flex items-center gap-4">
+        <div style="flex: 0 0 auto;">{{ card_donut|safe }}</div>
+        <div class="flex-1 text-xs space-y-1.5">
+          {% for row in card_donut_legend %}
+          <div class="flex items-center gap-2">
+            <span style="width: 10px; height: 10px; border-radius: 2px; background: {{ row.color }}; display: inline-block; flex: 0 0 10px;"></span>
+            <span class="font-medium">{{ row.label }}</span>
+            <span class="text-gray-500 ml-auto tabular">{{ "{:,}".format(row.count) }}</span>
+            <span class="text-gray-400 tabular" style="width: 38px; text-align: right;">{{ "%.0f"|format(row.share * 100) }}%</span>
+          </div>
+          {% else %}
+          <div class="text-gray-400">No sessions in window.</div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="wm-profile__visual">
+      <div class="wm-profile__visual-label">Top tools</div>
+      {% if card_top_tools %}
+        {{ card_top_tools|safe }}
+      {% else %}
+        <div class="text-sm text-gray-400">No tool calls recorded in window.</div>
+      {% endif %}
+    </div>
+
+    <div class="wm-profile__visual">
+      <div class="wm-profile__visual-label">Activity ({{ card_days }}d)</div>
+      <div class="space-y-2">
+        <div>
+          <div class="flex items-baseline justify-between text-xs">
+            <span class="text-gray-500">Sessions / day</span>
+            <span class="font-semibold tabular">{{ "{:,}".format(card_stats.sessions) }}</span>
+          </div>
+          {{ card_activity.sessions|safe }}
+        </div>
+        <div>
+          <div class="flex items-baseline justify-between text-xs">
+            <span class="text-gray-500">Cost / day</span>
+            <span class="font-semibold tabular">${{ "%.2f"|format(card_stats.cost_usd) }}</span>
+          </div>
+          {{ card_activity.cost|safe }}
+        </div>
+        <div>
+          <div class="flex items-baseline justify-between text-xs">
+            <span class="text-gray-500">Tool errors / day</span>
+            <span class="font-semibold tabular {% if card_stats.tool_errors %}text-red-700{% endif %}">{{ "{:,}".format(card_stats.tool_errors) }}</span>
+          </div>
+          {{ card_activity.tool_errors|safe }}
+        </div>
+      </div>
     </div>
   </div>
 

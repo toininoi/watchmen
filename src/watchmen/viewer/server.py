@@ -472,6 +472,34 @@ def metrics_all(request: Request, tracked: int = 0):
     card_stats = _metrics.compute_card_stats(days=card_days)
     card_svg = _metrics.card_svg(card_stats)
     card_tier = _metrics.card_tier_colors(card_stats["rating"])
+    # Companion visualizations: agent-mix donut, top-tools horizontal
+    # bars, daily activity sparklines. Each pulls from card_stats so
+    # data and visuals stay in sync.
+    card_donut = _metrics.agent_donut_svg(card_stats["agents"])
+    card_donut_legend = _metrics.agent_donut_legend(card_stats["agents"])
+    top_tool_rows = card_stats.get("top_tools", [])[:5]
+    card_top_tools = _metrics.hbar_chart_svg(
+        [(name, float(n)) for name, n in top_tool_rows],
+        width=340, color="#6366f1", label_width=90,
+    ) if top_tool_rows else ""
+    # Daily activity series — slice from daily_metrics_all (already loaded
+    # above) so we don't re-query corpus.db just for the sparklines.
+    activity_window = _metrics.daily_metrics_all(days=card_days, tracked_only=False)
+    activity_series = list(reversed(activity_window))
+    card_activity = {
+        "sessions": _metrics.sparkline_svg(
+            [r["sessions"] for r in activity_series],
+            width=320, height=46, color="#6366f1",
+        ),
+        "cost": _metrics.sparkline_svg(
+            [r["cost_usd"] for r in activity_series],
+            width=320, height=46, color="#f59e0b",
+        ),
+        "tool_errors": _metrics.sparkline_svg(
+            [r["tool_errors"] for r in activity_series],
+            width=320, height=46, color="#ef4444",
+        ),
+    }
 
     return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
         "rows": rows,
@@ -490,6 +518,10 @@ def metrics_all(request: Request, tracked: int = 0):
         "card_svg": card_svg,
         "card_tier": card_tier,
         "card_days": card_days,
+        "card_donut": card_donut,
+        "card_donut_legend": card_donut_legend,
+        "card_top_tools": card_top_tools,
+        "card_activity": card_activity,
     })
 
 

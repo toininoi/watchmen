@@ -41,6 +41,12 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
   (mastery). Otherwise Generalist; empty corpus → Newcomer.
 - Whole section is HTML+SVG, no JS. Right-click the section or the
   spider SVG to save / screenshot for sharing.
+- Mini-visualization row directly below the hero: **agent mix donut**
+  (per-adapter session shares with legend), **top tools horizontal
+  bars** (5 most-used tool names), **daily activity sparklines**
+  (sessions / cost / tool-errors per day across the selected window).
+  Each lives in its own muted tile so the whole panel reads like a
+  trading-card splash page rather than a wall of numbers.
 
 ### Fixed — stale Claude Code hook entries from older watchmen installs
 - `watchmen hooks install` is now self-healing: it scrubs any existing

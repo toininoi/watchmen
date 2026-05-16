@@ -201,16 +201,50 @@
     .wm-profile__arch { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
     .wm-profile__flavor { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
     .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--muted-foreground)); margin-top: 6px; text-transform: uppercase; }
-    .wm-profile__body {
+    /* Hero row: spider chart (pinned 440px) + 3-column stat grid on the right. */
+    .wm-profile__hero {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr auto;
-      gap: 24px;
-      padding: 24px 28px;
+      grid-template-columns: 460px 1fr;
+      gap: 28px;
+      padding: 24px 28px 12px;
       align-items: start;
     }
+    .wm-profile__spider { width: 100%; max-width: 460px; }
+    .wm-profile__spider svg { display: block; width: 100%; height: auto; }
+    .wm-profile__grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 20px;
+    }
+    @media (max-width: 1100px) {
+      .wm-profile__hero { grid-template-columns: 1fr; }
+      .wm-profile__spider { justify-self: center; max-width: 380px; }
+    }
+    @media (max-width: 720px) {
+      .wm-profile__grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    /* Mini-visualization row: agent donut + top tools bars + activity sparks. */
+    .wm-profile__visuals {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+      padding: 12px 28px 22px;
+    }
     @media (max-width: 1000px) {
-      .wm-profile__body { grid-template-columns: 1fr 1fr; }
-      .wm-profile__spider { grid-column: 1 / -1; justify-self: center; }
+      .wm-profile__visuals { grid-template-columns: 1fr; }
+    }
+    .wm-profile__visual {
+      background: hsl(var(--muted) / 0.5);
+      border: 1px solid hsl(var(--border));
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .wm-profile__visual-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground));
+      text-transform: uppercase;
+      margin-bottom: 10px;
     }
     .wm-profile__col-label {
       font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
