@@ -6,6 +6,32 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Fixed — plugin layout + viewer rendering bugs caught during E2E
+- `_latest_digest_path()` returned the cross-agent narrative file instead
+  of the newest deep-digest when both lived in `~/.watchmen/insights/` —
+  reverse-alphabetical sort over `*.md` bubbled `agent_comparison.md`
+  above date-prefixed digests. Now globs `[0-9]*.md` so stable-named
+  cache files don't shadow timestamped runs.
+- `/metrics` route silently dropped the cross-agent narrative because it
+  imported `render_md` from `watchmen.view` (function lives in
+  `viewer/server.py`); the bad import got swallowed by the surrounding
+  `try/except`, so the narrative panel rendered empty even when the
+  cache file existed. Fixed by using the local helper.
+- Claude Code plugin `hooks.json` was missing the top-level
+  `{"hooks": {...}}` wrapper Claude's plugin loader expects (we shipped
+  the inner events dict). `/plugin install watchmen` failed with
+  `expected record, received undefined`.
+- Codex plugin shipped in a broken hybrid layout: `.codex-plugin/` manifest
+  dir (Codex native) + `hooks/hooks.json` in a subdir (Claude-compat
+  convention). Codex's loader saw the native manifest and looked for
+  `hooks.json` at plugin root — found nothing — so the "Hooks" panel
+  said "No plugin hooks." Rebuilt in proper native Codex layout:
+  `hooks.json` at root, plus a full `interface` block in `.codex-plugin/plugin.json`
+  (displayName, brandColor, category, capabilities, defaultPrompt,
+  longDescription) so Codex renders the plugin as a first-class tile.
+- Smoke test `test_codex_plugin_dir_has_required_layout` updated to enforce
+  the native layout + presence of the required `interface` fields.
+
 ### Added — "How you use each agent" cross-agent comparison
 - New section at the top of `/metrics` (under the profile card) and
   inline above the deep digest on `/insights` compares how the user

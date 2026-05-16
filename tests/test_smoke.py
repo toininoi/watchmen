@@ -1263,11 +1263,24 @@ def test_brief_artifacts_no_longer_shipped():
 
 
 def test_codex_plugin_dir_has_required_layout():
-    """plugin-codex/ is the Codex-side counterpart to plugin/. It must contain
-    the same shape (manifest under .codex-plugin/, hooks block, brief skill,
-    and the bin/ scripts the skill calls). Regression guard against a future
-    refactor that accidentally drops one of these — the marketplace install
-    silently degrades to a no-op if the manifest's expected files are missing."""
+    """plugin-codex/ ships in Codex's native plugin format (the same shape
+    Figma + GitHub Codex plugins use):
+
+      .codex-plugin/plugin.json   — manifest with `interface` UI metadata
+      hooks.json                  — at plugin root (NOT hooks/hooks.json)
+      skills/brief/SKILL.md       — brief slash-skill
+      bin/*                       — scripts the skill + hook invoke
+
+    Codex also recognizes the Claude-Code compat format (.claude-plugin/ +
+    hooks/hooks.json) — the openai-codex plugin uses it — but the native
+    format unlocks the `interface` block (brandColor, displayName, category,
+    capabilities, defaultPrompt) that renders the plugin as a first-class
+    Codex tile. We deliberately picked native to avoid looking like a
+    Claude-side plugin that happens to load.
+
+    Regression guard against a future refactor that drops one of these —
+    the marketplace install silently degrades when the manifest's expected
+    files are missing."""
     repo_root = Path(__file__).resolve().parents[1]
     pc = repo_root / "plugin-codex"
     assert pc.is_dir(), "plugin-codex/ missing — Codex plugin tree was removed"
@@ -1275,7 +1288,15 @@ def test_codex_plugin_dir_has_required_layout():
     assert manifest.is_file(), "plugin-codex/.codex-plugin/plugin.json missing"
     data = json.loads(manifest.read_text())
     assert data.get("name") == "watchmen", f"plugin name drifted: {data.get('name')!r}"
-    assert (pc / "hooks" / "hooks.json").is_file()
+    iface = data.get("interface") or {}
+    assert iface.get("displayName"), "plugin.json missing interface.displayName — Codex tile won't render the brand"
+    assert iface.get("brandColor"), "plugin.json missing interface.brandColor"
+    assert iface.get("category"), "plugin.json missing interface.category"
+    hooks = pc / "hooks.json"
+    assert hooks.is_file(), "plugin-codex/hooks.json missing (native Codex layout puts hooks.json at root, not under hooks/)"
+    hooks_data = json.loads(hooks.read_text())
+    assert "hooks" in hooks_data and isinstance(hooks_data["hooks"], dict), \
+        "hooks.json must wrap event lists in a top-level 'hooks' object — Codex's loader rejects the flat shape"
     assert (pc / "skills" / "brief" / "SKILL.md").is_file()
     for script in ("check_prompt.sh", "check_prompt.py", "read_state.sh", "resolve_project_key.py"):
         assert (pc / "bin" / script).is_file(), f"plugin-codex/bin/{script} missing"

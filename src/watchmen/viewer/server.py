@@ -522,7 +522,6 @@ def metrics_all(request: Request, tracked: int = 0):
     cmp_narrative_meta: dict = {}
     try:
         from watchmen.commands.insights import _latest_cross_agent_narrative
-        from watchmen.view import render_md
         loaded = _latest_cross_agent_narrative()
         if loaded:
             cmp_narrative_meta, cmp_body = loaded
