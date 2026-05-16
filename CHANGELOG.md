@@ -35,6 +35,33 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
   `kai_claude.legacy/` once and prints a one-line stderr notice. Idempotent
   — the rename is self-deleting, so subsequent runs are silent.
 
+### Added — per-coding-agent metric surfaces
+- New `metrics.adapter_breakdown_all(days, tracked_only)` aggregator
+  rolls up sessions, projects, prompts, tool errors, and cost per `agent`
+  column in `corpus.db.sessions`. Stable order (sessions desc, agent
+  alpha) so the surface is deterministic across CLI + viewer.
+- Viewer's `/metrics` page gains a "By coding agent (last 30 days)"
+  section: friendly labels ("Claude Code", "Codex", "pi.dev"), bar chart
+  for relative session volume, columns for projects / prompts / tool
+  errors / cost USD. Section hides itself on empty corpora.
+- CLI's `watchmen metrics` table renamed from "Sessions by adapter" to
+  "By coding agent — last Nd" and gains columns for prompts, tool errors,
+  and cost USD on top of the existing sessions / share / projects.
+- New `ADAPTER_LABELS` mapping + `adapter_label(slug)` helper exported
+  from `metrics.py` so every UI surface can render friendly names
+  consistently and unknown slugs fall through verbatim.
+
+### Changed — sharpened the Metrics vs Insights split
+- `/insights` is now the LLM-driven view only: cross-repo digest,
+  friction signals, untapped corpora, frustration samples, deep digest
+  cache. Raw aggregations moved out.
+- Removed from `/insights` (now live exclusively on `/metrics`):
+  the 4 stat tiles (sessions / tool errors / frustration / cost), the
+  adapter mix card, and the skill bundles count card. A top-of-page
+  link `↗ aggregated metrics` points users to the raw breakdown.
+- Repos table, friction signal charts, and the hour-of-day heatmap
+  remain on `/insights` for LLM-context — they back the deep digest.
+
 ## [0.5.0] — 2026-05-15
 
 First PyPI release. This rolls up everything since 0.4.0 — Linux daemon

@@ -91,6 +91,48 @@
   </div>
 </div>
 
+{% if adapters %}
+<h2 class="text-lg font-semibold mb-3">By coding agent (last 30 days)</h2>
+<div class="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
+  {% set max_sessions = adapters[0].sessions or 1 %}
+  {% set max_cost = adapters|map(attribute='cost_usd')|max %}
+  <table class="w-full text-sm" style="font-variant-numeric: tabular-nums;">
+    <thead class="bg-gray-50 border-b border-gray-200">
+      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
+        <th class="px-4 py-2">Coding agent</th>
+        <th class="px-4 py-2" style="width: 28%;">Sessions</th>
+        <th class="px-4 py-2 text-right">Sessions</th>
+        <th class="px-4 py-2 text-right">Projects</th>
+        <th class="px-4 py-2 text-right">Prompts</th>
+        <th class="px-4 py-2 text-right">Tool errors</th>
+        <th class="px-4 py-2 text-right">Cost (USD)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in adapters %}
+      <tr class="border-b border-gray-100 last:border-b-0 hover:bg-gray-50">
+        <td class="px-4 py-2 font-medium">{{ a.label }} <span class="text-xs text-gray-500">{{ a.agent }}</span></td>
+        <td class="px-4 py-2">
+          <div class="bg-gray-100 rounded-sm h-3 overflow-hidden">
+            <div class="bg-indigo-500 h-full" style="width: {{ (100 * a.sessions / max_sessions)|round(1) }}%;"></div>
+          </div>
+        </td>
+        <td class="px-4 py-2 text-right">{{ "{:,}".format(a.sessions) }}</td>
+        <td class="px-4 py-2 text-right text-gray-700">{{ a.projects }}</td>
+        <td class="px-4 py-2 text-right text-gray-700">{{ "{:,}".format(a.prompts) }}</td>
+        <td class="px-4 py-2 text-right {% if a.tool_errors %}text-red-700 font-medium{% else %}text-gray-400{% endif %}">
+          {{ "{:,}".format(a.tool_errors) }}
+        </td>
+        <td class="px-4 py-2 text-right {% if a.cost_usd %}text-amber-700 font-medium{% else %}text-gray-400{% endif %}">
+          ${{ "%.2f"|format(a.cost_usd) }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <h2 class="text-lg font-semibold mb-3">When you work</h2>
 <div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-6">
   <div class="stat-card overflow-x-auto lg:col-span-2">
