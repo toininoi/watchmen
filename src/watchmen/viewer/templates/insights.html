@@ -3,19 +3,15 @@
 {% block content %}
 
 <style>
-  .stat-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
-  .stat-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
-  .stat-card .value { font-size: 22px; font-weight: 600; color: #111827; margin-top: 4px; }
-  .stat-card .sub   { font-size: 12px; color: #6b7280; margin-top: 2px; }
-  .stat-card .spark { margin-top: 8px; display: block; }
+  /* `.stat-card` + `.adapter-pill` baseline live in base.html now. Only
+     page-specific bits stay here. */
   .repo-row td { vertical-align: middle; }
-  .badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 999px; font-size: 11px; font-weight: 500; }
-  .badge-curated { background: #ecfdf5; color: #047857; }
-  .badge-candidate { background: #fef3c7; color: #92400e; }
-  .adapter-pill { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #eef2ff; color: #4338ca; margin-right: 4px; font-variant-numeric: tabular-nums; }
+  .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; margin-right: 4px; }
+  .badge-curated { background: hsl(142 60% 94%); color: hsl(142 60% 26%); }
+  .badge-candidate { background: hsl(45 90% 92%); color: hsl(35 70% 32%); }
   details summary { cursor: pointer; }
-  .frust-sample { font-style: italic; color: #4b5563; border-left: 2px solid #e5e7eb; padding-left: 8px; margin: 4px 0; font-size: 12px; }
-  .digest-body { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 24px; }
+  .frust-sample { font-style: italic; color: hsl(var(--muted-foreground)); border-left: 2px solid hsl(var(--border)); padding-left: 10px; margin: 4px 0; font-size: 12px; }
+  .digest-body { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 12px; padding: 8px 24px; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04); }
   .digest-body .markdown-body { background: transparent; padding: 16px 0; max-width: 100%; }
 </style>
 
@@ -48,10 +44,10 @@
 
 <!-- Per-repo table ─────────────────────────────────────────────────── -->
 <h2 class="text-lg font-semibold mb-3">Repos</h2>
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-8">
-  <table class="w-full">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
+<div class="wm-card wm-card-table mb-8 tabular">
+  <table>
+    <thead>
+      <tr>
         <th class="px-4 py-2">Project</th>
         <th class="px-4 py-2">Skills</th>
         <th class="px-4 py-2">Pending</th>
@@ -64,52 +60,32 @@
     </thead>
     <tbody>
     {% for r in repos %}
-      <tr class="border-b border-gray-100 hover:bg-gray-50 repo-row">
-        <td class="px-4 py-3">
+      <tr class="repo-row">
+        <td>
           <a href="/p/{{ r.key }}" class="text-indigo-600 font-medium">{{ r.key }}</a>
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.skills_n %}
-            <span class="font-semibold">{{ r.skills_n }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.skills_n %}<span class="font-semibold">{{ r.skills_n }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.pending_n %}
-            <span class="text-amber-700 font-semibold">{{ r.pending_n }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.pending_n %}<span class="text-amber-700 font-semibold">{{ r.pending_n }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3">{{ r.sess_spark|safe }}</td>
-        <td class="px-4 py-3 text-xs">
+        <td>{{ r.sess_spark|safe }}</td>
+        <td class="text-xs">
           {% for agent in ["claude_code", "codex", "pi"] %}
             {% if r.adapter.get(agent, 0) %}
               <span class="adapter-pill">{{ {"claude_code":"cc","codex":"cd","pi":"pi"}[agent] }}: {{ r.adapter[agent] }}</span>
             {% endif %}
           {% endfor %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.tool_errors %}
-            <span class="text-red-700 font-semibold">{{ r.tool_errors }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.tool_errors %}<span class="text-red-700 font-semibold">{{ r.tool_errors }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.frust_count %}
-            <span class="text-amber-700 font-semibold">{{ r.frust_count }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.frust_count %}<span class="text-amber-700 font-semibold">{{ r.frust_count }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.pending_prompts %}
-            <span class="text-gray-700">{{ r.pending_prompts }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.pending_prompts %}<span class="text-gray-700">{{ r.pending_prompts }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
       </tr>
     {% endfor %}
@@ -119,7 +95,7 @@
 
 <!-- Friction signal charts ─────────────────────────────────────────── -->
 <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
-  <div class="bg-white border border-gray-200 rounded-lg p-4">
+  <div class="wm-card">
     <div class="text-sm font-semibold mb-2 text-gray-800">Tool errors by repo</div>
     <div class="text-xs text-gray-500 mb-3">From <code>sessions.tool_error_count</code> in corpus.db.</div>
     {% if errors_chart %}
@@ -128,7 +104,7 @@
       <div class="text-sm text-gray-400">No tool errors recorded.</div>
     {% endif %}
   </div>
-  <div class="bg-white border border-gray-200 rounded-lg p-4">
+  <div class="wm-card">
     <div class="text-sm font-semibold mb-2 text-gray-800">Frustration markers by repo</div>
     <div class="text-xs text-gray-500 mb-3">Prompts matching <code>no wait / bruh / :( / wtf / nope / …</code></div>
     {% if frust_chart %}
@@ -143,13 +119,13 @@
 {% if cross %}
 <h2 class="text-lg font-semibold mb-3">Cross-repo patterns</h2>
 <div class="text-xs text-gray-500 mb-3">Candidate slugs that appear in two or more repos' <code>_candidates.json</code>. Curated in some, only proposed in others.</div>
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-8">
-  <table class="w-full">
+<div class="wm-card wm-card-table mb-8">
+  <table>
     <tbody>
     {% for slug, hits in cross[:12] %}
-      <tr class="border-b border-gray-100 last:border-b-0">
-        <td class="px-4 py-2 font-mono text-sm font-semibold">{{ slug }}</td>
-        <td class="px-4 py-2 text-sm">
+      <tr>
+        <td class="font-mono text-sm font-semibold">{{ slug }}</td>
+        <td class="text-sm">
           {% for key, status in hits %}
             {% if status == "curated" %}
               <span class="badge badge-curated">✓ {{ key }}</span>
@@ -186,8 +162,8 @@
 {% set frust_repos = repos | selectattr("frust_samples") | list %}
 {% if frust_repos %}
 <details class="mb-8">
-  <summary class="text-sm font-semibold text-gray-800 mb-2">Frustration samples (click to expand)</summary>
-  <div class="bg-white border border-gray-200 rounded-lg p-4 mt-2">
+  <summary class="text-sm font-semibold text-gray-800 mb-2 cursor-pointer">Frustration samples (click to expand)</summary>
+  <div class="wm-card mt-2">
     {% for r in frust_repos %}
       <div class="mb-3">
         <div class="text-sm font-semibold">{{ r.key }} <span class="text-gray-500 font-normal">({{ r.frust_count }} markers)</span></div>
@@ -203,7 +179,7 @@
 <!-- Hour-of-day heatmap ────────────────────────────────────────────── -->
 <h2 class="text-lg font-semibold mb-3">Activity by hour & day-of-week</h2>
 <div class="text-xs text-gray-500 mb-3">Last 90 days, every coding-agent session in your corpus.</div>
-<div class="bg-white border border-gray-200 rounded-lg p-4 mb-8 overflow-x-auto">
+<div class="wm-card mb-8 overflow-x-auto">
   {{ hour_dow_svg|safe }}
 </div>
 
