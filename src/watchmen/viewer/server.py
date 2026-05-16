@@ -316,7 +316,7 @@ def insights_page(request: Request):
         adapter = adapter_breakdown(key)
         tool_errors, top_error_tools, frust_count, frust_samples = repo_friction_signals(key)
         daily = _metrics.daily_metrics(key, days=30) or []
-        sess_series = [r["sessions"] for r in reversed(daily)]
+        sess_chronological = list(reversed(daily))
         try:
             prog = _state.get_project_progress(key)
             pending_prompts = prog.get("new_prompts_since_last_analysis", 0) or 0
@@ -331,13 +331,14 @@ def insights_page(request: Request):
             "top_error_tools": top_error_tools,
             "frust_count": frust_count,
             "frust_samples": frust_samples,
-            "sess_spark": _metrics.sparkline_svg(sess_series, color="#2563eb", width=140, height=30),
+            # Per-repo sparkline payload — same shape as the area-chart helper
+            # in base.html consumes. Renders client-side with the shared theme
+            # so per-row sparks match the profile-card sparks visually.
+            "sess_spark_data": [
+                {"date": r["date"], "value": r["sessions"]} for r in sess_chronological
+            ],
             "pending_prompts": pending_prompts,
             "total_sess": sum(adapter.values()),
-            "tool_chart": _metrics.hbar_chart_svg(
-                [(t, n) for t, n in top_error_tools],
-                color="#dc2626", label_width=110, width=340,
-            ) if top_error_tools else "",
         })
     repos.sort(key=lambda r: (-r["skills_n"], -r["total_sess"]))
 
@@ -366,31 +367,39 @@ def insights_page(request: Request):
     untapped = [(r["key"], r["total_sess"]) for r in repos if r["skills_n"] == 0 and r["total_sess"] > 0]
     untapped.sort(key=lambda x: -x[1])
 
-    # Aggregate per-repo chart for cross-repo comparison (frustration totals).
-    frust_chart = _metrics.hbar_chart_svg(
-        sorted([(r["key"], r["frust_count"]) for r in repos if r["frust_count"] > 0],
-               key=lambda x: -x[1])[:8],
-        color="#eab308", label_width=140, width=440,
-    )
-    errors_chart = _metrics.hbar_chart_svg(
-        sorted([(r["key"], r["tool_errors"]) for r in repos if r["tool_errors"] > 0],
-               key=lambda x: -x[1])[:8],
-        color="#dc2626", label_width=140, width=440,
-    )
+    # Aggregate per-repo charts for cross-repo comparison. Both are bar
+    # charts; payloads pass through the shared ECharts helper in base.html.
+    frust_chart_data = [
+        {"label": k, "value": n}
+        for k, n in sorted([(r["key"], r["frust_count"]) for r in repos if r["frust_count"] > 0],
+                           key=lambda x: -x[1])[:8]
+    ]
+    errors_chart_data = [
+        {"label": k, "value": n}
+        for k, n in sorted([(r["key"], r["tool_errors"]) for r in repos if r["tool_errors"] > 0],
+                           key=lambda x: -x[1])[:8]
+    ]
 
     # Aggregate metrics (rollup window + heatmap) — reuse what /metrics builds.
     aggregate_rows = _metrics.daily_metrics_all(days=30, tracked_only=False)
     last7 = _metrics.summarize_window(aggregate_rows, 7)
     last30 = _metrics.summarize_window(aggregate_rows, 30)
     series = list(reversed(aggregate_rows))
-    sparks = {
-        "sessions":    _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
-        "prompts":     _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
-        "tool_errors": _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
-        "cost_usd":    _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
+    def _series_insights(key: str) -> list[dict]:
+        return [{"date": r["date"], "value": r[key]} for r in series]
+    sparks_data = {
+        "sessions":    _series_insights("sessions"),
+        "prompts":     _series_insights("prompts"),
+        "tool_errors": _series_insights("tool_errors"),
+        "cost_usd":    _series_insights("cost_usd"),
     }
     hour_dow = _metrics.activity_by_hour_dow_all(days=90, tracked_only=False)
-    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+    hour_dow_data = {
+        "points": [
+            {"hour": h, "dow": d, "value": hour_dow[d][h]}
+            for d in range(7) for h in range(24)
+        ],
+    }
 
     # Latest cached deep digest from ~/.watchmen/insights/.
     digest_html = None
@@ -423,12 +432,12 @@ def insights_page(request: Request):
         "repos": repos,
         "cross": cross,
         "untapped": untapped,
-        "frust_chart": frust_chart,
-        "errors_chart": errors_chart,
+        "frust_chart_data": frust_chart_data,
+        "errors_chart_data": errors_chart_data,
         "last7": last7,
         "last30": last30,
-        "sparks": sparks,
-        "hour_dow_svg": hour_dow_svg,
+        "sparks_data": sparks_data,
+        "hour_dow_data": hour_dow_data,
         "digest_html": digest_html,
         "digest_meta": digest_meta,
         "cmp_narrative_html": cmp_narrative_html,
@@ -450,19 +459,37 @@ def metrics_all(request: Request, tracked: int = 0):
     last7 = _metrics.summarize_window(rows, 7)
     last30 = _metrics.summarize_window(rows, 30)
     series = list(reversed(rows))
-    sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
-        "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
-        "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
-        "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
-        "tool_errors":  _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
-        "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
-        "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
+    # Sparks now ship as raw {date, value} arrays — ECharts area-chart helper
+    # in base.html mounts each one client-side with the same shadcn theme as
+    # the profile card. One helper, one theme, every chart on the page.
+    def _series(key: str) -> list[dict]:
+        return [{"date": r["date"], "value": r[key]} for r in series]
+    sparks_data = {
+        "sessions":     _series("sessions"),
+        "prompts":      _series("prompts"),
+        "input_tokens": _series("input_tokens"),
+        "output_tokens":_series("output_tokens"),
+        "tool_errors":  _series("tool_errors"),
+        "cost_usd":     _series("cost_usd"),
+        "suggestions":  _series("suggestions_fired"),
     }
+    # Calendar heatmap: pass raw [(date, count), ...] as JSON-friendly pairs.
+    # Range derived from first/last date so ECharts' calendar coord system
+    # can lay out exactly the weeks we have data for.
     calendar = _metrics.activity_calendar_all(weeks=26, tracked_only=tracked_only)
+    calendar_data = {
+        "points": [{"date": d, "value": int(n)} for d, n in calendar],
+        "range":  [calendar[0][0], calendar[-1][0]] if calendar else None,
+    }
+    # Hour×DOW heatmap: hour_dow[day_of_week][hour] = count. ECharts heatmap
+    # wants flat [hour, day, value] triples; client helper unpacks.
     hour_dow = _metrics.activity_by_hour_dow_all(days=90, tracked_only=tracked_only)
-    calendar_svg = _metrics.calendar_heatmap_svg(calendar, weeks=26)
-    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+    hour_dow_data = {
+        "points": [
+            {"hour": h, "dow": d, "value": hour_dow[d][h]}
+            for d in range(7) for h in range(24)
+        ],
+    }
     peaks = []
     flat = [(dow, hr, hour_dow[dow][hr]) for dow in range(7) for hr in range(24)]
     flat.sort(key=lambda t: t[2], reverse=True)
@@ -481,35 +508,55 @@ def metrics_all(request: Request, tracked: int = 0):
     card_days = int(request.query_params.get("card_days", "90") or "90")
     card_days = max(7, min(card_days, 730))
     card_stats = _metrics.compute_card_stats(days=card_days)
-    card_svg = _metrics.card_svg(card_stats)
     card_tier = _metrics.card_tier_colors(card_stats["rating"])
     # Companion visualizations: agent-mix donut, top-tools horizontal
-    # bars, daily activity sparklines. Each pulls from card_stats so
-    # data and visuals stay in sync.
-    card_donut = _metrics.agent_donut_svg(card_stats["agents"])
+    # bars, daily activity sparklines, attribute radar. All four are now
+    # client-rendered ECharts mounts fed by JSON; the legend data is
+    # reused for both the donut center label and the side-panel legend.
     card_donut_legend = _metrics.agent_donut_legend(card_stats["agents"])
+    card_donut_data = [
+        {"label": row["label"], "value": row["count"], "color": row["color"]}
+        for row in card_donut_legend
+    ]
+    card_donut_center_value = sum(card_stats["agents"].values())
     top_tool_rows = card_stats.get("top_tools", [])[:5]
-    card_top_tools = _metrics.hbar_chart_svg(
-        [(name, float(n)) for name, n in top_tool_rows],
-        width=340, color="#3b82f6", label_width=90,
-    ) if top_tool_rows else ""
+    card_top_tools_data = [
+        {"label": name, "value": int(n)} for name, n in top_tool_rows
+    ]
+    # Radar payload: axis names (from CARD_AXES) + scaled values 0..100.
+    # ECharts radar uses indicator.max as the outer ring, so we pass 100
+    # and multiply the 0..1 stats["axes"] by 100 to fill the band system.
+    _axes_raw = card_stats.get("axes") or {}
+    card_radar_data = {
+        "indicators": [{"name": a, "max": 100} for a in _metrics.CARD_AXES],
+        "values": [round(_axes_raw.get(a, 0) * 100, 1) for a in _metrics.CARD_AXES],
+    }
+    # Legend explaining each axis so the radar isn't a "what do these words
+    # mean" puzzle. Kept short — one line per axis, ordered to match the
+    # radar's spoke order so the eye can connect axis → definition by
+    # position. Caps mirrored from _CARD_CAPS in metrics.py for the "elite"
+    # column so the user can see what the outer ring represents per axis.
+    card_axis_legend = [
+        {"name": "Throughput",  "desc": "Prompts per active day",          "elite": "40/d"},
+        {"name": "Frugality",   "desc": "Cost per prompt (lower is better)", "elite": "≤ $0.04"},
+        {"name": "Reliability", "desc": "Tool-call success rate",          "elite": "100%"},
+        {"name": "Curiosity",   "desc": "Distinct tools you reach for",    "elite": "30 tools"},
+        {"name": "Range",       "desc": "Distinct repos you work across",  "elite": "12 repos"},
+        {"name": "Mastery",     "desc": "Curated skill bundles owned",     "elite": "25 skills"},
+    ]
     # Daily activity series — slice from daily_metrics_all (already loaded
     # above) so we don't re-query corpus.db just for the sparklines.
+    #
+    # Activity data is now passed as raw JSON arrays to the template; the
+    # client-side ECharts helper in base.html renders each one as a
+    # shadcn-themed area chart with hover tooltips. Replaces the
+    # server-rendered `sparkline_svg` strings that fed the old static layout.
     activity_window = _metrics.daily_metrics_all(days=card_days, tracked_only=False)
     activity_series = list(reversed(activity_window))
-    card_activity = {
-        "sessions": _metrics.sparkline_svg(
-            [r["sessions"] for r in activity_series],
-            width=320, height=46, color="#3b82f6",
-        ),
-        "cost": _metrics.sparkline_svg(
-            [r["cost_usd"] for r in activity_series],
-            width=320, height=46, color="#f59e0b",
-        ),
-        "tool_errors": _metrics.sparkline_svg(
-            [r["tool_errors"] for r in activity_series],
-            width=320, height=46, color="#ef4444",
-        ),
+    card_activity_data = {
+        "sessions":    [{"date": r["date"], "value": r["sessions"]}    for r in activity_series],
+        "cost":        [{"date": r["date"], "value": r["cost_usd"]}    for r in activity_series],
+        "tool_errors": [{"date": r["date"], "value": r["tool_errors"]} for r in activity_series],
     }
 
     # Cross-agent comparison: per-adapter facts (always available, pure SQL)
@@ -535,9 +582,9 @@ def metrics_all(request: Request, tracked: int = 0):
         "rows": rows,
         "last7": last7,
         "last30": last30,
-        "sparks": sparks,
-        "calendar_svg": calendar_svg,
-        "hour_dow_svg": hour_dow_svg,
+        "sparks_data": sparks_data,
+        "calendar_data": calendar_data,
+        "hour_dow_data": hour_dow_data,
         "peaks": peaks,
         "per_project": per_project,
         "tracked_only": tracked_only,
@@ -545,13 +592,15 @@ def metrics_all(request: Request, tracked: int = 0):
         "streak": streak,
         "adapters": adapters,
         "card_stats": card_stats,
-        "card_svg": card_svg,
         "card_tier": card_tier,
         "card_days": card_days,
-        "card_donut": card_donut,
         "card_donut_legend": card_donut_legend,
-        "card_top_tools": card_top_tools,
-        "card_activity": card_activity,
+        "card_donut_data": card_donut_data,
+        "card_donut_center_value": card_donut_center_value,
+        "card_top_tools_data": card_top_tools_data,
+        "card_radar_data": card_radar_data,
+        "card_axis_legend": card_axis_legend,
+        "card_activity_data": card_activity_data,
         "cmp_facts": cmp_facts,
         "cmp_narrative_html": cmp_narrative_html,
         "cmp_narrative_meta": cmp_narrative_meta,
@@ -566,19 +615,29 @@ def project_metrics(request: Request, project_key: str):
     last30 = _metrics.summarize_window(rows, 30)
     # Daily series in chronological order for sparklines (rows is newest-first).
     series = list(reversed(rows))
-    sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#2563eb"),
-        "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
-        "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
-        "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
-        "tool_errors":  _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
-        "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
-        "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
+    def _series_pm(key: str) -> list[dict]:
+        return [{"date": r["date"], "value": r[key]} for r in series]
+    sparks_data = {
+        "sessions":     _series_pm("sessions"),
+        "prompts":      _series_pm("prompts"),
+        "input_tokens": _series_pm("input_tokens"),
+        "output_tokens":_series_pm("output_tokens"),
+        "tool_errors":  _series_pm("tool_errors"),
+        "cost_usd":     _series_pm("cost_usd"),
+        "suggestions":  _series_pm("suggestions_fired"),
     }
     calendar = _metrics.activity_calendar(project_key, weeks=26)
     hour_dow = _metrics.activity_by_hour_dow(project_key, days=90)
-    calendar_svg = _metrics.calendar_heatmap_svg(calendar, weeks=26)
-    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+    calendar_data = {
+        "points": [{"date": d, "value": int(n)} for d, n in calendar],
+        "range":  [calendar[0][0], calendar[-1][0]] if calendar else None,
+    }
+    hour_dow_data = {
+        "points": [
+            {"hour": h, "dow": d, "value": hour_dow[d][h]}
+            for d in range(7) for h in range(24)
+        ],
+    }
 
     # Peak hour + day for the summary line under the heatmap
     peaks = []
@@ -596,9 +655,9 @@ def project_metrics(request: Request, project_key: str):
         "rows": rows,
         "last7": last7,
         "last30": last30,
-        "sparks": sparks,
-        "calendar_svg": calendar_svg,
-        "hour_dow_svg": hour_dow_svg,
+        "sparks_data": sparks_data,
+        "calendar_data": calendar_data,
+        "hour_dow_data": hour_dow_data,
         "peaks": peaks,
         "tool_usage": tool_usage,
         "streak": streak,

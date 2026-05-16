@@ -70,7 +70,12 @@
         <td class="text-sm">
           {% if r.pending_n %}<span class="text-amber-700 font-semibold">{{ r.pending_n }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td>{{ r.sess_spark|safe }}</td>
+        <td>
+          <div class="wm-chart" style="width: 140px; height: 32px;"
+               data-wm-chart="area"
+               data-color="hsl(217, 91%, 60%)" data-label="Sessions" data-value-fmt="int"
+               data-points='{{ r.sess_spark_data|tojson }}'></div>
+        </td>
         <td class="text-xs">
           {% for agent in ["claude_code", "codex", "pi"] %}
             {% if r.adapter.get(agent, 0) %}
@@ -98,8 +103,11 @@
   <div class="wm-card">
     <div class="text-sm font-semibold mb-2 text-gray-800">Tool errors by repo</div>
     <div class="text-xs text-gray-500 mb-3">From <code>sessions.tool_error_count</code> in corpus.db.</div>
-    {% if errors_chart %}
-      {{ errors_chart|safe }}
+    {% if errors_chart_data %}
+      <div class="wm-chart" style="height: 220px;"
+           data-wm-chart="bar"
+           data-color="hsl(0, 84%, 60%)"
+           data-points='{{ errors_chart_data|tojson }}'></div>
     {% else %}
       <div class="text-sm text-gray-400">No tool errors recorded.</div>
     {% endif %}
@@ -107,8 +115,11 @@
   <div class="wm-card">
     <div class="text-sm font-semibold mb-2 text-gray-800">Frustration markers by repo</div>
     <div class="text-xs text-gray-500 mb-3">Prompts matching <code>no wait / bruh / :( / wtf / nope / …</code></div>
-    {% if frust_chart %}
-      {{ frust_chart|safe }}
+    {% if frust_chart_data %}
+      <div class="wm-chart" style="height: 220px;"
+           data-wm-chart="bar"
+           data-color="hsl(45, 93%, 47%)"
+           data-points='{{ frust_chart_data|tojson }}'></div>
     {% else %}
       <div class="text-sm text-gray-400">No frustration markers detected.</div>
     {% endif %}
@@ -180,7 +191,8 @@
 <h2 class="text-lg font-semibold mb-3">Activity by hour & day-of-week</h2>
 <div class="text-xs text-gray-500 mb-3">Last 90 days, every coding-agent session in your corpus.</div>
 <div class="wm-card mb-8 overflow-x-auto">
-  {{ hour_dow_svg|safe }}
+  <div class="wm-chart" style="height: 200px;" data-wm-chart="hourdow"
+       data-points='{{ hour_dow_data|tojson }}'></div>
 </div>
 
 <!-- Cross-agent narrative ──────────────────────────────────────────── -->

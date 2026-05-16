@@ -34,6 +34,10 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.7.0/github-markdown-light.css" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/PrismJS/prism@v1.29/themes/prism.min.css" />
+  <!-- ECharts: client-rendered charts styled to match shadcn's chart language
+       (smooth area fills, dashed grid, hover-vertical-line tooltips). Loaded
+       once for every page; helper invoked per-chart in template via data-attrs. -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js" defer></script>
 
   <style>
     /* ── Design tokens ────────────────────────────────────────────────
@@ -392,27 +396,23 @@
       font-family: ui-monospace, SFMono-Regular, monospace;
     }
     .wm-cmp__narrative {
-      background: linear-gradient(180deg, hsl(217 91% 60% / 0.05), hsl(217 91% 60% / 0.02));
-      border-left: 3px solid hsl(217 91% 60%);
-      border-radius: 6px;
-      padding: 14px 18px;
       margin-bottom: 22px;
-      font-size: 13px;
-      line-height: 1.6;
+      font-size: 13.5px;
+      line-height: 1.65;
       color: hsl(var(--foreground));
     }
     .wm-cmp__narrative h3 {
       font-size: 14px;
       font-weight: 600;
-      margin-top: 12px;
+      margin-top: 16px;
       margin-bottom: 6px;
       color: hsl(var(--foreground));
     }
     .wm-cmp__narrative h3:first-child { margin-top: 0; }
-    .wm-cmp__narrative p { margin: 6px 0; }
-    .wm-cmp__narrative ul { margin: 6px 0 6px 18px; }
-    .wm-cmp__narrative li { margin: 3px 0; }
-    .wm-cmp__narrative strong { color: hsl(var(--accent-strong, 217 91% 50%)); font-weight: 600; }
+    .wm-cmp__narrative p { margin: 8px 0; }
+    .wm-cmp__narrative ul { margin: 8px 0 8px 18px; }
+    .wm-cmp__narrative li { margin: 4px 0; }
+    .wm-cmp__narrative strong { color: hsl(var(--foreground)); font-weight: 600; }
     .wm-cmp__grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -492,6 +492,64 @@
       font-variant-numeric: tabular-nums;
       margin-left: 4px;
     }
+
+    /* ── Charts ─────────────────────────────────────────────────────────
+       Mount points for ECharts-rendered shadcn-style charts. Each chart
+       div carries its data as a data- attribute; window.wmMountAreaChart
+       (defined below) reads it and bootstraps an ECharts instance with
+       a theme tuned to our HSL design tokens (gradient area fill, dashed
+       grid, hover-vertical-line tooltip). Templates only set sizes +
+       optional title/footer wrapper. */
+    /* Axis legend below the radar — explains what each spoke measures so
+       the chart isn't a "what does CURIOSITY mean" puzzle. Two-column dl
+       (axis name → description + elite cap) for clean alignment. */
+    .wm-axis-legend {
+      margin: 14px 4px 0;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 16px;
+    }
+    .wm-axis-legend__row {
+      display: grid;
+      grid-template-columns: 78px 1fr;
+      align-items: baseline;
+      column-gap: 8px;
+      padding-top: 6px;
+      border-top: 1px solid hsl(var(--border));
+    }
+    .wm-axis-legend dt {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+      color: hsl(var(--foreground));
+      text-transform: uppercase;
+      margin: 0;
+    }
+    .wm-axis-legend dd {
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .wm-axis-legend__desc {
+      font-size: 11.5px; line-height: 1.35;
+      color: hsl(var(--foreground));
+    }
+    .wm-axis-legend__elite {
+      font-size: 10px;
+      color: hsl(var(--muted-foreground));
+      font-variant-numeric: tabular-nums;
+    }
+
+    .wm-chart { width: 100%; min-height: 60px; }
+    .wm-chart--sm  { height: 72px; }
+    .wm-chart--md  { height: 200px; }
+    .wm-chart--lg  { height: 280px; }
+    .wm-chart__empty {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%;
+      color: hsl(var(--muted-foreground));
+      font-size: 12px;
+      font-style: italic;
+    }
   </style>
 </head>
 <body class="bg-[hsl(var(--background))] text-[hsl(var(--foreground))]">
@@ -513,5 +571,510 @@
   <main class="max-w-7xl mx-auto px-6 py-6">
     {% block content %}{% endblock %}
   </main>
+
+  <!-- Chart bootstrap: scans for [data-wm-chart] elements and renders each one
+       with ECharts using a shared shadcn-style theme. Runs after ECharts has
+       loaded (the CDN script in <head> is `defer`d so this DOMContentLoaded
+       handler fires after it). Idempotent: re-running won't double-mount,
+       since echarts.init binds the canvas to the DOM node. -->
+  <script>
+    (function () {
+      // Soft alpha applied to the area fill's top stop — picked to read as
+      // "presence" without competing with the line stroke. shadcn area chart
+      // uses ~0.4 for the same effect.
+      const AREA_TOP_ALPHA = 0.28;
+      const AXIS_LABEL = 'hsl(220, 9%, 46%)';
+      const GRID_LINE  = 'hsl(220, 13%, 91%)';
+      const CARD_BG    = '#ffffff';
+      const TEXT_FG    = 'hsl(222, 9%, 15%)';
+
+      function hslToRgba(hsl, alpha) {
+        // Minimal HSL→RGBA — only handles "hsl(H, S%, L%)" (the form we ship).
+        const m = hsl.match(/hsl\(\s*([\d.]+)[ ,]+([\d.]+)%[ ,]+([\d.]+)%\s*\)/);
+        if (!m) return hsl;
+        const h = +m[1] / 360, s = +m[2] / 100, l = +m[3] / 100;
+        const a = s * Math.min(l, 1 - l);
+        const f = (n) => {
+          const k = (n + h * 12) % 12;
+          return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+        };
+        const r = Math.round(f(0) * 255), g = Math.round(f(8) * 255), b = Math.round(f(4) * 255);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      }
+
+      function fmtDate(iso) {
+        // 'YYYY-MM-DD' → 'May 16' for axis, 'May 16, 2026' for tooltip.
+        // Plain JS Date parses 'YYYY-MM-DD' as UTC midnight, which can show
+        // off-by-one in negative-UTC zones; we slice the string instead.
+        if (!iso) return '';
+        const [y, m, d] = iso.split('-').map(Number);
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        return { short: `${months[m-1]} ${d}`, long: `${months[m-1]} ${d}, ${y}` };
+      }
+
+      window.wmMountAreaChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let points;
+        try {
+          points = JSON.parse(el.dataset.points || '[]');
+        } catch { points = []; }
+        if (!points.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No data in this window.</div>';
+          return;
+        }
+        const color = el.dataset.color || 'hsl(217, 91%, 60%)';
+        const label = el.dataset.label || 'value';
+        const valueFmt = el.dataset.valueFmt || 'int';  // 'int' | 'usd' | 'float'
+
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+
+        // Sparse axis labels: aim for ~5-7 ticks regardless of point count.
+        const labelInterval = Math.max(0, Math.floor(points.length / 6) - 1);
+
+        chart.setOption({
+          animation: false,
+          grid: { left: 4, right: 4, top: 10, bottom: 22, containLabel: false },
+          xAxis: {
+            type: 'category',
+            data: points.map(p => p.date),
+            boundaryGap: false,
+            axisLine:  { show: false },
+            axisTick:  { show: false },
+            axisLabel: { color: AXIS_LABEL, fontSize: 10, interval: labelInterval,
+                         formatter: (v) => fmtDate(v).short },
+          },
+          yAxis: {
+            type: 'value',
+            show: false,
+            splitLine: { show: true, lineStyle: { color: GRID_LINE, type: 'dashed' } },
+          },
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'line',
+                           lineStyle: { color: 'hsl(220, 9%, 60%)', width: 1, type: 'dashed' } },
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (params) => {
+              const p = params[0];
+              const v = p.value;
+              const vstr = valueFmt === 'usd' ? `$${(+v).toFixed(2)}`
+                         : valueFmt === 'float' ? (+v).toFixed(1)
+                         : Math.round(+v).toLocaleString();
+              const date = fmtDate(p.name).long;
+              return `<div style="font-size:11px;color:${AXIS_LABEL};letter-spacing:0.02em;">${date}</div>
+                      <div style="font-size:13px;font-weight:600;margin-top:2px;color:${TEXT_FG};">
+                        ${label} <span style="color:${color};margin-left:6px;">${vstr}</span>
+                      </div>`;
+            },
+          },
+          series: [{
+            type: 'line',
+            data: points.map(p => p.value),
+            smooth: true,
+            symbol: 'none',
+            sampling: 'lttb',
+            lineStyle: { color: color, width: 1.8 },
+            areaStyle: {
+              color: {
+                type: 'linear',
+                x: 0, y: 0, x2: 0, y2: 1,
+                colorStops: [
+                  { offset: 0, color: hslToRgba(color, AREA_TOP_ALPHA) },
+                  { offset: 1, color: hslToRgba(color, 0) },
+                ],
+              },
+            },
+            emphasis: { focus: 'series' },
+          }],
+        });
+
+        attachResize(chart, el);
+      };
+
+      function attachResize(chart, el) {
+        if (window.ResizeObserver) {
+          new ResizeObserver(() => chart.resize()).observe(el);
+        }
+      }
+
+      // ── Donut (agent mix) ─────────────────────────────────────────────
+      // Data: array of {label, value, color}. Center text comes from
+      // data-center-value + data-center-label attributes on the mount div.
+      window.wmMountDonutChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let slices;
+        try { slices = JSON.parse(el.dataset.points || '[]'); } catch { slices = []; }
+        if (!slices.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No sessions in window.</div>';
+          return;
+        }
+        const centerValue = el.dataset.centerValue || '';
+        const centerLabel = (el.dataset.centerLabel || '').toUpperCase();
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const pct = (p.percent || 0).toFixed(0);
+              return `<div style="font-size:13px;font-weight:600;color:${TEXT_FG};">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${p.color};margin-right:6px;vertical-align:1px;"></span>
+                        ${p.name}
+                      </div>
+                      <div style="font-size:11px;color:${AXIS_LABEL};margin-top:2px;">
+                        ${Math.round(p.value).toLocaleString()} sessions · ${pct}%
+                      </div>`;
+            },
+          },
+          series: [{
+            type: 'pie',
+            radius: ['62%', '92%'],
+            center: ['50%', '50%'],
+            avoidLabelOverlap: false,
+            startAngle: 90,
+            label: { show: false },
+            labelLine: { show: false },
+            itemStyle: {
+              borderColor: CARD_BG,
+              borderWidth: 2,
+              borderRadius: 3,
+            },
+            emphasis: {
+              scale: true,
+              scaleSize: 4,
+              itemStyle: { shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.12)' },
+            },
+            data: slices.map(s => ({
+              name: s.label, value: s.value,
+              itemStyle: { color: s.color },
+            })),
+          }],
+          graphic: centerValue ? [{
+            type: 'group',
+            left: 'center', top: 'center',
+            children: [
+              { type: 'text', top: -10, left: 'center',
+                style: { text: centerValue, font: 'bold 22px Inter, system-ui',
+                         fill: TEXT_FG, textAlign: 'center' } },
+              { type: 'text', top: 16, left: 'center',
+                style: { text: centerLabel, font: 'bold 9px Inter, system-ui',
+                         fill: AXIS_LABEL, textAlign: 'center' } },
+            ],
+          }] : [],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Horizontal bar (top tools) ────────────────────────────────────
+      // Data: array of {label, value}. data-color sets the bar fill.
+      window.wmMountBarChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let rows;
+        try { rows = JSON.parse(el.dataset.points || '[]'); } catch { rows = []; }
+        if (!rows.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No tool calls in window.</div>';
+          return;
+        }
+        const color = el.dataset.color || 'hsl(217, 91%, 60%)';
+        const valueFmt = el.dataset.valueFmt || 'int';
+        const labels = rows.map(r => r.label);
+        const values = rows.map(r => r.value);
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          grid: { left: 4, right: 50, top: 4, bottom: 4, containLabel: true },
+          xAxis: {
+            type: 'value',
+            show: false,
+            splitLine: { show: false },
+          },
+          yAxis: {
+            type: 'category',
+            data: labels,
+            inverse: true,
+            axisLine: { show: false },
+            axisTick: { show: false },
+            axisLabel: { color: TEXT_FG, fontSize: 12, fontWeight: 500 },
+          },
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow', shadowStyle: { color: 'hsl(220, 13%, 95%)' } },
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [6, 10],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (params) => {
+              const p = params[0];
+              const v = valueFmt === 'usd' ? `$${(+p.value).toFixed(2)}`
+                      : Math.round(+p.value).toLocaleString();
+              return `<div style="font-size:13px;font-weight:600;color:${TEXT_FG};">${p.name}</div>
+                      <div style="font-size:11px;color:${AXIS_LABEL};">${v} calls</div>`;
+            },
+          },
+          series: [{
+            type: 'bar',
+            data: values,
+            barWidth: 16,
+            itemStyle: { color: color, borderRadius: [3, 3, 3, 3] },
+            label: {
+              show: true, position: 'right', distance: 6,
+              color: AXIS_LABEL, fontSize: 11, fontWeight: 500,
+              formatter: (p) => (valueFmt === 'usd' ? `$${(+p.value).toFixed(2)}`
+                                : Math.round(+p.value).toLocaleString()),
+            },
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Radar (spider stat card) ──────────────────────────────────────
+      // Data: { indicators: [{name, max}], values: [n,n,n,...] }.
+      // data-color sets the user-polygon color.
+      window.wmMountRadarChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let payload;
+        try { payload = JSON.parse(el.dataset.points || '{}'); } catch { payload = {}; }
+        const indicators = payload.indicators || [];
+        const values = payload.values || [];
+        if (!indicators.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No spider data.</div>';
+          return;
+        }
+        const color = el.dataset.color || 'hsl(217, 91%, 60%)';
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        // Tinted concentric bands (red → orange → yellow → green) to keep
+        // the FM-style "elite outer zone" feel from the old SVG.
+        chart.setOption({
+          animation: false,
+          radar: {
+            shape: 'polygon',
+            radius: '68%',
+            center: ['50%', '54%'],
+            indicator: indicators,
+            splitNumber: 4,
+            axisName: {
+              color: 'hsl(220, 9%, 25%)',
+              fontSize: 10,
+              fontWeight: 700,
+              formatter: (n) => n.toUpperCase(),
+            },
+            splitArea: {
+              show: true,
+              areaStyle: {
+                color: ['hsl(0, 75%, 92%)', 'hsl(25, 95%, 90%)', 'hsl(45, 90%, 90%)', 'hsl(142, 60%, 86%)'].reverse(),
+              },
+            },
+            splitLine: { lineStyle: { color: GRID_LINE, type: 'solid' } },
+            axisLine:  { lineStyle: { color: GRID_LINE, opacity: 0.5 } },
+          },
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const lines = (p.value || []).map((v, i) =>
+                `<div style="font-size:11px;color:${AXIS_LABEL};">${indicators[i].name}: <span style="color:${TEXT_FG};font-weight:600;">${Math.round(v)}</span></div>`
+              ).join('');
+              return `<div style="font-size:12px;font-weight:600;color:${TEXT_FG};margin-bottom:4px;">Attribute scores</div>${lines}`;
+            },
+          },
+          series: [{
+            type: 'radar',
+            symbol: 'circle',
+            symbolSize: 4,
+            lineStyle: { color: color, width: 2 },
+            itemStyle: { color: color, borderColor: '#fff', borderWidth: 1.5 },
+            areaStyle: { color: hslToRgba(color, 0.18) },
+            data: [{ value: values }],
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // Percentile of the non-zero values — used as the color-ramp max so
+      // a single 100x outlier (one mega-day) doesn't compress every other
+      // cell into a nearly-grey wash. Anything ≥ this percentile saturates
+      // at the top color, which is what we want for heatmap legibility.
+      function pNonZero(values, p) {
+        const nz = values.filter(v => v > 0).sort((a, b) => a - b);
+        if (!nz.length) return 1;
+        const i = Math.min(nz.length - 1, Math.floor(nz.length * p));
+        return Math.max(1, nz[i]);
+      }
+
+      // ── Calendar heatmap (26-week activity grid) ──────────────────────
+      // Data: { points: [{date, value}], range: [firstDate, lastDate] }.
+      // Renders GitHub-style cells with a sequential blue color ramp.
+      window.wmMountCalendarChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let payload;
+        try { payload = JSON.parse(el.dataset.points || '{}'); } catch { payload = {}; }
+        const points = payload.points || [];
+        const range = payload.range;
+        if (!points.length || !range) {
+          el.innerHTML = '<div class="wm-chart__empty">No activity in window.</div>';
+          return;
+        }
+        // p85 of non-zero days — anything higher saturates to full blue, which
+        // is correct (it WAS a peak day) without dragging every typical day
+        // down to near-grey because of one 100× outlier.
+        const maxV = pNonZero(points.map(p => p.value), 0.85);
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [6, 10],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const v = p.data ? p.data[1] : 0;
+              const d = p.data ? fmtDate(p.data[0]).long : '';
+              return `<div style="font-size:11px;color:${AXIS_LABEL};">${d}</div>
+                      <div style="font-size:13px;font-weight:600;color:${TEXT_FG};">${Math.round(v)} sessions</div>`;
+            },
+          },
+          visualMap: {
+            show: false,
+            min: 0, max: maxV,
+            inRange: { color: ['hsl(220, 13%, 95%)', 'hsl(217, 91%, 60%)'] },
+          },
+          calendar: {
+            range: range,
+            cellSize: ['auto', 14],
+            top: 28, left: 28, right: 8,
+            splitLine: { show: false },
+            itemStyle: {
+              color: 'hsl(220, 13%, 96%)',
+              borderColor: CARD_BG,
+              borderWidth: 2,
+            },
+            yearLabel: { show: false },
+            monthLabel: { color: AXIS_LABEL, fontSize: 10, nameMap: 'en' },
+            dayLabel: { color: AXIS_LABEL, fontSize: 9, firstDay: 1,
+                        nameMap: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'] },
+          },
+          series: [{
+            type: 'heatmap',
+            coordinateSystem: 'calendar',
+            data: points.map(p => [p.date, p.value]),
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Hour×DOW heatmap (7×24 grid) ──────────────────────────────────
+      // Data: { points: [{hour, dow, value}] } — dow 0=Sun..6=Sat.
+      window.wmMountHourDowChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let payload;
+        try { payload = JSON.parse(el.dataset.points || '{}'); } catch { payload = {}; }
+        const points = payload.points || [];
+        if (!points.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No activity in window.</div>';
+          return;
+        }
+        const dowNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const hours = Array.from({length: 24}, (_, i) => `${String(i).padStart(2,'0')}:00`);
+        // p85 clamp — see calendar chart for rationale. The hour×DOW grid
+        // is even more sensitive: one peak hour (e.g. Thu 15:00 with 6008
+        // prompts) used to make the entire rest of the week look empty.
+        const maxV = pNonZero(points.map(p => p.value), 0.85);
+        const data = points.map(p => [p.hour, p.dow, p.value]);
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          grid: { left: 36, right: 8, top: 8, bottom: 28, containLabel: false },
+          tooltip: {
+            position: 'top',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [6, 10],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const [h, d, v] = p.data;
+              return `<div style="font-size:11px;color:${AXIS_LABEL};">${dowNames[d]} · ${hours[h]}</div>
+                      <div style="font-size:13px;font-weight:600;color:${TEXT_FG};">${Math.round(v)} sessions</div>`;
+            },
+          },
+          xAxis: {
+            type: 'category', data: hours,
+            axisLine: { show: false }, axisTick: { show: false },
+            axisLabel: { color: AXIS_LABEL, fontSize: 9, interval: 2 },
+            splitArea: { show: false },
+          },
+          yAxis: {
+            type: 'category', data: dowNames, inverse: true,
+            axisLine: { show: false }, axisTick: { show: false },
+            axisLabel: { color: AXIS_LABEL, fontSize: 10, fontWeight: 600 },
+            splitArea: { show: false },
+          },
+          visualMap: {
+            show: false,
+            min: 0, max: maxV,
+            inRange: { color: ['hsl(220, 13%, 95%)', 'hsl(217, 91%, 60%)'] },
+          },
+          series: [{
+            type: 'heatmap',
+            data: data,
+            itemStyle: { borderColor: CARD_BG, borderWidth: 2 },
+            emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.18)' } },
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Dispatch ──────────────────────────────────────────────────────
+      const MOUNTERS = {
+        area:     window.wmMountAreaChart,
+        donut:    window.wmMountDonutChart,
+        bar:      window.wmMountBarChart,
+        radar:    window.wmMountRadarChart,
+        calendar: window.wmMountCalendarChart,
+        hourdow:  window.wmMountHourDowChart,
+      };
+
+      function mountAll() {
+        document.querySelectorAll('[data-wm-chart]').forEach((el) => {
+          const fn = MOUNTERS[el.dataset.wmChart];
+          if (fn) fn(el);
+        });
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', mountAll);
+      } else {
+        // ECharts script is `defer`, so it loads after DOMContentLoaded already
+        // fired in some race orderings. Wait for `load` as the safe lower bound.
+        window.addEventListener('load', mountAll);
+      }
+    })();
+  </script>
 </body>
 </html>

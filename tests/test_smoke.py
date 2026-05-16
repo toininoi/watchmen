@@ -1689,8 +1689,12 @@ def test_viewer_metrics_route_includes_profile_card():
     assert "OVR" in html
     # Hero row layout — spider chart + 3-column stat grid.
     assert "wm-profile__hero" in html and "wm-profile__spider" in html
-    for axis in ("THROUGHPUT", "FRUGALITY", "RELIABILITY", "CURIOSITY", "RANGE", "MASTERY"):
-        assert axis in html, f"axis label {axis} missing from /metrics profile card"
+    # Each axis name must appear in the page somewhere — either in the
+    # radar chart's JSON payload (lowercase indicator names) or in the
+    # axis-legend block below it (title case + uppercase via CSS). The old
+    # all-caps SVG <text> labels are gone now that the radar is client-rendered.
+    for axis in ("Throughput", "Frugality", "Reliability", "Curiosity", "Range", "Mastery"):
+        assert axis in html, f"axis name {axis} missing from /metrics profile card"
     for col in ("Volume", "Efficiency", "Breadth"):
         assert col in html, f"column header {col} missing"
     # Mini-visualization row.
