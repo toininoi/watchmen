@@ -10,7 +10,6 @@ so the cross-call stays intra-module — no callback wiring needed.
 """
 
 import argparse
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +30,6 @@ from watchmen.util import (
     adapter_breakdown as _adapter_breakdown,
     analyses_base as _analyses_base,
     bundle_base as _bundle_base,
-    corpus_db_path as _corpus_db_path,
 )
 
 # Package root used as cwd for subprocess invocations of `python -m
@@ -434,32 +432,33 @@ def _cmd_metrics_global(args) -> int:
         )
     console.print(cost_tbl)
 
-    corpus_db = _corpus_db_path()
-    if corpus_db.exists():
-        cc = sqlite3.connect(corpus_db)
-        adapter_rows = cc.execute(
-            """SELECT agent, COUNT(*) AS n, COUNT(DISTINCT project_dir) AS projects
-               FROM sessions WHERE is_subagent = 0 GROUP BY agent ORDER BY n DESC"""
-        ).fetchall()
-        cc.close()
-        if adapter_rows:
-            console.print()
-            max_n = max(n for _, n, _ in adapter_rows) or 1
-            total_n = sum(n for _, n, _ in adapter_rows)
-            atbl = Table(title="Sessions by adapter", show_header=True, header_style="bold cyan", box=None, padding=(0, 1, 0, 1))
-            atbl.add_column("adapter", style="bold")
-            atbl.add_column("", width=28)
-            atbl.add_column("sessions", justify="right")
-            atbl.add_column("share", justify="right")
-            atbl.add_column("projects", justify="right")
-            for agent, n, projects_n in adapter_rows:
-                pct = (n / total_n * 100) if total_n else 0
-                atbl.add_row(
-                    agent,
-                    f"[cyan]{_bar(n, max_n, width=28)}[/]",
-                    f"{n:,}",
-                    f"{pct:>3.0f}%",
-                    str(projects_n),
-                )
-            console.print(atbl)
+    adapter_rows = _metrics.adapter_breakdown_all(days=args.days)
+    if adapter_rows:
+        console.print()
+        max_n = max(a["sessions"] for a in adapter_rows) or 1
+        total_n = sum(a["sessions"] for a in adapter_rows)
+        atbl = Table(title=f"By coding agent — last {args.days}d", show_header=True, header_style="bold cyan", box=None, padding=(0, 1, 0, 1))
+        atbl.add_column("agent", style="bold")
+        atbl.add_column("", width=28)
+        atbl.add_column("sessions", justify="right")
+        atbl.add_column("share", justify="right")
+        atbl.add_column("projects", justify="right")
+        atbl.add_column("prompts", justify="right")
+        atbl.add_column("tool errs", justify="right")
+        atbl.add_column("cost", justify="right")
+        for a in adapter_rows:
+            pct = (a["sessions"] / total_n * 100) if total_n else 0
+            err_str = f"[red]{a['tool_errors']:,}[/]" if a["tool_errors"] else "0"
+            cost_str = f"[yellow]${a['cost_usd']:.2f}[/]" if a["cost_usd"] else "$0.00"
+            atbl.add_row(
+                a["label"],
+                f"[cyan]{_bar(a['sessions'], max_n, width=28)}[/]",
+                f"{a['sessions']:,}",
+                f"{pct:>3.0f}%",
+                str(a["projects"]),
+                f"{a['prompts']:,}",
+                err_str,
+                cost_str,
+            )
+        console.print(atbl)
     return 0

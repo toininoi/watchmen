@@ -461,6 +461,7 @@ def metrics_all(request: Request, tracked: int = 0):
     per_project = _metrics.per_project_totals(days=30)
     tool_usage = _metrics.tool_usage(project_key=None, days=30, tracked_only=tracked_only)
     streak = _metrics.streak_stats(project_key=None, weeks=26, tracked_only=tracked_only)
+    adapters = _metrics.adapter_breakdown_all(days=30, tracked_only=tracked_only)
 
     return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
         "rows": rows,
@@ -474,6 +475,7 @@ def metrics_all(request: Request, tracked: int = 0):
         "tracked_only": tracked_only,
         "tool_usage": tool_usage,
         "streak": streak,
+        "adapters": adapters,
     })
 
 

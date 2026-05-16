@@ -25,6 +25,19 @@ from watchmen.model_prices import price_for_model as price_for_model_from_api, t
 ROOT = Path(__file__).parent
 SUGGESTIONS_LOG = Path.home() / ".watchmen" / "suggestions.jsonl"
 
+# Friendly labels for the `agent` column in corpus.db. The DB stores adapter
+# slugs (claude_code, codex, pi); UI surfaces want display names. Fall through
+# to the raw slug for unknown adapters so future ones still render.
+ADAPTER_LABELS = {
+    "claude_code": "Claude Code",
+    "codex": "Codex",
+    "pi": "pi.dev",
+}
+
+
+def adapter_label(slug: str) -> str:
+    return ADAPTER_LABELS.get(slug, slug)
+
 # Default price used when model is unknown (matches sonnet-4.6 hardcoded fallback)
 DEFAULT_PRICE = (3.00, 3.75, 6.00, 0.30, 15.00)
 
@@ -389,6 +402,66 @@ def daily_metrics_all(days: int = 30, tracked_only: bool = False) -> list[dict]:
 
     out = list(by_day.values())
     out.sort(key=lambda b: b["date"], reverse=True)
+    return out
+
+
+def adapter_breakdown_all(days: int = 30, tracked_only: bool = False) -> list[dict]:
+    """Per-coding-agent rollup over the last `days` calendar days.
+
+    Returns one row per `agent` value in corpus.db.sessions, ordered by
+    session count desc. Surfaces are the viewer's /metrics page and the
+    CLI's `By coding agent` table.
+
+    Note: distinct from `util.adapter_breakdown(project_key)`, which does a
+    per-project quick lookup. This is the global cross-project rollup with
+    cost / errors / projects-touched alongside session counts.
+
+    Empty list when corpus.db doesn't exist yet or no sessions in window.
+    """
+    if not CORPUS_DB.exists():
+        return []
+    cutoff = date.today() - timedelta(days=days - 1)
+    base_sql = """
+        SELECT agent,
+               COUNT(*)                       AS sessions,
+               COUNT(DISTINCT project_dir)    AS projects,
+               COALESCE(SUM(user_prompt_count), 0)     AS prompts,
+               COALESCE(SUM(tool_error_count), 0)      AS tool_errors,
+               COALESCE(SUM(input_tokens), 0)          AS input_tokens,
+               COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+               COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
+               COALESCE(SUM(output_tokens), 0)         AS output_tokens,
+               COALESCE(SUM(cost_usd), 0.0)            AS cost_usd
+          FROM sessions
+         WHERE is_subagent = 0
+           AND date(started_at, 'localtime') >= ?
+    """
+    params: list = [cutoff.isoformat()]
+    if tracked_only:
+        tracked_dirs = _tracked_project_dirs()
+        if not tracked_dirs:
+            return []
+        placeholders = ",".join("?" for _ in tracked_dirs)
+        base_sql += f" AND project_dir IN ({placeholders})"
+        params.extend(tracked_dirs)
+    base_sql += " GROUP BY agent ORDER BY sessions DESC, agent ASC"
+    out: list[dict] = []
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        for r in conn.execute(base_sql, params).fetchall():
+            out.append({
+                "agent": r["agent"],
+                "label": adapter_label(r["agent"]),
+                "sessions": r["sessions"],
+                "projects": r["projects"],
+                "prompts": r["prompts"],
+                "tool_errors": r["tool_errors"],
+                "input_tokens": r["input_tokens"],
+                "cache_creation_tokens": r["cache_creation_tokens"],
+                "cache_read_tokens": r["cache_read_tokens"],
+                "output_tokens": r["output_tokens"],
+                "cost_usd": r["cost_usd"],
+            })
     return out
 
 

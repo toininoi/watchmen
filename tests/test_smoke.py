@@ -1462,13 +1462,10 @@ def test_metrics_hbar_chart_svg_renders_rows_and_handles_edges():
 
 
 def test_viewer_insights_route_returns_html_with_key_sections():
-    """The /insights route is the user-visible HTML analog of
-    `watchmen insights`. Test that against the actual app:
-      - returns 200
-      - includes the banner, stats tile section, repo table header,
-        cross-repo and untapped sections (when present), and the
-        hour-of-day heatmap container
-    Uses FastAPI's TestClient so we don't need to spin up a real server.
+    """The /insights route is the LLM-driven view: cross-repo digest,
+    friction signals, deep digest cache. Raw aggregations (stat tiles,
+    adapter mix) live on /metrics now — those assertions belong to the
+    metrics smoke test below.
     """
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -1479,18 +1476,42 @@ def test_viewer_insights_route_returns_html_with_key_sections():
     r = client.get("/insights")
     assert r.status_code == 200, f"/insights returned {r.status_code}: {r.text[:200]}"
     html = r.text
-    # Banner + identity
     assert "Watchmen — insights" in html
-    # Stats tiles
-    assert "Sessions / 7d" in html and "Tool errors / 7d" in html
-    assert "Adapter mix" in html
-    # Repo table
-    assert "<th class=\"px-4 py-2\">Project</th>" in html
-    # Heatmap container (the SVG renders only when there's data, but the
-    # section header is always present)
+    # Cross-link to raw metrics page (the de-dup pointer).
+    assert 'href="/metrics"' in html
+    # Repo table is still here for LLM-context.
+    assert '<th class="px-4 py-2">Project</th>' in html
+    # Heatmap container header is always rendered.
     assert "Activity by hour" in html
-    # Nav link to itself
+    # Nav link to itself.
     assert "/insights" in html
+
+
+def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
+    """The /metrics route is the raw-numbers dashboard. It should render
+    cleanly with or without corpus data. When corpus.db has sessions, the
+    "By coding agent" table appears; the section is suppressed otherwise
+    so an empty install doesn't show a blank table."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/metrics")
+    assert r.status_code == 200, f"/metrics returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    assert "Aggregated metrics" in html
+    # The headline tiles (sessions/prompts/tokens/cost) live here, not on /insights.
+    assert "Sessions / 7d" in html and "Cost / 7d" in html
+    # Per-agent section is conditional on adapter data; only assert it
+    # when the corpus actually contains sessions.
+    from watchmen import metrics as _metrics
+    adapters = _metrics.adapter_breakdown_all(days=30)
+    if adapters:
+        assert "By coding agent" in html
+        if any(a["agent"] == "claude_code" for a in adapters):
+            assert "Claude Code" in html
 
 
 def test_viewer_base_template_exposes_insights_nav_link():
