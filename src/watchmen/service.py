@@ -1,15 +1,18 @@
 """Cross-platform daemon/viewer service installer.
 
-Dispatches to the right backend based on `platform.system()`:
-  - Darwin (macOS) → launchd_setup
-  - Linux          → systemd_setup
+Dispatches to the platform-native scheduler. Each backend is named after its
+underlying component, not after the OS:
+
+  - macOS   → launchd_setup    (~/Library/LaunchAgents/*.plist)
+  - Linux   → systemd_setup    (~/.config/systemd/user/*.service)
+  - Windows → schtasks_setup   (Task Scheduler XML registered via schtasks)
 
 Public API mirrors what cli.py needs:
   install_daemon / install_viewer / uninstall_daemon / uninstall_viewer
   status / is_daemon_loaded / is_viewer_loaded
 
-`BACKEND_NAME` is exported so UI text can say "(launchd)" or "(systemd)"
-contextually without each caller doing its own platform sniff.
+`BACKEND_NAME` is exported so UI text can say "(launchd)", "(systemd)", or
+"(schtasks)" contextually without each caller doing its own platform sniff.
 """
 
 import platform
@@ -24,9 +27,12 @@ def _backend() -> Any:
     if system == "Linux":
         from watchmen import systemd_setup
         return systemd_setup
+    if system == "Windows":
+        from watchmen import schtasks_setup
+        return schtasks_setup
     raise RuntimeError(
         f"watchmen daemon/viewer install is not supported on {system}. "
-        "Supported platforms: macOS (launchd), Linux (systemd --user)."
+        "Supported schedulers: launchd (macOS), systemd --user (Linux), Task Scheduler (Windows)."
     )
 
 
@@ -36,6 +42,8 @@ def _backend_name() -> str:
         return "launchd"
     if system == "Linux":
         return "systemd"
+    if system == "Windows":
+        return "schtasks"
     return system.lower() or "unknown"
 
 

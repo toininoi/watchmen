@@ -1,4 +1,4 @@
-"""Hook installer — wires watchmen_observe.sh into the hook config of every
+"""Hook installer — wires the watchmen observer into the hook config of every
 supported coding agent so each session pipes its hook events to the local
 observer at 127.0.0.1:8765.
 
@@ -12,6 +12,10 @@ Both formats share the same per-event schema (matcher groups containing
 subset of Claude Code's events (no SessionEnd / SubagentStop / Notification /
 PreCompact) — entries for unsupported events are filtered per target.
 
+Two hook scripts ship — `watchmen_observe.sh` for POSIX shells and
+`watchmen_observe.ps1` for PowerShell — and the installer picks the one
+that matches the host's native shell.
+
 Backs up the existing config before mutating. Idempotent + self-healing:
 re-running install scrubs any existing watchmen entries (matched by script
 filename so a reorg or moved checkout doesn't leave orphaned entries that fail
@@ -22,12 +26,20 @@ set fresh.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-HOOK_SCRIPT = (ROOT / "hooks" / "watchmen_observe.sh").resolve()
+
+# Each platform invokes the settings.json "command" field through its native
+# shell (bash/zsh on POSIX, cmd.exe on Windows), so the hook script matches.
+_HOOK_SCRIPTS = {
+    "win32":  ROOT / "hooks" / "watchmen_observe.ps1",
+    "posix":  ROOT / "hooks" / "watchmen_observe.sh",
+}
+HOOK_SCRIPT = (_HOOK_SCRIPTS["win32"] if sys.platform == "win32" else _HOOK_SCRIPTS["posix"]).resolve()
 
 # Kept for backwards compatibility with callers/tests that referenced the
 # Claude-Code-only path directly. The canonical surface is HOSTS.
@@ -37,6 +49,19 @@ SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 WATCHMEN_SCRIPTS: dict[str, Path] = {
     "observe": HOOK_SCRIPT,
 }
+
+
+def _settings_command_for(script_path: Path) -> str:
+    """Render the `command` string that goes into settings.json.
+
+    For .sh scripts the shebang dispatches to bash, so the path alone is
+    enough. For .ps1 scripts we wrap with `powershell -NoProfile
+    -ExecutionPolicy Bypass -File "..."` so cmd.exe can launch them without
+    the user having to lower their execution policy globally. The path is
+    quoted because user-profile dirs commonly contain spaces."""
+    if script_path.suffix.lower() == ".ps1":
+        return f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
+    return str(script_path)
 
 # Per-event: list of (script_key, matcher_or_None). matcher=None omits the matcher key
 # entirely (Claude Code treats absent matcher as "all"); matcher="" means an explicit
@@ -70,6 +95,7 @@ _CODEX_SUPPORTED_EVENTS: frozenset[str] = frozenset({
 # doubles as a history of every hook surface we've owned.
 WATCHMEN_SCRIPT_NAMES: set[str] = {
     "watchmen_observe.sh",
+    "watchmen_observe.ps1",
     "watchmen_brief.sh",  # retired in 0.2.0
 }
 
@@ -110,7 +136,12 @@ def _is_watchmen_hook_cmd(cmd: str) -> bool:
         return False
     # Hook commands in settings.json are usually the absolute path alone but
     # tolerate users (or older releases) that prepended `sh `, `bash `, etc.
+    # On Windows the .ps1 form is wrapped with `powershell -NoProfile
+    # -ExecutionPolicy Bypass -File "..."`, so the script path lands as the
+    # final whitespace-separated token; the basename check below still hits.
     first_token = cmd.strip().split()[-1] if cmd.strip().split() else ""
+    # Strip surrounding quotes that the powershell -File wrapper adds.
+    first_token = first_token.strip('"').strip("'")
     return Path(first_token).name in WATCHMEN_SCRIPT_NAMES
 
 
@@ -202,7 +233,7 @@ def _install_one(host: _Host) -> tuple[bool, int]:
             continue
         existing = hooks.setdefault(event, [])
         for script_key, matcher in scripts:
-            cmd_str = str(WATCHMEN_SCRIPTS[script_key])
+            cmd_str = _settings_command_for(WATCHMEN_SCRIPTS[script_key])
             entry: dict = {"hooks": [{"type": "command", "command": cmd_str}]}
             if matcher is not None:
                 entry["matcher"] = matcher
@@ -246,8 +277,11 @@ def install() -> int:
     if missing:
         print(f"ERROR: hook script(s) not found: {', '.join(missing)}")
         return 1
+    # The executable bit only matters for the .sh scripts — .ps1 files don't
+    # carry one, and Windows ignores chmod silently anyway.
     for p in WATCHMEN_SCRIPTS.values():
-        p.chmod(0o755)
+        if p.suffix == ".sh":
+            p.chmod(0o755)
 
     print("wiring watchmen hooks into supported agents:")
     any_touched = False
@@ -293,7 +327,7 @@ def status() -> int:
                 continue
             entries = hooks.get(event) or []
             for script_key, _matcher in scripts:
-                cmd_str = str(WATCHMEN_SCRIPTS[script_key])
+                cmd_str = _settings_command_for(WATCHMEN_SCRIPTS[script_key])
                 present = any(
                     any(h.get("command") == cmd_str for h in e.get("hooks", []))
                     for e in entries
