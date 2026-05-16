@@ -145,6 +145,73 @@
   </div>
 </section>
 
+{% if cmp_facts and cmp_facts.adapters and cmp_facts.adapters|length >= 2 %}
+<section class="wm-cmp mb-8">
+  <div class="wm-cmp__header">
+    <h2 class="wm-cmp__title">How you use each agent</h2>
+    <div class="wm-cmp__sub">
+      Comparing {{ cmp_facts.adapters|length }} coding agents over the last
+      {{ cmp_facts.window_days }} days (since {{ cmp_facts.since }}).
+      {% if cmp_narrative_meta and cmp_narrative_meta.generated_at %}
+        Narrative synthesized {{ cmp_narrative_meta.generated_at[:10] }}
+        {% if cmp_narrative_meta.model %}· {{ cmp_narrative_meta.model }}{% endif %}.
+      {% else %}
+        Run <code>watchmen insights</code> to generate the LLM narrative below the facts table.
+      {% endif %}
+    </div>
+  </div>
+
+  {% if cmp_narrative_html %}
+    <div class="wm-cmp__narrative prose prose-sm max-w-none">
+      {{ cmp_narrative_html|safe }}
+    </div>
+  {% endif %}
+
+  <div class="wm-cmp__grid">
+    {% for a in cmp_facts.adapters %}
+      <div class="wm-cmp__card">
+        <div class="wm-cmp__card-header">
+          <span class="wm-cmp__card-label">{{ a.label }}</span>
+          {% if a.dominant_model %}
+            <span class="wm-cmp__card-model">{{ a.dominant_model }}</span>
+          {% endif %}
+        </div>
+        <dl class="wm-cmp__stats">
+          <div><dt>sessions</dt><dd>{{ "{:,}".format(a.sessions) }}</dd></div>
+          <div><dt>active days</dt><dd>{{ a.active_days }}</dd></div>
+          <div><dt>projects</dt><dd>{{ a.projects }}</dd></div>
+          <div><dt>prompts</dt><dd>{{ "{:,}".format(a.prompts) }}</dd></div>
+          <div><dt>prompts / session</dt><dd>{{ a.prompts_per_session }}</dd></div>
+          <div><dt>tool calls / sess</dt><dd>{{ a.tool_calls_per_session }}</dd></div>
+          <div><dt>tool error rate</dt><dd>{{ "{:.1%}".format(a.tool_error_rate) }}</dd></div>
+          <div><dt>cache hit</dt><dd>{{ "{:.0%}".format(a.cache_hit_rate) }}</dd></div>
+          <div><dt>$ / prompt</dt><dd>${{ "%.4f"|format(a.cost_per_prompt) }}</dd></div>
+          <div><dt>$ / session</dt><dd>${{ "%.2f"|format(a.cost_per_session) }}</dd></div>
+          <div><dt>total $</dt><dd>${{ "%.2f"|format(a.cost_usd) }}</dd></div>
+          <div><dt>avg sess</dt><dd>{{ (a.avg_session_seconds / 60)|round|int }}m</dd></div>
+        </dl>
+        {% if a.top_tools %}
+          <div class="wm-cmp__list">
+            <span class="wm-cmp__list-label">Top tools</span>
+            {% for tname, tn in a.top_tools[:5] %}
+              <span class="wm-cmp__pill">{{ tname }} <em>{{ "{:,}".format(tn) }}</em></span>
+            {% endfor %}
+          </div>
+        {% endif %}
+        {% if a.top_projects %}
+          <div class="wm-cmp__list">
+            <span class="wm-cmp__list-label">Top projects</span>
+            {% for pdir, pn in a.top_projects[:3] %}
+              <span class="wm-cmp__pill">{{ pdir.split("/")[-1] }} <em>{{ pn }}</em></span>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <style>
   /* `.stat-card` baseline lives in base.html now. Only daily-table styles
      stay local since they're unique to this page. */

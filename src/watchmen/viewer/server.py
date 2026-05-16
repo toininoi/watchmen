@@ -395,16 +395,25 @@ def insights_page(request: Request):
     # Latest cached deep digest from ~/.watchmen/insights/.
     digest_html = None
     digest_meta: dict = {}
+    cmp_narrative_html = ""
+    cmp_narrative_meta: dict = {}
     try:
         from watchmen.commands.insights import (
             _latest_digest_path,
             _read_digest_metadata,
+            _latest_cross_agent_narrative,
         )
         latest = _latest_digest_path()
         if latest is not None:
             meta, body = _read_digest_metadata(latest)
             digest_meta = meta
             digest_html = render_md(body)
+        # Cross-agent narrative — independent cache file, rendered inline
+        # above the deep digest so users see the per-agent context first.
+        loaded = _latest_cross_agent_narrative()
+        if loaded:
+            cmp_narrative_meta, cmp_body = loaded
+            cmp_narrative_html = render_md(cmp_body)
     except Exception:
         digest_html = None
 
@@ -422,6 +431,8 @@ def insights_page(request: Request):
         "hour_dow_svg": hour_dow_svg,
         "digest_html": digest_html,
         "digest_meta": digest_meta,
+        "cmp_narrative_html": cmp_narrative_html,
+        "cmp_narrative_meta": cmp_narrative_meta,
         "curated_count": sum(1 for r in repos if r["skills_n"] > 0),
         "n_projects": len(projects),
         "total_skills": sum(r["skills_n"] for r in repos),
@@ -501,6 +512,26 @@ def metrics_all(request: Request, tracked: int = 0):
         ),
     }
 
+    # Cross-agent comparison: per-adapter facts (always available, pure SQL)
+    # + LLM-synthesized narrative (cached in ~/.watchmen/insights/, written
+    # by the digest pipeline). The narrative is None when the user hasn't
+    # run `watchmen insights` yet OR when <2 adapters have meaningful data.
+    # Whole section hides itself in the template when there's <2 adapters.
+    cmp_facts = _metrics.agent_comparison_facts(days=card_days)
+    cmp_narrative_html = ""
+    cmp_narrative_meta: dict = {}
+    try:
+        from watchmen.commands.insights import _latest_cross_agent_narrative
+        from watchmen.view import render_md
+        loaded = _latest_cross_agent_narrative()
+        if loaded:
+            cmp_narrative_meta, cmp_body = loaded
+            cmp_narrative_html = render_md(cmp_body)
+    except Exception:
+        # Worst case: the narrative section just shows the facts table
+        # without the LLM prose. Don't block the whole page.
+        pass
+
     return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
         "rows": rows,
         "last7": last7,
@@ -522,6 +553,9 @@ def metrics_all(request: Request, tracked: int = 0):
         "card_donut_legend": card_donut_legend,
         "card_top_tools": card_top_tools,
         "card_activity": card_activity,
+        "cmp_facts": cmp_facts,
+        "cmp_narrative_html": cmp_narrative_html,
+        "cmp_narrative_meta": cmp_narrative_meta,
     })
 
 

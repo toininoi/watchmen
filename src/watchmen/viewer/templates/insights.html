@@ -183,6 +183,25 @@
   {{ hour_dow_svg|safe }}
 </div>
 
+<!-- Cross-agent narrative ──────────────────────────────────────────── -->
+{% if cmp_narrative_html %}
+<section class="wm-cmp mb-8">
+  <div class="wm-cmp__header">
+    <h2 class="wm-cmp__title">How you use each agent</h2>
+    <div class="wm-cmp__sub">
+      {% if cmp_narrative_meta and cmp_narrative_meta.generated_at %}
+        Synthesized {{ cmp_narrative_meta.generated_at[:10] }}
+        {% if cmp_narrative_meta.model %}with <code>{{ cmp_narrative_meta.model }}</code>{% endif %}
+        · regenerate from the CLI with <code>watchmen insights --regenerate</code>
+      {% endif %}
+    </div>
+  </div>
+  <div class="wm-cmp__narrative prose prose-sm max-w-none">
+    {{ cmp_narrative_html|safe }}
+  </div>
+</section>
+{% endif %}
+
 <!-- Latest deep digest ─────────────────────────────────────────────── -->
 {% if digest_html %}
 <h2 class="text-lg font-semibold mb-3">◉ Deep digest</h2>

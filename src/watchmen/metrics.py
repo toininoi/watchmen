@@ -465,6 +465,200 @@ def adapter_breakdown_all(days: int = 30, tracked_only: bool = False) -> list[di
     return out
 
 
+def agent_comparison_facts(days: int = 90, tracked_only: bool = False) -> dict:
+    """Per-adapter rollup rich enough to feed the cross-agent comparison LLM
+    narrative AND a deterministic side-by-side render. Extends
+    `adapter_breakdown_all` with derived ratios (cost/prompt, error rate,
+    cache hit, prompts/session), session-shape (active days, avg duration),
+    behavioral mix (top tools, top projects, dominant model), and a
+    suggestions-fired counter scoped per adapter.
+
+    Returns a dict ready to JSON-stringify into a prompt:
+
+        {
+          "window_days": 90,
+          "since": "2026-02-15",
+          "adapters": [{...}, ...],   # one per agent with sessions in window
+        }
+
+    Empty `adapters` when corpus.db is absent or no sessions in window.
+    The function never raises — corrupt rows are skipped silently."""
+    out: dict = {"window_days": days, "since": None, "adapters": []}
+    if not CORPUS_DB.exists():
+        return out
+
+    cutoff = date.today() - timedelta(days=days - 1)
+    out["since"] = cutoff.isoformat()
+
+    tracked_filter = ""
+    tracked_params: list = []
+    if tracked_only:
+        tracked_dirs = _tracked_project_dirs()
+        if not tracked_dirs:
+            return out
+        ph = ",".join("?" for _ in tracked_dirs)
+        tracked_filter = f" AND s.project_dir IN ({ph})"
+        tracked_params = list(tracked_dirs)
+
+    # Q1 — base aggregate per adapter. Active days uses COUNT DISTINCT on the
+    # localtime calendar day; avg session duration is over duration_seconds
+    # (NULL when a session never closed → AVG drops it, which is the right
+    # behavior — half-finished sessions shouldn't pull the average down).
+    base_sql = f"""
+        SELECT s.agent                                 AS agent,
+               COUNT(*)                                AS sessions,
+               COUNT(DISTINCT date(s.started_at, 'localtime')) AS active_days,
+               COUNT(DISTINCT s.project_dir)           AS projects,
+               COALESCE(SUM(s.user_prompt_count), 0)   AS prompts,
+               COALESCE(SUM(s.tool_use_count), 0)      AS tool_calls,
+               COALESCE(SUM(s.tool_error_count), 0)    AS tool_errors,
+               COALESCE(SUM(s.input_tokens), 0)        AS input_tokens,
+               COALESCE(SUM(s.cache_creation_tokens), 0) AS cache_creation_tokens,
+               COALESCE(SUM(s.cache_read_tokens), 0)   AS cache_read_tokens,
+               COALESCE(SUM(s.output_tokens), 0)       AS output_tokens,
+               COALESCE(SUM(s.cost_usd), 0.0)          AS cost_usd,
+               AVG(s.duration_seconds)                 AS avg_duration_seconds
+          FROM sessions s
+         WHERE s.is_subagent = 0
+           AND date(s.started_at, 'localtime') >= ?
+           {tracked_filter}
+         GROUP BY s.agent
+         ORDER BY sessions DESC
+    """
+    params: list = [cutoff.isoformat()] + tracked_params
+
+    rows: list[dict] = []
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(base_sql, params).fetchall()]
+
+        # Q2 — top 5 tools per adapter (excluding subagent sessions, same
+        # window). JOIN on session_id so we can scope tool_calls to a given
+        # agent. We don't store agent on tool_calls directly; this join is
+        # cheap thanks to idx_tool_calls_session.
+        tools_sql = f"""
+            SELECT s.agent AS agent, t.tool_name AS tool_name, COUNT(*) AS n
+              FROM tool_calls t
+              JOIN sessions s ON t.session_id = s.session_id
+             WHERE s.is_subagent = 0
+               AND date(s.started_at, 'localtime') >= ?
+               {tracked_filter}
+               AND t.tool_name IS NOT NULL AND t.tool_name <> ''
+             GROUP BY s.agent, t.tool_name
+             ORDER BY s.agent ASC, n DESC
+        """
+        top_tools: dict[str, list[tuple[str, int]]] = {}
+        for r in conn.execute(tools_sql, params).fetchall():
+            top_tools.setdefault(r["agent"], []).append((r["tool_name"], r["n"]))
+
+        # Q3 — top 3 projects per adapter (where the agent gets used most).
+        # Translates project_dir → human label via tracked project index
+        # (`util.adapter_breakdown`-style) so the narrative can name "kai"
+        # instead of "/Users/foo/dev/kai".
+        projects_sql = f"""
+            SELECT s.agent AS agent, s.project_dir AS project_dir, COUNT(*) AS n
+              FROM sessions s
+             WHERE s.is_subagent = 0
+               AND date(s.started_at, 'localtime') >= ?
+               {tracked_filter}
+               AND s.project_dir IS NOT NULL AND s.project_dir <> ''
+             GROUP BY s.agent, s.project_dir
+             ORDER BY s.agent ASC, n DESC
+        """
+        top_projects: dict[str, list[tuple[str, int]]] = {}
+        for r in conn.execute(projects_sql, params).fetchall():
+            top_projects.setdefault(r["agent"], []).append((r["project_dir"], r["n"]))
+
+        # Q4 — dominant model per adapter. We trust sessions.model_dominant
+        # (already chosen as max-output-tokens model in that session). Tally
+        # session counts per (agent, dominant model) and pick the top one.
+        models_sql = f"""
+            SELECT s.agent AS agent, s.model_dominant AS model, COUNT(*) AS n
+              FROM sessions s
+             WHERE s.is_subagent = 0
+               AND date(s.started_at, 'localtime') >= ?
+               {tracked_filter}
+               AND s.model_dominant IS NOT NULL AND s.model_dominant <> ''
+             GROUP BY s.agent, s.model_dominant
+             ORDER BY s.agent ASC, n DESC
+        """
+        dominant_model: dict[str, str] = {}
+        for r in conn.execute(models_sql, params).fetchall():
+            dominant_model.setdefault(r["agent"], r["model"])
+
+    # Skill-suggestion firings per adapter. Read the plugin's append-only
+    # suggestions log and join to sessions.agent in memory. Best-effort:
+    # missing log → all zero; malformed lines skipped silently.
+    suggestions_fired: dict[str, int] = {}
+    sugg_path = Path.home() / ".watchmen" / "suggestions.jsonl"
+    if sugg_path.exists() and rows:
+        agent_by_session: dict[str, str] = {}
+        with sqlite3.connect(str(CORPUS_DB)) as conn2:
+            conn2.row_factory = sqlite3.Row
+            for r in conn2.execute(
+                "SELECT session_id, agent FROM sessions WHERE date(started_at, 'localtime') >= ?",
+                (cutoff.isoformat(),),
+            ).fetchall():
+                if r["session_id"]:
+                    agent_by_session[r["session_id"]] = r["agent"]
+        try:
+            with sugg_path.open() as fh:
+                for line in fh:
+                    try:
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sid = evt.get("session_id")
+                    a = agent_by_session.get(sid)
+                    if a:
+                        suggestions_fired[a] = suggestions_fired.get(a, 0) + 1
+        except OSError:
+            pass
+
+    # Derive ratios + attach behavioral lists. Guard each division so a
+    # zero-activity adapter doesn't NaN out the whole comparison.
+    adapters: list[dict] = []
+    for row in rows:
+        agent = row["agent"]
+        prompts = row["prompts"] or 0
+        sessions = row["sessions"] or 0
+        tool_calls = row["tool_calls"] or 0
+        cost = float(row["cost_usd"] or 0.0)
+        input_t = row["input_tokens"] or 0
+        cache_r = row["cache_read_tokens"] or 0
+        adapters.append({
+            "agent": agent,
+            "label": adapter_label(agent),
+            "sessions": sessions,
+            "active_days": row["active_days"] or 0,
+            "projects": row["projects"] or 0,
+            "prompts": prompts,
+            "tool_calls": tool_calls,
+            "tool_errors": row["tool_errors"] or 0,
+            "cost_usd": round(cost, 4),
+            "input_tokens": input_t,
+            "cache_creation_tokens": row["cache_creation_tokens"] or 0,
+            "cache_read_tokens": cache_r,
+            "output_tokens": row["output_tokens"] or 0,
+            # Derived ratios
+            "cost_per_prompt":     round(cost / prompts, 4) if prompts > 0 else 0.0,
+            "cost_per_session":    round(cost / sessions, 4) if sessions > 0 else 0.0,
+            "prompts_per_session": round(prompts / sessions, 2) if sessions > 0 else 0.0,
+            "tool_calls_per_session": round(tool_calls / sessions, 2) if sessions > 0 else 0.0,
+            "tool_error_rate":     round(row["tool_errors"] / tool_calls, 4) if tool_calls > 0 else 0.0,
+            "cache_hit_rate":      round(cache_r / (input_t + cache_r), 4) if (input_t + cache_r) > 0 else 0.0,
+            "avg_session_seconds": round(row["avg_duration_seconds"] or 0.0, 1),
+            # Behavioral
+            "top_tools":    top_tools.get(agent, [])[:5],
+            "top_projects": top_projects.get(agent, [])[:3],
+            "dominant_model": dominant_model.get(agent),
+            "suggestions_fired": suggestions_fired.get(agent, 0),
+        })
+
+    out["adapters"] = adapters
+    return out
+
+
 def activity_calendar_all(weeks: int = 26, tracked_only: bool = False) -> list[tuple[str, int]]:
     """Calendar across all activity, optionally restricted to tracked projects."""
     if not CORPUS_DB.exists():
