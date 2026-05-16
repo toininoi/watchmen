@@ -114,6 +114,15 @@ Then wire the in-TUI indicator (one-time, picks up the newest plugin version aut
 watchmen statusline install
 ```
 
+**Using Codex too?** Run the same wizard — `watchmen hooks install` now wires both `~/.claude/settings.json` and `~/.codex/hooks.json` in one shot. Then install the Codex-side plugin from inside a Codex session:
+
+```
+/plugins marketplace add github:firstbatchxyz/watchmen
+/plugins install watchmen
+```
+
+You then get `/skills brief` (or `$brief`) inside Codex with the same workspace digest behavior as `/watchmen:brief` in Claude Code. Codex has no statusline, so the live skill-suggestion hint doesn't surface there — on-demand `brief` is the equivalent UX.
+
 That's the whole install. The rest of this README is for understanding what's happening + manual control.
 
 ### API key — manual options (the wizard handles this for you)
