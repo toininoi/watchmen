@@ -301,11 +301,12 @@ def test_card_stats_subagent_sessions_excluded(fresh_metrics, tmp_path):
     assert s["prompts"] == 5
 
 
-def test_card_svg_renders_with_expected_landmarks(fresh_metrics, tmp_path):
-    """SVG output is hard to assert on visually, but we can check that
-    each axis label, the rating number, and the archetype name all
-    appear in the rendered string. Catches regressions where a label
-    or anchor stops being included."""
+def test_card_svg_renders_axis_labels(fresh_metrics, tmp_path):
+    """The SVG is now spider-chart-only (header + footer moved into
+    HTML in metrics_all.html). Verify each axis label still appears
+    in the rendered string; the polygon + tinted rings have no
+    inspectable text but at least we catch the case where a label
+    or spoke regresses out of the output."""
     _seed_corpus_with_tools(
         tmp_path / "corpus.db",
         sessions=[_ses("s1", project_dir="/p", days_ago=1, prompts=5, tool_uses=5)],
@@ -316,5 +317,45 @@ def test_card_svg_renders_with_expected_landmarks(fresh_metrics, tmp_path):
     assert svg.startswith("<svg") and svg.endswith("</svg>")
     for axis in ("THROUGHPUT", "FRUGALITY", "RELIABILITY", "CURIOSITY", "RANGE", "MASTERY"):
         assert axis in svg, f"axis label {axis} missing from card SVG"
-    assert str(s["rating"]) in svg
-    assert s["archetype"][0] in svg
+    # The 4 tinted ring polygons (red → orange → yellow → green).
+    assert svg.count("<polygon") >= 5  # 4 rings + 1 user polygon
+
+
+def test_card_attribute_groups_and_traits_populate(fresh_metrics, tmp_path):
+    """`compute_card_stats` returns the data the FM-style profile card
+    needs: three column groups (Volume / Efficiency / Breadth) with
+    color-coded stat items, and a non-empty traits list. This is the
+    contract the metrics_all.html profile section depends on."""
+    _seed_corpus_with_tools(
+        tmp_path / "corpus.db",
+        sessions=[
+            _ses("s1", project_dir="/p1", days_ago=2, prompts=20, tool_uses=40, cost=1.0),
+            _ses("s2", project_dir="/p2", days_ago=4, prompts=10, tool_uses=20, cost=0.5),
+            _ses("s3", project_dir="/p3", days_ago=6, prompts=5, tool_uses=10),
+        ],
+        tool_calls=[_tc("s1", tool="Read"), _tc("s2", tool="Edit"), _tc("s3", tool="Bash")],
+    )
+    s = fresh_metrics.compute_card_stats(days=90)
+    groups = s["attribute_groups"]
+    assert [g["label"] for g in groups] == ["Volume", "Efficiency", "Breadth"]
+    # Every stat item is a dict with the contract the template iterates.
+    for g in groups:
+        assert g["stats"], f"empty {g['label']!r} column"
+        for item in g["stats"]:
+            assert set(item.keys()) == {"label", "raw", "kind"}
+            assert item["kind"] in {"elite", "mid", "low", "neutral"}
+    # Traits is a list of strings, at least one trait present.
+    assert isinstance(s["traits"], list) and s["traits"]
+    assert all(isinstance(t, str) for t in s["traits"])
+
+
+def test_card_tier_colors_match_rating_bands(fresh_metrics):
+    """card_tier_colors picks gold/silver/bronze/indigo from rating.
+    Smoke-tests the band edges (89 → silver, 90 → gold, etc.)."""
+    assert fresh_metrics.card_tier_colors(95)["name"] == "gold"
+    assert fresh_metrics.card_tier_colors(90)["name"] == "gold"
+    assert fresh_metrics.card_tier_colors(89)["name"] == "silver"
+    assert fresh_metrics.card_tier_colors(80)["name"] == "silver"
+    assert fresh_metrics.card_tier_colors(79)["name"] == "bronze"
+    assert fresh_metrics.card_tier_colors(70)["name"] == "bronze"
+    assert fresh_metrics.card_tier_colors(40)["name"] == "indigo"

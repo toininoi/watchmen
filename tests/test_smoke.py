@@ -1528,25 +1528,31 @@ def test_viewer_insights_route_returns_html_with_key_sections():
     assert "/insights" in html
 
 
-def test_viewer_card_route_renders_with_landmarks():
-    """The /card route is the fun profile page. The SVG should render
-    with the six axis labels regardless of corpus state — empty corpus
-    just produces a Newcomer card."""
+def test_viewer_metrics_route_includes_profile_card():
+    """The profile card (FM-style spider + stats columns + traits) is
+    inlined into /metrics. Smoke-test that the route renders with the
+    landmarks, regardless of corpus state — empty corpus produces a
+    Newcomer card; we just need the structure to come through."""
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from fastapi.testclient import TestClient
     from watchmen.viewer import server as viewer_server
 
     client = TestClient(viewer_server.app)
-    r = client.get("/card")
-    assert r.status_code == 200, f"/card returned {r.status_code}: {r.text[:200]}"
+    r = client.get("/metrics?card_days=90")
+    assert r.status_code == 200, f"/metrics returned {r.status_code}: {r.text[:200]}"
     html = r.text
-    assert "Your card" in html
+    # Card-section anchors.
+    assert "wm-profile" in html
+    assert "OVR" in html
     for axis in ("THROUGHPUT", "FRUGALITY", "RELIABILITY", "CURIOSITY", "RANGE", "MASTERY"):
-        assert axis in html, f"axis label {axis} missing from /card"
-    # Window selector + nav presence regression guards.
-    assert 'name="days"' in html
-    assert 'href="/card"' in html
+        assert axis in html, f"axis label {axis} missing from /metrics profile card"
+    # 3-column attribute layout headers.
+    for col in ("Volume", "Efficiency", "Breadth"):
+        assert col in html, f"column header {col} missing"
+    # Window selector for the card.
+    assert 'name="card_days"' in html
+    assert "Player traits" in html
 
 
 def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():

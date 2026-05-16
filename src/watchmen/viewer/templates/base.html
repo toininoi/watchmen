@@ -175,6 +175,91 @@
     .wm-pill-fail    { background: hsl(0   75% 95%); color: hsl(0   75% 38%); }
     .wm-pill-muted   { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
 
+    /* ── Profile card (top of /metrics) — Football-Manager-style ── */
+    .wm-profile {
+      position: relative;
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: 16px;
+      padding: 0;
+      overflow: hidden;
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+    }
+    .wm-profile__header {
+      padding: 22px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid hsl(var(--border));
+    }
+    .wm-profile__rating {
+      font-size: 64px; font-weight: 800; line-height: 1;
+      letter-spacing: -0.04em; font-variant-numeric: tabular-nums;
+    }
+    .wm-profile__ovr { font-size: 10px; font-weight: 700; letter-spacing: 0.18em; margin-top: 4px; }
+    .wm-profile__arch { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
+    .wm-profile__flavor { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+    .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--muted-foreground)); margin-top: 6px; text-transform: uppercase; }
+    .wm-profile__body {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr auto;
+      gap: 24px;
+      padding: 24px 28px;
+      align-items: start;
+    }
+    @media (max-width: 1000px) {
+      .wm-profile__body { grid-template-columns: 1fr 1fr; }
+      .wm-profile__spider { grid-column: 1 / -1; justify-self: center; }
+    }
+    .wm-profile__col-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground));
+      padding-bottom: 8px;
+      border-bottom: 1px solid hsl(var(--border));
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    .wm-profile__stat {
+      display: flex; align-items: baseline; justify-content: space-between;
+      padding: 5px 0;
+      font-size: 13px;
+      gap: 12px;
+    }
+    .wm-profile__stat-label { color: hsl(var(--muted-foreground)); }
+    .wm-profile__stat-value {
+      font-weight: 600; font-variant-numeric: tabular-nums;
+      letter-spacing: -0.01em;
+      padding: 1px 8px; border-radius: 4px;
+      white-space: nowrap;
+    }
+    .wm-profile__stat-value--elite   { background: hsl(142 60% 92%); color: hsl(142 60% 26%); }
+    .wm-profile__stat-value--mid     { background: hsl(45  90% 92%); color: hsl(35  70% 30%); }
+    .wm-profile__stat-value--low     { background: hsl(0   75% 95%); color: hsl(0   65% 40%); }
+    .wm-profile__stat-value--neutral { color: hsl(var(--foreground)); }
+
+    .wm-profile__traits {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      padding: 16px 28px 22px;
+      border-top: 1px solid hsl(var(--border));
+      background: hsl(var(--muted) / 0.4);
+    }
+    .wm-profile__traits-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground)); text-transform: uppercase;
+      align-self: center; margin-right: 4px;
+    }
+    .wm-profile__trait {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: white;
+      border: 1px solid hsl(var(--border));
+      font-size: 12px; font-weight: 500;
+      color: hsl(var(--foreground));
+    }
+    .wm-profile__spider { display: block; }
+
     /* ── Table-card variant: a .wm-card that hosts a flush table with
        no padding around the edge so the table header bg meets the
        card border cleanly. Used in dashboard + runs + metrics tables. */
@@ -211,7 +296,6 @@
         <a href="/insights" class="wm-nav-link text-sm {% if path.startswith('/insights') %}is-active{% endif %}">Insights</a>
         <a href="/metrics"  class="wm-nav-link text-sm {% if path.startswith('/metrics') %}is-active{% endif %}">Metrics</a>
         <a href="/runs"     class="wm-nav-link text-sm {% if path.startswith('/runs') %}is-active{% endif %}">Runs</a>
-        <a href="/card"     class="wm-nav-link text-sm {% if path.startswith('/card') %}is-active{% endif %}">Card</a>
       </div>
       <div class="text-xs" style="color: hsl(var(--muted-foreground));">local viewer</div>
     </div>

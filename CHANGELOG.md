@@ -6,10 +6,10 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
-### Added — profile card at `/card` (FIFA-style stats card)
-- New viewer page at `http://127.0.0.1:8979/card` renders a server-side
-  SVG trading card for how the user works with coding agents. Six axes
-  on a hexagonal spider chart:
+### Added — profile card at the top of `/metrics` (FM-style stats card)
+- New section at the top of `http://127.0.0.1:8979/metrics` renders a
+  Football-Manager-style profile card for how the user works with
+  coding agents. Six spider axes:
   - **Throughput** — prompts per active day
   - **Frugality** — inverse $/prompt
   - **Reliability** — 1 − tool error rate
@@ -18,17 +18,29 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
   - **Mastery** — curated skill bundles on disk
 - Each axis normalized 0–1 against tunable elite caps. Overall rating
   mapped to 40–99 (FIFA convention; even an empty corpus still gets a
-  Newcomer card at 40). Card tier color shifts gold / silver / bronze /
-  indigo with the rating.
+  Newcomer card at 40). Tier gradient on the header shifts gold /
+  silver / bronze / indigo with the rating.
+- Three-column attribute grid (Volume / Efficiency / Breadth) with each
+  stat color-coded green / yellow / red based on a normalized score —
+  the FM signature. Stats include throughput, sessions, active days,
+  tool calls, prompts/sess, reliability, frugality, cache hit, cost/sess,
+  total spend, curiosity, range, mastery, distinct agents, top agent.
+- Procedural "player traits" — short pill-shaped badges derived from
+  the stats: *Codex-first*, *Multi-agent*, *Speedrunner*, *Tool collector*,
+  *Multi-repo hopper*, *Reliability master*, *Curator*, *Cache wizard*,
+  *Heavy spender* / *Frugal*. Capped at five so the row doesn't wrap.
+- Hex spider chart with FM-style tinted concentric rings (red core →
+  orange → yellow → green elite) so the user's polygon visually shows
+  "distance from elite". Indigo polygon + white vertex dots on top.
+- Window selector (30 / 90 / 180 / 365 / 730 days) restricts the
+  corpus slice; mastery (bundle count) is always-current since curated
+  skills don't age out.
 - Archetype label picked from the dominant axis when one is clearly
   ahead: Speedrunner (throughput), Minimalist (frugality), Perfectionist
   (reliability), Explorer (curiosity), Polyglot (range), Curator
   (mastery). Otherwise Generalist; empty corpus → Newcomer.
-- Window selector (30 / 90 / 180 / 365 / 730 days) restricts the
-  corpus.db slice; mastery (bundle count) is always-current since
-  curated skills don't age out.
-- Card uses pure SVG, screenshots cleanly for sharing. Right-side panel
-  lists the six axes with one-line definitions + how the rating works.
+- Whole section is HTML+SVG, no JS. Right-click the section or the
+  spider SVG to save / screenshot for sharing.
 
 ### Fixed — stale Claude Code hook entries from older watchmen installs
 - `watchmen hooks install` is now self-healing: it scrubs any existing

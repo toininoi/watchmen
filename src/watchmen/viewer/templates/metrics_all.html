@@ -21,6 +21,69 @@
   </div>
 </div>
 
+<!-- ── Profile card (FM-style) ────────────────────────────────────── -->
+<section class="wm-profile mb-8">
+  <div class="wm-profile__header"
+       style="background: linear-gradient(135deg, {{ card_tier.from }} 0%, {{ card_tier.to }} 100%);">
+    <div class="flex items-center gap-6">
+      <div>
+        <div class="wm-profile__rating" style="color: {{ card_tier.text }};">{{ card_stats.rating }}</div>
+        <div class="wm-profile__ovr"    style="color: {{ card_tier.text }};">OVR</div>
+      </div>
+      <div>
+        <div class="wm-profile__arch">{{ card_stats.archetype[0] }}</div>
+        <div class="wm-profile__flavor">{{ card_stats.archetype[1] }}</div>
+        <div class="wm-profile__meta">
+          {{ "{:,}".format(card_stats.sessions) }} sessions
+          {% if card_stats.first_seen and card_stats.last_seen %}
+            · {{ card_stats.first_seen }} → {{ card_stats.last_seen }}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <form method="get" action="/metrics" class="text-xs text-gray-700">
+      {% if tracked_only %}<input type="hidden" name="tracked" value="1">{% endif %}
+      <label class="mr-2 opacity-80">Window:</label>
+      <select name="card_days" onchange="this.form.submit()"
+              class="text-xs border border-white/40 rounded px-2 py-1 bg-white/80">
+        {% for opt in [30, 90, 180, 365, 730] %}
+        <option value="{{ opt }}" {% if opt == card_days %}selected{% endif %}>{{ opt }} days</option>
+        {% endfor %}
+      </select>
+    </form>
+  </div>
+
+  <div class="wm-profile__body">
+    {% for group in card_stats.attribute_groups %}
+    <div>
+      <div class="wm-profile__col-label">{{ group.label }}</div>
+      {% for item in group.stats %}
+      <div class="wm-profile__stat">
+        <span class="wm-profile__stat-label">{{ item.label }}</span>
+        <span class="wm-profile__stat-value wm-profile__stat-value--{{ item.kind }}">{{ item.raw }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    <div class="wm-profile__spider">
+      {{ card_svg|safe }}
+    </div>
+  </div>
+
+  <div class="wm-profile__traits">
+    <span class="wm-profile__traits-label">Player traits</span>
+    {% for t in card_stats.traits %}
+      <span class="wm-profile__trait">{{ t }}</span>
+    {% endfor %}
+    {% if card_stats.top_tool %}
+      <span class="wm-profile__trait" style="margin-left: auto;">
+        Top tool: <strong class="ml-1">{{ card_stats.top_tool[0] }}</strong>
+        <span class="ml-1 opacity-60">({{ "{:,}".format(card_stats.top_tool[1]) }})</span>
+      </span>
+    {% endif %}
+  </div>
+</section>
+
 <style>
   /* `.stat-card` baseline lives in base.html now. Only daily-table styles
      stay local since they're unique to this page. */

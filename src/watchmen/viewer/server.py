@@ -276,22 +276,6 @@ def runs_page(request: Request):
     })
 
 
-@app.get("/card", response_class=HTMLResponse)
-def card_page(request: Request, days: int = 90):
-    """FIFA-style profile card with a 6-axis spider chart + rating +
-    archetype. Pure SVG, screenshottable, server-rendered from
-    corpus.db + bundles. Window defaults to 90 days; override with
-    ?days=N for a longer/shorter slice."""
-    from watchmen import metrics as _metrics
-    stats = _metrics.compute_card_stats(days=days)
-    svg = _metrics.card_svg(stats)
-    return TEMPLATES.TemplateResponse(request, "card.html", {
-        "stats": stats,
-        "card_svg": svg,
-        "days": days,
-    })
-
-
 @app.get("/insights", response_class=HTMLResponse)
 def insights_page(request: Request):
     """HTML version of `watchmen insights`. Same static aggregation +
@@ -479,6 +463,16 @@ def metrics_all(request: Request, tracked: int = 0):
     streak = _metrics.streak_stats(project_key=None, weeks=26, tracked_only=tracked_only)
     adapters = _metrics.adapter_breakdown_all(days=30, tracked_only=tracked_only)
 
+    # Profile card lives at the top of /metrics. Tracked-only mode is a
+    # numeric-aggregation filter; the card uses the full corpus (the
+    # window comes from ?card_days=N, default 90 to match the user's
+    # mental model of "the last few months").
+    card_days = int(request.query_params.get("card_days", "90") or "90")
+    card_days = max(7, min(card_days, 730))
+    card_stats = _metrics.compute_card_stats(days=card_days)
+    card_svg = _metrics.card_svg(card_stats)
+    card_tier = _metrics.card_tier_colors(card_stats["rating"])
+
     return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
         "rows": rows,
         "last7": last7,
@@ -492,6 +486,10 @@ def metrics_all(request: Request, tracked: int = 0):
         "tool_usage": tool_usage,
         "streak": streak,
         "adapters": adapters,
+        "card_stats": card_stats,
+        "card_svg": card_svg,
+        "card_tier": card_tier,
+        "card_days": card_days,
     })
 
 
