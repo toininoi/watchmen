@@ -207,50 +207,76 @@
     .wm-profile__arch { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
     .wm-profile__flavor { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
     .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--muted-foreground)); margin-top: 6px; text-transform: uppercase; }
-    /* Hero row: spider chart (pinned ~380px) + 3-column stat grid.
-       Spider sized so it visually balances the stat columns instead
-       of leaving a void below the (short) stat rows. */
+    /* Hero row: compact spider chart (~320px) on the left, 3-column
+       stat grid expanding into the freed space on the right. */
     .wm-profile__hero {
       display: grid;
-      grid-template-columns: 380px 1fr;
-      gap: 28px;
+      grid-template-columns: 320px 1fr;
+      gap: 32px;
       padding: 24px 28px 12px;
       align-items: center;
     }
-    .wm-profile__spider { width: 100%; max-width: 380px; }
-    .wm-profile__spider svg { display: block; width: 100%; height: auto; }
-    .wm-profile__spider polygon[data-user="1"] {
-      animation: wm-spider-pulse 4s ease-in-out infinite;
-      transform-origin: center;
+    .wm-profile__spider {
+      width: 100%; max-width: 320px;
+      cursor: pointer;
     }
-    @keyframes wm-spider-pulse {
-      0%, 100% { filter: drop-shadow(0 0 0 hsl(var(--accent) / 0)); }
-      50%      { filter: drop-shadow(0 0 6px hsl(var(--accent) / 0.45)); }
+    .wm-profile__spider svg { display: block; width: 100%; height: auto; }
+
+    /* All the eye-candy lives on the spider now — no hover/lift on the
+       stat pills or visual tiles, since those should read as
+       informational rather than interactive. */
+    .wm-profile__spider polygon[data-user="1"] {
+      transform-origin: center;
+      animation: wm-spider-load 900ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
+      transition: filter 220ms ease, fill-opacity 220ms ease;
+    }
+    .wm-profile__spider circle {
+      transform-origin: center;
+      transform-box: fill-box;  /* per-circle, so each dot scales around its own center */
+      transition: r 220ms ease, stroke-width 220ms ease;
+      animation: wm-spider-dot-load 900ms cubic-bezier(0.34, 1.4, 0.64, 1) both 200ms;
+    }
+    @keyframes wm-spider-load {
+      0%   { transform: scale(0.45); opacity: 0; }
+      55%  { transform: scale(1.04); opacity: 1; }
+      100% { transform: scale(1.0);  opacity: 1; }
+    }
+    @keyframes wm-spider-dot-load {
+      0%   { opacity: 0; }
+      60%  { opacity: 0; }
+      100% { opacity: 1; }
+    }
+    /* Hover the spider container — polygon brightens + glows, dots
+       enlarge. Pulled into a single hover root so the whole chart
+       responds together. */
+    .wm-profile__spider:hover polygon[data-user="1"] {
+      fill-opacity: 0.9;
+      filter: drop-shadow(0 0 10px hsl(var(--accent) / 0.55));
+    }
+    .wm-profile__spider:hover circle {
+      r: 5;
+      stroke-width: 2.5;
     }
     @media (prefers-reduced-motion: reduce) {
-      .wm-profile__spider polygon[data-user="1"] { animation: none; }
+      .wm-profile__spider polygon[data-user="1"],
+      .wm-profile__spider circle { animation: none; }
     }
+
     .wm-profile__grid {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
-      gap: 20px;
+      gap: 24px;
     }
     @media (max-width: 1100px) {
       .wm-profile__hero { grid-template-columns: 1fr; }
-      .wm-profile__spider { justify-self: center; max-width: 320px; }
+      .wm-profile__spider { justify-self: center; max-width: 280px; }
     }
     @media (max-width: 720px) {
       .wm-profile__grid { grid-template-columns: 1fr 1fr; }
     }
 
-    /* Hover lift for stat pills — subtle scale + accent border to reward
-       reading. Skipped when reduce-motion is set. */
-    .wm-profile__stat-value {
-      transition: transform 140ms ease, background-color 140ms ease, color 140ms ease;
-    }
-    .wm-profile__stat-value:hover { transform: scale(1.05); }
-
-    /* Mini-visualization row: agent donut + top tools bars + activity sparks. */
+    /* Mini-visualization row: agent donut + top tools bars + activity sparks.
+       Static — no hover lift, the spider is the only interactive showpiece. */
     .wm-profile__visuals {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
@@ -265,12 +291,6 @@
       border: 1px solid hsl(var(--border));
       border-radius: 12px;
       padding: 14px 16px;
-      transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
-    }
-    .wm-profile__visual:hover {
-      border-color: hsl(var(--accent) / 0.45);
-      box-shadow: 0 4px 12px hsl(var(--accent) / 0.08);
-      transform: translateY(-1px);
     }
     .wm-profile__visual-label {
       font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
@@ -298,6 +318,8 @@
       letter-spacing: -0.01em;
       padding: 1px 8px; border-radius: 4px;
       white-space: nowrap;
+      /* Intentionally no hover transform — the spider is the only
+         element on the page meant to respond to interaction. */
     }
     .wm-profile__stat-value--elite   { background: hsl(142 60% 92%); color: hsl(142 60% 26%); }
     .wm-profile__stat-value--mid     { background: hsl(45  90% 92%); color: hsl(35  70% 30%); }
@@ -323,13 +345,6 @@
       border: 1px solid hsl(var(--border));
       font-size: 12px; font-weight: 500;
       color: hsl(var(--foreground));
-      transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease;
-      cursor: default;
-    }
-    .wm-profile__trait:hover {
-      transform: translateY(-1px);
-      border-color: hsl(var(--accent) / 0.6);
-      background: hsl(var(--accent-soft));
     }
     .wm-profile__spider { display: block; }
 
