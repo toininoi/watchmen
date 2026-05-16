@@ -1,8 +1,11 @@
 """Hook installer — wires watchmen_observe.sh into ~/.claude/settings.json so every
 Claude Code session pipes its hook events to the local observer at 127.0.0.1:8765.
 
-Backs up the existing settings.json before mutating it. Idempotent — re-running just
-ensures the watchmen entries are present without duplicating them.
+Backs up the existing settings.json before mutating it. Idempotent + self-healing:
+re-running install scrubs any existing watchmen entries (matched by script
+filename so a reorg or moved checkout doesn't leave orphaned entries that fail
+with "No such file or directory" on every event) and then writes the canonical
+set fresh.
 """
 
 import json
@@ -33,14 +36,31 @@ WATCHMEN_HOOKS: dict[str, list[tuple[str, str | None]]] = {
     "PreCompact":       [("observe", None)],
 }
 
-# Paths watchmen used to install but no longer ships. install/uninstall scrub
-# any stale entries here from the user's settings.json so a pull + reinstall
-# cleanly removes deprecated hooks without manual JSON editing.
-# Each entry is the absolute path the older release used to wire in.
-_LEGACY_HOOK_PATHS: set[str] = {
-    # Removed in 0.2.0 — macOS notification briefs.
-    str((ROOT / "hooks" / "watchmen_brief.sh").resolve()),
+# Every basename watchmen has ever shipped or shipped-and-retired. Used as a
+# whole-set filename match against settings.json entries so install / uninstall
+# can clean up stale paths from older installs (e.g. before the src-layout
+# move, when HOOK_SCRIPT resolved to ~/dev/watchmen/hooks/watchmen_observe.sh
+# rather than ~/dev/watchmen/src/watchmen/hooks/watchmen_observe.sh).
+# Add new script names here; mark retired ones with a comment so the list
+# doubles as a history of every hook surface we've owned.
+WATCHMEN_SCRIPT_NAMES: set[str] = {
+    "watchmen_observe.sh",
+    "watchmen_brief.sh",  # retired in 0.2.0
 }
+
+
+def _is_watchmen_hook_cmd(cmd: str) -> bool:
+    """True if `cmd` invokes one of our hook scripts, regardless of where it
+    lives on disk. Compares basenames so an entry from an older watchmen
+    install (different absolute path) is still recognized — that's what
+    lets `watchmen hooks install` self-heal stale entries instead of
+    leaving them to fail with "No such file or directory" on every event."""
+    if not cmd:
+        return False
+    # Hook commands in settings.json are usually the absolute path alone but
+    # tolerate users (or older releases) that prepended `sh `, `bash `, etc.
+    first_token = cmd.strip().split()[-1] if cmd.strip().split() else ""
+    return Path(first_token).name in WATCHMEN_SCRIPT_NAMES
 
 
 def _load_settings() -> dict:
@@ -61,26 +81,31 @@ def _backup() -> Path:
     return backup
 
 
-def _scrub_legacy_hooks(hooks: dict) -> int:
-    """Remove entries pointing at scripts watchmen no longer ships. Mutates
-    `hooks` in place. Returns the number of entries removed. Lets a
-    routine `watchmen hooks install` clean up after a retired script
-    (e.g., watchmen_brief.sh in 0.2.0) without the user needing to know."""
+def _scrub_watchmen_hooks(hooks: dict) -> int:
+    """Remove every entry whose command invokes one of our hook scripts,
+    matched by basename (`watchmen_observe.sh`, `watchmen_brief.sh`, …).
+
+    Mutates `hooks` in place. Returns the number of inner hook entries
+    removed (not the count of event keys touched).
+
+    Matching by basename — not full path — is what lets a routine
+    `watchmen hooks install` self-heal: an entry written by an older
+    watchmen release with a different absolute path (pre-reorg, moved
+    checkout, different uv tool venv) is still recognized and cleaned.
+    """
     removed = 0
-    for event, entries in list(hooks.items()):
+    for event in list(hooks.keys()):
+        entries = hooks[event]
         new_entries = []
         for e in entries:
-            inner = [
-                h for h in e.get("hooks", [])
-                if h.get("command") not in _LEGACY_HOOK_PATHS
-            ]
-            if len(inner) != len(e.get("hooks", [])):
-                removed += (len(e.get("hooks", [])) - len(inner))
-            if inner:
+            inner = e.get("hooks", []) if isinstance(e, dict) else []
+            kept = [h for h in inner if not _is_watchmen_hook_cmd((h or {}).get("command", ""))]
+            removed += len(inner) - len(kept)
+            if kept:
                 new_e = dict(e)
-                new_e["hooks"] = inner
+                new_e["hooks"] = kept
                 new_entries.append(new_e)
-            # else: drop the entry entirely if its only command was legacy
+            # else: the whole entry was watchmen-only — drop it
         if new_entries:
             hooks[event] = new_entries
         else:
@@ -103,23 +128,20 @@ def install() -> int:
     if backup_path.exists():
         print(f"backed up existing settings → {backup_path}")
 
-    # Scrub stale entries for hooks we used to ship but no longer do. Lets a
-    # pull + `watchmen hooks install` cleanly retire deprecated scripts.
-    legacy_removed = _scrub_legacy_hooks(hooks)
-    if legacy_removed:
-        print(f"removed {legacy_removed} stale hook entr(ies) for retired scripts")
+    # Scrub any existing watchmen entries first (matched by script basename,
+    # not absolute path) so install is both idempotent AND self-healing:
+    # stale paths from older releases get cleaned, retired scripts get
+    # removed, and the canonical set goes in fresh.
+    scrubbed = _scrub_watchmen_hooks(hooks)
+    if scrubbed:
+        print(f"cleaned {scrubbed} existing watchmen hook entr(ies) "
+              f"(stale paths / retired scripts) before reinstall")
 
     added = 0
     for event, scripts in WATCHMEN_HOOKS.items():
         existing = hooks.setdefault(event, [])
         for script_key, matcher in scripts:
             cmd_str = str(WATCHMEN_SCRIPTS[script_key])
-            already = any(
-                any(h.get("command") == cmd_str for h in e.get("hooks", []))
-                for e in existing
-            )
-            if already:
-                continue
             entry: dict = {"hooks": [{"type": "command", "command": cmd_str}]}
             if matcher is not None:
                 entry["matcher"] = matcher
@@ -127,7 +149,7 @@ def install() -> int:
             added += 1
 
     _save_settings(settings)
-    print(f"installed watchmen hooks: {added} new entries across {len(WATCHMEN_HOOKS)} events")
+    print(f"installed watchmen hooks: {added} entries across {len(WATCHMEN_HOOKS)} events")
     for key, p in WATCHMEN_SCRIPTS.items():
         print(f"  - {key}: {p}")
     print("Note: start the local hooks server with `uv run python -m watchmen.server` in a terminal so events are captured.")
@@ -148,27 +170,7 @@ def uninstall() -> int:
     backup_path = _backup()
     print(f"backed up existing settings → {backup_path}")
 
-    # Scrub both current scripts AND retired-but-still-referenced ones, so
-    # uninstall fully cleans up after older releases.
-    watchmen_cmds = (
-        {str(p) for p in WATCHMEN_SCRIPTS.values()} | _LEGACY_HOOK_PATHS
-    )
-    removed = 0
-    for event, entries in list(hooks.items()):
-        new_entries = []
-        for e in entries:
-            inner = [h for h in e.get("hooks", []) if h.get("command") not in watchmen_cmds]
-            if inner:
-                new_e = dict(e)
-                new_e["hooks"] = inner
-                new_entries.append(new_e)
-            else:
-                removed += 1
-        if new_entries:
-            hooks[event] = new_entries
-        else:
-            del hooks[event]
-
+    removed = _scrub_watchmen_hooks(hooks)
     if not hooks:
         settings.pop("hooks", None)
     else:

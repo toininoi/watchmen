@@ -6,6 +6,23 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Fixed — stale Claude Code hook entries from older watchmen installs
+- `watchmen hooks install` is now self-healing: it scrubs any existing
+  watchmen entry from `~/.claude/settings.json` (matched by script
+  basename — `watchmen_observe.sh`, `watchmen_brief.sh`) before writing
+  the canonical set fresh. Previously, both install and uninstall
+  matched by exact absolute path, so when the package layout moved in
+  0.1.x → 0.5.x (top-level `hooks/` → `src/watchmen/hooks/`) the old
+  entries became invisible to the CLI and silently failed with "No
+  such file or directory" on every PreToolUse / PostToolUse / etc.
+- `watchmen hooks uninstall` shares the same basename-matching path
+  now, so it fully detaches every watchmen-shipped hook regardless of
+  which absolute path it was written with.
+- Same fix retires the `_scrub_legacy_hooks` + `_LEGACY_HOOK_PATHS`
+  surface; both got folded into the new `_scrub_watchmen_hooks` helper
+  driven by `WATCHMEN_SCRIPT_NAMES` (every basename watchmen has ever
+  shipped, including retired ones).
+
 ### Changed — agent-agnostic framing
 - README, CLI help text, viewer copy, onboard wizard prompts, and curator LLM
   prompts no longer single out Claude Code where the behavior is multi-adapter.
