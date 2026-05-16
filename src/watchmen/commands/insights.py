@@ -378,9 +378,14 @@ def _insights_cache_dir() -> Path:
 
 
 def _latest_digest_path() -> Path | None:
-    """Newest *.md file in the insights cache, or None if empty."""
+    """Newest timestamped digest in the insights cache, or None if empty.
+
+    Filters by `[0-9]*.md` so stable-named files (e.g. agent_comparison.md)
+    that share the cache directory aren't mistaken for digest runs — `sorted(...,
+    reverse=True)` on `*.md` would bubble alphabetical names above date-
+    prefixed ones and silently return the wrong file."""
     cache = _insights_cache_dir()
-    digests = sorted(cache.glob("*.md"), reverse=True)
+    digests = sorted(cache.glob("[0-9]*.md"), reverse=True)
     return digests[0] if digests else None
 
 
