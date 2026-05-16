@@ -338,6 +338,23 @@ def cmd_insights(args) -> int:
         console.print(f"\n[bold]◉ Deep digest[/]  [dim]({model})[/]")
         console.print(Markdown(digest))
         console.print(f"\n  [dim]saved → {saved}[/]")
+
+        # Cross-agent comparison — separate LLM call, cached under a stable
+        # filename so the viewer can find it without scanning timestamped
+        # digest files. Skipped automatically when <2 adapters have enough
+        # activity to compare (the LLM helper returns None there).
+        from watchmen import metrics as _metrics
+        with console.status(
+            "[dim]synthesizing cross-agent comparison · ~10-20s …[/]",
+            spinner="dots",
+        ):
+            facts = _metrics.agent_comparison_facts(days=90)
+            narrative = _cross_agent_narrative(facts, model)
+        if narrative:
+            cmp_path = _save_cross_agent_narrative(narrative, model)
+            console.print(f"\n[bold]◉ How you use each agent[/]  [dim]({model})[/]")
+            console.print(Markdown(narrative))
+            console.print(f"\n  [dim]saved → {cmp_path}[/]")
     _print_watchmen_tagline(console)
     console.print()
     return 0
@@ -651,6 +668,124 @@ def _cross_repo_synthesis(
         f"# Per-repo deep synthesis\n{summaries}"
     )
     return _one_shot_llm(system, user, model, max_tokens=3000)
+
+
+def _cross_agent_narrative(facts: dict, model: str) -> str | None:
+    """LLM-synthesized prose comparing how the user works across coding
+    agents. Fed the structured per-adapter facts from
+    `metrics.agent_comparison_facts`; returns markdown with one paragraph
+    per adapter followed by a "what each agent is best at" closer.
+
+    Returns None when there's nothing useful to compare — fewer than two
+    adapters with meaningful activity (≥10 prompts each) means the
+    narrative would just describe one tool in isolation, which the
+    profile card already does."""
+    adapters = facts.get("adapters") or []
+    eligible = [a for a in adapters if (a.get("prompts") or 0) >= 10]
+    if len(eligible) < 2:
+        return None
+
+    # Compact JSON-ish summary the LLM can scan in one breath. Keep numbers
+    # concrete (not "Codex is cheaper" — give the actual $/prompt) so the
+    # model is grounded in the facts rather than free-associating.
+    blocks = []
+    for a in eligible:
+        top_tools = ", ".join(f"{n} ({c})" for n, c in (a.get("top_tools") or [])[:5])
+        top_projects = ", ".join(
+            _project_label(p) + f" ({c})" for p, c in (a.get("top_projects") or [])[:3]
+        )
+        blocks.append(
+            f"## {a['label']} ({a['agent']})\n"
+            f"- sessions: {a['sessions']}, active days: {a['active_days']}, projects: {a['projects']}\n"
+            f"- prompts: {a['prompts']}, tool calls: {a['tool_calls']}, "
+            f"tool error rate: {a['tool_error_rate']:.2%}\n"
+            f"- $/prompt: ${a['cost_per_prompt']:.4f}, $/session: ${a['cost_per_session']:.2f}, "
+            f"total cost: ${a['cost_usd']:.2f}\n"
+            f"- prompts/session: {a['prompts_per_session']:.1f}, "
+            f"tool calls/session: {a['tool_calls_per_session']:.1f}, "
+            f"avg session duration: {a['avg_session_seconds']/60:.0f}min, "
+            f"cache hit rate: {a['cache_hit_rate']:.0%}\n"
+            f"- dominant model: {a.get('dominant_model') or '(unknown)'}\n"
+            f"- top tools: {top_tools or '(none)'}\n"
+            f"- most-used projects: {top_projects or '(none)'}\n"
+            f"- skill suggestions fired (plugin): {a.get('suggestions_fired', 0)}\n"
+        )
+
+    system = (
+        "You are a senior engineer comparing how a single developer uses two "
+        "or more coding-agent CLIs (e.g. Claude Code, OpenAI Codex, pi.dev) "
+        "based on N days of session data. The user wants to understand which "
+        "agent they reach for which kind of work, what each is best at in "
+        "their hands, and where one is being under- or over-used.\n\n"
+        "Produce a markdown section titled '### How you use each agent' with "
+        "exactly three subsections:\n\n"
+        "**Per-agent character** — one short paragraph per agent (~3-4 sentences). "
+        "Cite the specific numbers: $/prompt, prompts-per-session, top tools, "
+        "dominant project. Infer character from the mix: e.g. 'shell-heavy + "
+        "short sessions = quick targeted execution', 'edit/read/bash-balanced + "
+        "long sessions = sustained build work'. No generic AI-coding platitudes.\n\n"
+        "**Where each one wins** — 2-4 bullets identifying which agent the "
+        "data shows is best suited for which kind of task. Ground each "
+        "claim in the comparison: cite a specific cost or tool-mix gap. If "
+        "the data doesn't support a strong claim, say so explicitly.\n\n"
+        "**Re-balancing suggestion** — one or two bullets. Concrete: a kind "
+        "of task the user is doing in one agent that the other's data "
+        "suggests would be cheaper, faster, or less error-prone. Skip this "
+        "section entirely if the comparison is too even to suggest a move.\n\n"
+        "Total 250-400 words. Every claim must reference at least one "
+        "number from the facts. Never invent metrics that aren't in the data."
+    )
+    user_msg = (
+        f"# Cross-agent comparison facts — last {facts.get('window_days', 90)} days "
+        f"(since {facts.get('since', '?')})\n\n" + "\n".join(blocks)
+    )
+    return _one_shot_llm(system, user_msg, model, max_tokens=900)
+
+
+def _project_label(project_dir: str) -> str:
+    """Translate an absolute project_dir to its tracked label (e.g.
+    /Users/foo/dev/kai → "kai"). Falls back to the last path segment when
+    the project isn't tracked, so the narrative never prints absolute
+    paths that don't generalize across machines."""
+    try:
+        from watchmen.util import adapter_breakdown  # noqa: F401 — only here to confirm import works
+        idx = Path.home() / ".watchmen" / "projects.json"
+        if idx.exists():
+            projects = json.loads(idx.read_text())
+            for p in projects:
+                if p.get("source_repo") and Path(p["source_repo"]).resolve() == Path(project_dir).resolve():
+                    return p.get("project_key") or Path(project_dir).name
+    except Exception:
+        pass
+    return Path(project_dir).name
+
+
+def _save_cross_agent_narrative(content: str, model: str) -> Path:
+    """Persist the cross-agent narrative under a stable filename so the
+    viewer can find it without globbing. Overwritten on each digest run.
+    Includes YAML frontmatter for generated_at + model so the viewer can
+    show 'last refreshed N days ago'."""
+    path = _insights_cache_dir() / "agent_comparison.md"
+    ts = datetime.now()
+    body = (
+        "---\n"
+        f"generated_at: {ts.isoformat(timespec='seconds')}\n"
+        f"model: {model}\n"
+        "---\n\n"
+        + content
+    )
+    path.write_text(body)
+    return path
+
+
+def _latest_cross_agent_narrative() -> tuple[dict, str] | None:
+    """Read the saved cross-agent narrative, returning (frontmatter, body)
+    or None if not yet generated. Used by the viewer's /metrics + /insights
+    routes to embed the narrative without depending on the digest pipeline."""
+    path = _insights_cache_dir() / "agent_comparison.md"
+    if not path.exists():
+        return None
+    return _read_digest_metadata(path)
 
 
 def _one_shot_llm(

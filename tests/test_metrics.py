@@ -387,3 +387,200 @@ def test_agent_donut_legend_orders_by_share_and_assigns_colors(fresh_metrics):
     assert by_slug["claude_code"] == "#3b82f6"  # blue-500
     assert by_slug["codex"] == "#06b6d4"        # cyan-500
     assert by_slug["pi"] == "#14b8a6"           # teal-500
+
+
+# ─── agent_comparison_facts ──────────────────────────────────────────────
+
+
+def _seed_comparison_corpus(
+    corpus_path: Path,
+    sessions: list[dict],
+    tool_calls: list[dict] | None = None,
+) -> None:
+    """Schema variant for cross-agent comparison tests: adds the columns
+    `agent_comparison_facts` reads beyond `_seed_corpus_with_tools` —
+    duration_seconds and model_dominant — plus the tool_calls table."""
+    schema = """
+    CREATE TABLE sessions (
+        session_id TEXT PRIMARY KEY,
+        project_dir TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        duration_seconds REAL,
+        user_prompt_count INTEGER NOT NULL DEFAULT 0,
+        tool_use_count INTEGER NOT NULL DEFAULT 0,
+        tool_error_count INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        is_subagent INTEGER NOT NULL DEFAULT 0,
+        agent TEXT NOT NULL DEFAULT 'claude_code',
+        model_dominant TEXT
+    );
+    CREATE TABLE tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT,
+        timestamp TEXT,
+        tool_name TEXT,
+        is_error INTEGER NOT NULL DEFAULT 0
+    );
+    """
+    with sqlite3.connect(str(corpus_path)) as conn:
+        conn.executescript(schema)
+        cols = (
+            "session_id, project_dir, started_at, duration_seconds, "
+            "user_prompt_count, tool_use_count, tool_error_count, "
+            "input_tokens, cache_creation_tokens, cache_read_tokens, "
+            "output_tokens, cost_usd, is_subagent, agent, model_dominant"
+        )
+        for s in sessions:
+            row = {
+                "duration_seconds": None,
+                "tool_use_count": 0,
+                "model_dominant": None,
+                **s,
+            }
+            placeholders = ", ".join(f":{c.strip()}" for c in cols.split(","))
+            conn.execute(
+                f"INSERT INTO sessions ({cols}) VALUES ({placeholders})",
+                row,
+            )
+        for t in tool_calls or []:
+            conn.execute(
+                "INSERT INTO tool_calls (session_id, tool_name) VALUES "
+                "(:session_id, :tool_name)",
+                t,
+            )
+
+
+def test_agent_comparison_facts_empty_when_no_corpus(fresh_metrics):
+    """Missing corpus.db → empty shape, not an exception. The viewer
+    template guards on `cmp_facts.adapters|length >= 2` so an empty
+    dict here naturally hides the panel."""
+    out = fresh_metrics.agent_comparison_facts(days=30)
+    assert out["window_days"] == 30
+    assert out["adapters"] == []
+
+
+def test_agent_comparison_facts_derives_ratios_and_top_lists(fresh_metrics, tmp_path):
+    """End-to-end: two adapters in window, each with sessions, tool
+    calls, costs. Verify every derived ratio and that top_tools /
+    top_projects are sorted desc within each adapter."""
+    started_recent = (datetime.now() - timedelta(days=5)).isoformat()
+    sessions = [
+        # Claude Code: 2 sessions, 10 prompts, 100 tool calls, $5.
+        {"session_id": "cc1", "project_dir": "/home/user/kai", "started_at": started_recent,
+         "duration_seconds": 600.0, "user_prompt_count": 6, "tool_use_count": 70,
+         "tool_error_count": 2, "input_tokens": 1000, "cache_creation_tokens": 0,
+         "cache_read_tokens": 9000, "output_tokens": 500, "cost_usd": 3.0,
+         "is_subagent": 0, "agent": "claude_code", "model_dominant": "claude-opus-4-7"},
+        {"session_id": "cc2", "project_dir": "/home/user/kai", "started_at": started_recent,
+         "duration_seconds": 1200.0, "user_prompt_count": 4, "tool_use_count": 30,
+         "tool_error_count": 1, "input_tokens": 500, "cache_creation_tokens": 0,
+         "cache_read_tokens": 4500, "output_tokens": 300, "cost_usd": 2.0,
+         "is_subagent": 0, "agent": "claude_code", "model_dominant": "claude-opus-4-7"},
+        # Codex: 1 session, 20 prompts, 50 tool calls, $0.40 — cheaper but more prompts.
+        {"session_id": "cx1", "project_dir": "/home/user/other-repo", "started_at": started_recent,
+         "duration_seconds": 1800.0, "user_prompt_count": 20, "tool_use_count": 50,
+         "tool_error_count": 0, "input_tokens": 8000, "cache_creation_tokens": 0,
+         "cache_read_tokens": 12000, "output_tokens": 2000, "cost_usd": 0.40,
+         "is_subagent": 0, "agent": "codex", "model_dominant": "gpt-5.5"},
+        # Subagent — must be excluded from the rollup.
+        {"session_id": "sub1", "project_dir": "/home/user/kai", "started_at": started_recent,
+         "duration_seconds": 60.0, "user_prompt_count": 99, "tool_use_count": 9999,
+         "tool_error_count": 0, "input_tokens": 0, "cache_creation_tokens": 0,
+         "cache_read_tokens": 0, "output_tokens": 0, "cost_usd": 99.0,
+         "is_subagent": 1, "agent": "claude_code", "model_dominant": "claude-opus-4-7"},
+    ]
+    tool_calls = (
+        [{"session_id": "cc1", "tool_name": "Bash"}] * 40 +
+        [{"session_id": "cc1", "tool_name": "Read"}] * 20 +
+        [{"session_id": "cc2", "tool_name": "Edit"}] * 25 +
+        [{"session_id": "cx1", "tool_name": "exec_command"}] * 40 +
+        [{"session_id": "cx1", "tool_name": "apply_patch"}] * 10
+    )
+    _seed_comparison_corpus(tmp_path / "corpus.db", sessions, tool_calls)
+
+    out = fresh_metrics.agent_comparison_facts(days=30)
+    adapters = {a["agent"]: a for a in out["adapters"]}
+    assert set(adapters.keys()) == {"claude_code", "codex"}, \
+        "subagent session leaked into the rollup or an adapter went missing"
+    cc = adapters["claude_code"]
+    cx = adapters["codex"]
+    # Sessions / prompts / costs aggregate across both rows for cc.
+    assert cc["sessions"] == 2
+    assert cc["prompts"] == 10
+    assert cc["tool_calls"] == 100
+    assert cc["cost_usd"] == pytest.approx(5.0)
+    # Derived: $/prompt = 5 / 10 = 0.5; tool_error_rate = 3 / 100 = 0.03;
+    # cache hit = 13500 / (1500 + 13500) = 0.9.
+    assert cc["cost_per_prompt"] == pytest.approx(0.5)
+    assert cc["prompts_per_session"] == pytest.approx(5.0)
+    assert cc["tool_calls_per_session"] == pytest.approx(50.0)
+    assert cc["tool_error_rate"] == pytest.approx(0.03)
+    assert cc["cache_hit_rate"] == pytest.approx(0.9)
+    assert cc["dominant_model"] == "claude-opus-4-7"
+    # Top tools ordered by count desc: Bash (40) > Edit (25) > Read (20).
+    assert [t for t, _ in cc["top_tools"][:3]] == ["Bash", "Edit", "Read"]
+    # Codex side: 20 prompts, 50 tool calls, cheap.
+    assert cx["sessions"] == 1
+    assert cx["cost_per_prompt"] == pytest.approx(0.40 / 20)
+    assert cx["dominant_model"] == "gpt-5.5"
+    assert cx["top_tools"][0] == ("exec_command", 40)
+
+
+def test_agent_comparison_facts_window_excludes_old(fresh_metrics, tmp_path):
+    """Sessions outside the requested window must drop out of the rollup
+    — the LLM narrative is window-scoped and shouldn't be influenced by
+    sessions older than the user asked for."""
+    recent = (datetime.now() - timedelta(days=10)).isoformat()
+    ancient = (datetime.now() - timedelta(days=200)).isoformat()
+    _seed_comparison_corpus(tmp_path / "corpus.db", [
+        {"session_id": "r1", "project_dir": "/p", "started_at": recent,
+         "duration_seconds": 60.0, "user_prompt_count": 5, "tool_use_count": 1,
+         "tool_error_count": 0, "input_tokens": 0, "cache_creation_tokens": 0,
+         "cache_read_tokens": 0, "output_tokens": 0, "cost_usd": 1.0,
+         "is_subagent": 0, "agent": "claude_code", "model_dominant": None},
+        {"session_id": "a1", "project_dir": "/p", "started_at": ancient,
+         "duration_seconds": 60.0, "user_prompt_count": 999, "tool_use_count": 0,
+         "tool_error_count": 0, "input_tokens": 0, "cache_creation_tokens": 0,
+         "cache_read_tokens": 0, "output_tokens": 0, "cost_usd": 999.0,
+         "is_subagent": 0, "agent": "claude_code", "model_dominant": None},
+    ])
+    out = fresh_metrics.agent_comparison_facts(days=30)
+    assert len(out["adapters"]) == 1
+    assert out["adapters"][0]["prompts"] == 5
+    assert out["adapters"][0]["cost_usd"] == pytest.approx(1.0)
+
+
+def test_cross_agent_narrative_skips_when_lt_two_active_adapters():
+    """The LLM narrative is None when fewer than 2 adapters have at
+    least 10 prompts each — comparing one agent in isolation is what
+    the profile card already does, so the narrative would be redundant
+    AND wastes an LLM call."""
+    from watchmen.commands.insights import _cross_agent_narrative
+    # Single adapter — skip.
+    facts_one = {"window_days": 90, "adapters": [
+        {"agent": "claude_code", "label": "Claude Code", "prompts": 500,
+         "sessions": 10, "active_days": 5, "projects": 2, "tool_calls": 100,
+         "tool_errors": 1, "cost_usd": 10.0, "cost_per_prompt": 0.02,
+         "cost_per_session": 1.0, "prompts_per_session": 50.0,
+         "tool_calls_per_session": 10.0, "tool_error_rate": 0.01,
+         "cache_hit_rate": 0.5, "avg_session_seconds": 600.0,
+         "top_tools": [("Bash", 50)], "top_projects": [("/p", 10)],
+         "dominant_model": "claude-opus-4-7", "suggestions_fired": 0},
+    ]}
+    assert _cross_agent_narrative(facts_one, model="ignored") is None
+    # Two adapters but one has <10 prompts — skip (not enough to compare).
+    facts_thin = {"window_days": 90, "adapters": facts_one["adapters"] + [
+        {"agent": "codex", "label": "Codex", "prompts": 3,
+         "sessions": 1, "active_days": 1, "projects": 1, "tool_calls": 5,
+         "tool_errors": 0, "cost_usd": 0.05, "cost_per_prompt": 0.017,
+         "cost_per_session": 0.05, "prompts_per_session": 3.0,
+         "tool_calls_per_session": 5.0, "tool_error_rate": 0.0,
+         "cache_hit_rate": 0.0, "avg_session_seconds": 60.0,
+         "top_tools": [("exec_command", 5)], "top_projects": [("/q", 1)],
+         "dominant_model": "gpt-5.5", "suggestions_fired": 0},
+    ]}
+    assert _cross_agent_narrative(facts_thin, model="ignored") is None

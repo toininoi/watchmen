@@ -1697,6 +1697,15 @@ def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
     assert "Aggregated metrics" in html
     # The headline tiles (sessions/prompts/tokens/cost) live here, not on /insights.
     assert "Sessions / 7d" in html and "Cost / 7d" in html
+    # Cross-agent comparison panel — guarded by `cmp_facts.adapters >= 2`.
+    # Only assert presence/absence consistently: if there ARE 2+ adapters
+    # in the corpus, the section title must be there; if not, neither.
+    if "How you use each agent" in html:
+        # When the panel renders, its CSS class must be present and at
+        # least 2 per-adapter cards must be inside the grid.
+        assert "wm-cmp__grid" in html
+        assert html.count("wm-cmp__card-header") >= 2, \
+            "cross-agent panel rendered but with <2 adapter cards"
     # Per-agent section is conditional on adapter data; only assert it
     # when the corpus actually contains sessions.
     from watchmen import metrics as _metrics

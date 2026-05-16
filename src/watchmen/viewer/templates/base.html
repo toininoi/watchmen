@@ -370,6 +370,128 @@
     .wm-card-table tbody tr:last-child td { border-bottom: 0; }
     .wm-card-table tbody tr { transition: background 120ms ease; }
     .wm-card-table tbody tr:hover { background: hsl(var(--muted) / 0.6); }
+
+    /* Cross-agent comparison panel. Sits between the profile card and the
+       small-stat grid on /metrics, and inline above the deep digest on
+       /insights. Card grid auto-fits 2 columns on desktop, 1 on mobile. */
+    .wm-cmp {
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: 12px;
+      padding: 22px 26px 26px;
+      box-shadow: 0 1px 3px hsl(var(--foreground) / 0.04);
+    }
+    .wm-cmp__header { margin-bottom: 18px; }
+    .wm-cmp__title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
+    .wm-cmp__sub   { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 4px; }
+    .wm-cmp__sub code {
+      background: hsl(var(--muted));
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    .wm-cmp__narrative {
+      background: linear-gradient(180deg, hsl(217 91% 60% / 0.05), hsl(217 91% 60% / 0.02));
+      border-left: 3px solid hsl(217 91% 60%);
+      border-radius: 6px;
+      padding: 14px 18px;
+      margin-bottom: 22px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__narrative h3 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-top: 12px;
+      margin-bottom: 6px;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__narrative h3:first-child { margin-top: 0; }
+    .wm-cmp__narrative p { margin: 6px 0; }
+    .wm-cmp__narrative ul { margin: 6px 0 6px 18px; }
+    .wm-cmp__narrative li { margin: 3px 0; }
+    .wm-cmp__narrative strong { color: hsl(var(--accent-strong, 217 91% 50%)); font-weight: 600; }
+    .wm-cmp__grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .wm-cmp__card {
+      background: hsl(var(--muted) / 0.4);
+      border: 1px solid hsl(var(--border));
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .wm-cmp__card-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid hsl(var(--border));
+    }
+    .wm-cmp__card-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__card-model {
+      font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      color: hsl(var(--muted-foreground));
+      background: hsl(var(--card));
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid hsl(var(--border));
+    }
+    .wm-cmp__stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 14px;
+      margin: 0;
+      font-size: 12px;
+    }
+    .wm-cmp__stats > div {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 3px 0;
+    }
+    .wm-cmp__stats dt { color: hsl(var(--muted-foreground)); margin: 0; }
+    .wm-cmp__stats dd {
+      margin: 0;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__list { margin-top: 12px; }
+    .wm-cmp__list-label {
+      display: block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: hsl(var(--muted-foreground));
+      margin-bottom: 6px;
+    }
+    .wm-cmp__pill {
+      display: inline-block;
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: 4px;
+      padding: 2px 8px;
+      margin: 0 4px 4px 0;
+      font-size: 11px;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__pill em {
+      font-style: normal;
+      color: hsl(var(--muted-foreground));
+      font-variant-numeric: tabular-nums;
+      margin-left: 4px;
+    }
   </style>
 </head>
 <body class="bg-[hsl(var(--background))] text-[hsl(var(--foreground))]">

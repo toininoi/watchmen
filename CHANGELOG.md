@@ -6,6 +6,31 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — "How you use each agent" cross-agent comparison
+- New section at the top of `/metrics` (under the profile card) and
+  inline above the deep digest on `/insights` compares how the user
+  works with each coding agent they have data for. Two pieces:
+  - **Deterministic per-adapter facts table** (always rendered when
+    ≥2 adapters have data): side-by-side cards with sessions, active
+    days, prompts, prompts/session, tool calls/session, error rate,
+    cache hit, $/prompt, $/session, total $, avg session length, top
+    tools, top projects, dominant model. Pure SQL from corpus.db.
+  - **LLM-synthesized narrative** (cached, rendered when present):
+    a short markdown panel — "Per-agent character / Where each one wins
+    / Re-balancing suggestion" — answering "which agent is best for
+    which kind of work in YOUR hands". Generated as part of the
+    existing `watchmen insights` digest pipeline (no extra command,
+    no extra UI button); writes to `~/.watchmen/insights/agent_comparison.md`
+    with YAML frontmatter for the viewer to display generation time + model.
+- New `metrics.agent_comparison_facts(days)` — pure SQL helper returning
+  the rich per-adapter dict that feeds both the renderer and the LLM
+  prompt. Joins sessions × tool_calls for top-tool lists, sessions ×
+  suggestions.jsonl for per-adapter skill-suggestion fire counts.
+- New `commands/insights._cross_agent_narrative(facts, model)` — single
+  LLM call with a focused prompt. Returns None (and the viewer suppresses
+  the narrative panel) when fewer than 2 adapters have ≥10 prompts each,
+  so a one-agent user never sees a redundant "compared to no one" panel.
+
 ### Added — Codex watchmen plugin (symmetric to the Claude Code plugin)
 - New `plugin-codex/` directory ships a Codex-native plugin with the same
   shape as `plugin/`: manifest under `.codex-plugin/plugin.json`, the
