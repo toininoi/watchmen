@@ -6,6 +6,31 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — Codex watchmen plugin (symmetric to the Claude Code plugin)
+- New `plugin-codex/` directory ships a Codex-native plugin with the same
+  shape as `plugin/`: manifest under `.codex-plugin/plugin.json`, the
+  `brief` skill, the `UserPromptSubmit → check_prompt.sh` hook, and the
+  shared `bin/` helpers. The `bin/` and skill scripts are byte-identical
+  to the Claude Code plugin (Codex sets `${CLAUDE_PLUGIN_ROOT}` as a
+  compat env var and the scripts self-locate via `$0`); a sync test in
+  `tests/test_smoke.py` keeps the two trees in lockstep.
+- New `.agents/plugins/marketplace.json` marketplace manifest, so Codex
+  users can install with `/plugins marketplace add github:firstbatchxyz/watchmen`
+  followed by `/plugins install watchmen`.
+- `watchmen hooks install` now wires hooks into **both**
+  `~/.claude/settings.json` (Claude Code) **and** `~/.codex/hooks.json`
+  (Codex) in one shot. Codex's supported-event set (SessionStart,
+  PreToolUse, PostToolUse, UserPromptSubmit, Stop) is enforced — entries
+  for events Codex ignores (SessionEnd / SubagentStop / Notification /
+  PreCompact) are not written to the Codex config.
+- `watchmen hooks uninstall` and `watchmen hooks status` likewise cover
+  both targets. Each host is skipped silently when its agent isn't
+  installed (no `~/.codex/` dir → no Codex install attempted).
+- The same basename-matching self-heal that landed for Claude Code now
+  applies to `~/.codex/hooks.json` too — re-running install scrubs any
+  stale watchmen entries (older paths, retired script names) before
+  writing the canonical set fresh.
+
 ### Added — profile card at the top of `/metrics` (FM-style stats card)
 - New section at the top of `http://127.0.0.1:8979/metrics` renders a
   Football-Manager-style profile card for how the user works with

@@ -1149,39 +1149,100 @@ def test_hooks_scrub_watchmen_entries_matches_by_basename():
     assert hooks_setup._scrub_watchmen_hooks(settings["hooks"]) == 0
 
 
-def test_hooks_install_self_heals_stale_paths():
+def test_hooks_install_self_heals_stale_paths(tmp_path, monkeypatch):
     """End-to-end: a settings.json containing a stale watchmen entry from
     an older install (different absolute path) must come out of `install()`
     with the stale entry removed and the canonical one in its place.
     Regression guard for the issue where a pre-reorg layout left settings
-    pointing at a non-existent watchmen_observe.sh on every event."""
-    import tempfile
+    pointing at a non-existent watchmen_observe.sh on every event.
+
+    Patches BOTH supported hosts to temp paths so install() never touches
+    the developer's real ~/.claude or ~/.codex configs."""
     from watchmen import hooks_setup
     stale = "/tmp/never-existed-checkout/hooks/watchmen_observe.sh"
-    with tempfile.TemporaryDirectory() as td:
-        fake_settings = Path(td) / "settings.json"
-        fake_settings.write_text(json.dumps({
-            "hooks": {
-                "SessionStart": [{"hooks": [{"type": "command", "command": stale}]}],
-                "PreToolUse":   [{"matcher": "", "hooks": [{"type": "command", "command": stale}]}],
-            }
-        }))
-        orig = hooks_setup.SETTINGS_FILE
-        hooks_setup.SETTINGS_FILE = fake_settings
-        try:
-            rc = hooks_setup.install()
-            assert rc == 0
-            written = json.loads(fake_settings.read_text())
-            all_cmds = [
-                h.get("command", "")
-                for event_entries in written.get("hooks", {}).values()
-                for e in event_entries
-                for h in e.get("hooks", [])
-            ]
-            assert stale not in all_cmds, "stale path survived install — self-heal broken"
-            assert str(hooks_setup.HOOK_SCRIPT) in all_cmds, "canonical path missing"
-        finally:
-            hooks_setup.SETTINGS_FILE = orig
+    fake_claude = tmp_path / "claude" / "settings.json"
+    fake_codex = tmp_path / "codex" / "hooks.json"
+    fake_claude.parent.mkdir(parents=True)
+    fake_codex.parent.mkdir(parents=True)
+    fake_claude.write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": stale}]}],
+            "PreToolUse":   [{"matcher": "", "hooks": [{"type": "command", "command": stale}]}],
+        }
+    }))
+    fake_codex.write_text(json.dumps({"hooks": {}}))
+    monkeypatch.setattr(hooks_setup, "CLAUDE_SETTINGS_FILE", fake_claude)
+    monkeypatch.setattr(hooks_setup, "CODEX_SETTINGS_FILE", fake_codex)
+
+    rc = hooks_setup.install()
+    assert rc == 0
+    written = json.loads(fake_claude.read_text())
+    all_cmds = [
+        h.get("command", "")
+        for event_entries in written.get("hooks", {}).values()
+        for e in event_entries
+        for h in e.get("hooks", [])
+    ]
+    assert stale not in all_cmds, "stale path survived install — self-heal broken"
+    assert str(hooks_setup.HOOK_SCRIPT) in all_cmds, "canonical path missing"
+
+
+def test_hooks_install_writes_to_codex_with_event_subset(tmp_path, monkeypatch):
+    """Codex CLI only honors a subset of Claude Code's hook events. install()
+    must write the canonical observe script into every Codex-supported event
+    in ~/.codex/hooks.json, and NOT write entries for events Codex ignores
+    (SessionEnd / SubagentStop / Notification / PreCompact). Regression guard
+    against a future addition to WATCHMEN_HOOKS silently leaking into Codex."""
+    from watchmen import hooks_setup
+    fake_claude = tmp_path / "claude" / "settings.json"
+    fake_codex = tmp_path / "codex" / "hooks.json"
+    fake_claude.parent.mkdir(parents=True)
+    fake_codex.parent.mkdir(parents=True)
+    fake_claude.write_text("{}")
+    # No pre-existing Codex hooks file content — install() should create one.
+    monkeypatch.setattr(hooks_setup, "CLAUDE_SETTINGS_FILE", fake_claude)
+    monkeypatch.setattr(hooks_setup, "CODEX_SETTINGS_FILE", fake_codex)
+
+    rc = hooks_setup.install()
+    assert rc == 0
+    codex = json.loads(fake_codex.read_text())
+    codex_events = set(codex.get("hooks", {}).keys())
+    # Codex supports exactly these.
+    supported = {"SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"}
+    assert codex_events == supported, (
+        f"Codex hooks.json got unexpected event set {codex_events} (expected {supported})"
+    )
+    # Every Codex entry must point at the canonical observe script.
+    canonical = str(hooks_setup.HOOK_SCRIPT)
+    cmds = [
+        h.get("command", "")
+        for entries in codex["hooks"].values() for e in entries for h in e.get("hooks", [])
+    ]
+    assert all(c == canonical for c in cmds), f"Codex entries diverged: {cmds}"
+
+
+def test_hooks_install_skips_codex_when_not_installed(tmp_path, monkeypatch):
+    """If a user only has Claude Code (no ~/.codex/ directory), install()
+    must skip Codex gracefully without creating ~/.codex/ themselves —
+    auto-creating an agent's home tree on a machine without that agent is
+    presumptuous. Claude Code install still runs."""
+    from watchmen import hooks_setup
+    fake_claude = tmp_path / "claude" / "settings.json"
+    # Point Codex at a path whose PARENT also doesn't exist (simulates "no
+    # Codex on this machine"). install() must NOT create it.
+    fake_codex = tmp_path / "no-such-codex" / "hooks.json"
+    fake_claude.parent.mkdir(parents=True)
+    fake_claude.write_text("{}")
+    monkeypatch.setattr(hooks_setup, "CLAUDE_SETTINGS_FILE", fake_claude)
+    monkeypatch.setattr(hooks_setup, "CODEX_SETTINGS_FILE", fake_codex)
+
+    rc = hooks_setup.install()
+    assert rc == 0
+    assert not fake_codex.exists(), "install() created Codex config on a machine without Codex"
+    assert not fake_codex.parent.exists(), "install() materialized ~/.codex/ on a machine without Codex"
+    # Claude Code side should still be wired.
+    claude = json.loads(fake_claude.read_text())
+    assert "hooks" in claude and len(claude["hooks"]) > 0
 
 
 def test_brief_artifacts_no_longer_shipped():
@@ -1199,6 +1260,66 @@ def test_brief_artifacts_no_longer_shipped():
         "brief.py reappeared — 0.2.0 deleted this on purpose"
     assert not (repo_root / "hooks" / "watchmen_brief.sh").exists(), \
         "hooks/watchmen_brief.sh reappeared — 0.2.0 deleted this on purpose"
+
+
+def test_codex_plugin_dir_has_required_layout():
+    """plugin-codex/ is the Codex-side counterpart to plugin/. It must contain
+    the same shape (manifest under .codex-plugin/, hooks block, brief skill,
+    and the bin/ scripts the skill calls). Regression guard against a future
+    refactor that accidentally drops one of these — the marketplace install
+    silently degrades to a no-op if the manifest's expected files are missing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    pc = repo_root / "plugin-codex"
+    assert pc.is_dir(), "plugin-codex/ missing — Codex plugin tree was removed"
+    manifest = pc / ".codex-plugin" / "plugin.json"
+    assert manifest.is_file(), "plugin-codex/.codex-plugin/plugin.json missing"
+    data = json.loads(manifest.read_text())
+    assert data.get("name") == "watchmen", f"plugin name drifted: {data.get('name')!r}"
+    assert (pc / "hooks" / "hooks.json").is_file()
+    assert (pc / "skills" / "brief" / "SKILL.md").is_file()
+    for script in ("check_prompt.sh", "check_prompt.py", "read_state.sh", "resolve_project_key.py"):
+        assert (pc / "bin" / script).is_file(), f"plugin-codex/bin/{script} missing"
+
+
+def test_codex_plugin_bin_scripts_match_claude_code_byte_for_byte():
+    """plugin/bin/ and plugin-codex/bin/ ship the same Python + shell helpers.
+    Codex's hook env exports CLAUDE_PLUGIN_ROOT as a compat alias and the
+    scripts self-locate via $0, so they're functionally agent-agnostic — we
+    duplicate the files (not symlinks; marketplace tarballs flatten symlinks)
+    and rely on this test to keep them in lockstep. If you intentionally
+    diverge one, update this test with the file you split."""
+    import hashlib
+    repo_root = Path(__file__).resolve().parents[1]
+    src_bin = repo_root / "plugin" / "bin"
+    codex_bin = repo_root / "plugin-codex" / "bin"
+    # Only test the scripts that genuinely belong on both sides. statusline.sh
+    # is Claude-Code-only (Codex has no statusline surface).
+    shared = ("check_prompt.sh", "check_prompt.py", "read_state.sh", "resolve_project_key.py")
+    for name in shared:
+        a = (src_bin / name).read_bytes()
+        b = (codex_bin / name).read_bytes()
+        assert hashlib.sha256(a).hexdigest() == hashlib.sha256(b).hexdigest(), (
+            f"plugin/bin/{name} and plugin-codex/bin/{name} drifted — "
+            f"either re-sync (cp plugin/bin/{name} plugin-codex/bin/{name}) "
+            f"or update this test if the divergence is intentional"
+        )
+
+
+def test_codex_marketplace_lists_plugin():
+    """.agents/plugins/marketplace.json is the Codex-side marketplace manifest.
+    `/plugins marketplace add github:firstbatchxyz/watchmen` reads this file
+    to discover installable plugins; a typo here means the user runs the
+    install command and gets no plugin. Verify it points at plugin-codex/."""
+    repo_root = Path(__file__).resolve().parents[1]
+    mp_path = repo_root / ".agents" / "plugins" / "marketplace.json"
+    assert mp_path.is_file(), ".agents/plugins/marketplace.json missing"
+    mp = json.loads(mp_path.read_text())
+    assert mp.get("name") == "watchmen"
+    plugins = mp.get("plugins") or []
+    sources = [p.get("source") for p in plugins]
+    assert "./plugin-codex" in sources, (
+        f"marketplace.json doesn't point at plugin-codex/ (sources: {sources})"
+    )
 
 
 def test_harness_installed_skills_reads_skill_md_frontmatter():

@@ -1,0 +1,21 @@
+{
+  "name": "watchmen",
+  "owner": {
+    "name": "dria"
+  },
+  "metadata": {
+    "description": "Watchmen plugins for OpenAI Codex CLI — surface skill suggestions + workspace context from watchmen sessions intelligence into Codex sessions.",
+    "version": "0.1.6"
+  },
+  "plugins": [
+    {
+      "name": "watchmen",
+      "description": "Surface skill suggestions + workspace context from watchmen sessions intelligence into your Codex sessions",
+      "version": "0.1.6",
+      "author": {
+        "name": "dria"
+      },
+      "source": "./plugin-codex"
+    }
+  ]
+}

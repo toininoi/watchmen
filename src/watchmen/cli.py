@@ -13,7 +13,7 @@ Subcommands:
   settings list|show|set    View / update per-project settings (threshold, enabled, repo, notes)
   daemon run|install|uninstall      Foreground run / launchd agent lifecycle
   viewer run|install|uninstall      Foreground run / launchd agent lifecycle (default :8979)
-  hooks install|uninstall|status    Claude Code hook lifecycle + inspection
+  hooks install|uninstall|status    Wire hooks into Claude Code + Codex (auto-detected) + inspect
   statusline install|uninstall      💡 watchmen indicator in ~/.claude/settings.json
   plugin update|status              Marketplace clone management
   launchd status                    Inspect installed launchd agents
@@ -871,20 +871,30 @@ def cmd_doctor(args) -> int:
         viewer_detail = f"not responding ({type(e).__name__}) — `watchmen viewer install`"
     row("viewer", viewer_up, viewer_detail, severity="warn")
 
-    # 6. hooks installed
+    # 6. hooks installed — check every supported agent
     try:
         from watchmen import hooks_setup
         import json as _json
-        settings = _json.loads(hooks_setup.SETTINGS_FILE.read_text()) if hooks_setup.SETTINGS_FILE.exists() else {}
-        wired = sum(
-            1 for entries in (settings.get("hooks") or {}).values()
-            for e in entries
-            for h in e.get("hooks") or []
-            if "watchmen" in (h.get("command") or "")
-        )
-        row("Claude Code hooks", wired > 0, f"{wired} watchmen entries wired" if wired else "not wired — `watchmen hooks install`", severity="warn")
+        for label, path in (
+            ("Claude Code hooks", hooks_setup.CLAUDE_SETTINGS_FILE),
+            ("Codex hooks",       hooks_setup.CODEX_SETTINGS_FILE),
+        ):
+            if not path.exists():
+                # Agent isn't installed on this machine — skip silently. Doctor
+                # surfaces things to fix, not things to install for the first time.
+                continue
+            settings = _json.loads(path.read_text())
+            wired = sum(
+                1 for entries in (settings.get("hooks") or {}).values()
+                for e in entries
+                for h in e.get("hooks") or []
+                if "watchmen" in (h.get("command") or "")
+            )
+            row(label, wired > 0,
+                f"{wired} watchmen entries wired" if wired else "not wired — `watchmen hooks install`",
+                severity="warn")
     except Exception as e:
-        row("Claude Code hooks", False, f"could not read settings.json ({type(e).__name__})", severity="warn")
+        row("hooks", False, f"could not read agent settings ({type(e).__name__})", severity="warn")
 
     # 7. latest run age
     runs = state.recent_runs(limit=1)
@@ -1228,11 +1238,11 @@ def main(argv: list[str] | None = None) -> int:
     p_viewer.set_defaults(func=lambda a: (p_viewer.print_help() or 1))
 
     # ── hooks (noun) ───────────────────────────────────────────────────────
-    p_hooks = sub.add_parser("hooks", help="install / uninstall / inspect Claude Code hooks")
+    p_hooks = sub.add_parser("hooks", help="install / uninstall / inspect hooks for Claude Code + Codex")
     hooks_sub = p_hooks.add_subparsers(dest="hooks_cmd")
-    hooks_sub.add_parser("install", help="wire watchmen_observe.sh into ~/.claude/settings.json").set_defaults(func=cmd_install_hooks)
-    hooks_sub.add_parser("uninstall", help="remove watchmen entries from ~/.claude/settings.json").set_defaults(func=cmd_uninstall_hooks)
-    hooks_sub.add_parser("status", help="show which hook events are wired up").set_defaults(func=cmd_hooks_status)
+    hooks_sub.add_parser("install", help="wire watchmen_observe.sh into ~/.claude/settings.json and ~/.codex/hooks.json (whichever are present)").set_defaults(func=cmd_install_hooks)
+    hooks_sub.add_parser("uninstall", help="remove watchmen entries from supported agent configs").set_defaults(func=cmd_uninstall_hooks)
+    hooks_sub.add_parser("status", help="show which hook events are wired up, per agent").set_defaults(func=cmd_hooks_status)
     p_hooks.set_defaults(func=lambda a: (p_hooks.print_help() or 1))
 
     # ── statusline (noun) ──────────────────────────────────────────────────

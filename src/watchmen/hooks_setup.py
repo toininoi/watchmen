@@ -1,19 +1,36 @@
-"""Hook installer — wires watchmen_observe.sh into ~/.claude/settings.json so every
-Claude Code session pipes its hook events to the local observer at 127.0.0.1:8765.
+"""Hook installer — wires watchmen_observe.sh into the hook config of every
+supported coding agent so each session pipes its hook events to the local
+observer at 127.0.0.1:8765.
 
-Backs up the existing settings.json before mutating it. Idempotent + self-healing:
+Supported targets:
+
+  - Claude Code  → ~/.claude/settings.json  (under a top-level "hooks" key)
+  - Codex CLI    → ~/.codex/hooks.json      (also under a top-level "hooks" key)
+
+Both formats share the same per-event schema (matcher groups containing
+{type, command} handlers), so one installer covers both. Codex supports a
+subset of Claude Code's events (no SessionEnd / SubagentStop / Notification /
+PreCompact) — entries for unsupported events are filtered per target.
+
+Backs up the existing config before mutating. Idempotent + self-healing:
 re-running install scrubs any existing watchmen entries (matched by script
 filename so a reorg or moved checkout doesn't leave orphaned entries that fail
 with "No such file or directory" on every event) and then writes the canonical
 set fresh.
 """
 
+from __future__ import annotations
+
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 HOOK_SCRIPT = (ROOT / "hooks" / "watchmen_observe.sh").resolve()
+
+# Kept for backwards compatibility with callers/tests that referenced the
+# Claude-Code-only path directly. The canonical surface is HOSTS.
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
 # All hook scripts watchmen installs. Keys used internally; values are absolute paths.
@@ -36,6 +53,14 @@ WATCHMEN_HOOKS: dict[str, list[tuple[str, str | None]]] = {
     "PreCompact":       [("observe", None)],
 }
 
+# Codex CLI only exposes a subset of lifecycle events (per OpenAI docs:
+# SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop, PermissionRequest).
+# Anything else we'd try to write would be silently ignored, so filter at install
+# time to avoid the appearance of wiring something we don't actually own.
+_CODEX_SUPPORTED_EVENTS: frozenset[str] = frozenset({
+    "SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop",
+})
+
 # Every basename watchmen has ever shipped or shipped-and-retired. Used as a
 # whole-set filename match against settings.json entries so install / uninstall
 # can clean up stale paths from older installs (e.g. before the src-layout
@@ -47,6 +72,32 @@ WATCHMEN_SCRIPT_NAMES: set[str] = {
     "watchmen_observe.sh",
     "watchmen_brief.sh",  # retired in 0.2.0
 }
+
+
+@dataclass(frozen=True)
+class _Host:
+    """One install target. Two today — Claude Code + Codex — both share the
+    same per-event schema, only the file path and supported-event set differ."""
+    name: str          # short display name used in print()
+    settings_path_attr: str  # module attribute name → Path (so tests can monkeypatch one host)
+    supported_events: frozenset[str] | None  # None = all WATCHMEN_HOOKS events
+
+
+# Module-level attributes (not just dataclass fields) so tests can rebind one
+# host's path without rebuilding the whole HOSTS tuple.
+CLAUDE_SETTINGS_FILE = SETTINGS_FILE
+CODEX_SETTINGS_FILE = Path.home() / ".codex" / "hooks.json"
+
+HOSTS: tuple[_Host, ...] = (
+    _Host(name="Claude Code", settings_path_attr="CLAUDE_SETTINGS_FILE",
+          supported_events=None),
+    _Host(name="Codex",       settings_path_attr="CODEX_SETTINGS_FILE",
+          supported_events=_CODEX_SUPPORTED_EVENTS),
+)
+
+
+def _host_path(host: _Host) -> Path:
+    return globals()[host.settings_path_attr]
 
 
 def _is_watchmen_hook_cmd(cmd: str) -> bool:
@@ -63,21 +114,27 @@ def _is_watchmen_hook_cmd(cmd: str) -> bool:
     return Path(first_token).name in WATCHMEN_SCRIPT_NAMES
 
 
-def _load_settings() -> dict:
-    if not SETTINGS_FILE.exists():
+def _load_settings(path: Path) -> dict:
+    if not path.exists():
         return {}
-    return json.loads(SETTINGS_FILE.read_text())
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        # Corrupt config — back up and start fresh rather than crashing.
+        # Don't silently drop it; the user will see the .bak file.
+        return {}
 
 
-def _save_settings(data: dict) -> None:
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps(data, indent=2) + "\n")
+def _save_settings(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def _backup() -> Path:
-    backup = SETTINGS_FILE.with_suffix(f".json.bak.{time.strftime('%Y%m%d-%H%M%S')}")
-    if SETTINGS_FILE.exists():
-        backup.write_text(SETTINGS_FILE.read_text())
+def _backup(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    backup = path.with_suffix(f"{path.suffix}.bak.{time.strftime('%Y%m%d-%H%M%S')}")
+    backup.write_text(path.read_text())
     return backup
 
 
@@ -113,32 +170,36 @@ def _scrub_watchmen_hooks(hooks: dict) -> int:
     return removed
 
 
-def install() -> int:
-    missing = [str(p) for p in WATCHMEN_SCRIPTS.values() if not p.exists()]
-    if missing:
-        print(f"ERROR: hook script(s) not found: {', '.join(missing)}")
-        return 1
-    for p in WATCHMEN_SCRIPTS.values():
-        p.chmod(0o755)
+def _install_one(host: _Host) -> tuple[bool, int]:
+    """Wire watchmen hooks into one host's config file. Returns (touched, added).
+    `touched` is False if the host's config is missing AND no scripts exist —
+    we don't create a config file for an agent that isn't installed."""
+    path = _host_path(host)
 
-    settings = _load_settings()
+    # Skip cleanly if the host clearly isn't installed (no parent dir AND no
+    # existing config). Auto-creating ~/.codex/ on a machine without Codex
+    # would be presumptuous — leave the user's home tree alone.
+    if not path.exists() and not path.parent.exists():
+        print(f"  {host.name}: not installed (no {path.parent}) — skipped")
+        return False, 0
+
+    settings = _load_settings(path)
     hooks = settings.setdefault("hooks", {})
 
-    backup_path = _backup()
-    if backup_path.exists():
-        print(f"backed up existing settings → {backup_path}")
+    backup_path = _backup(path)
+    if backup_path:
+        print(f"  {host.name}: backed up → {backup_path}")
 
-    # Scrub any existing watchmen entries first (matched by script basename,
-    # not absolute path) so install is both idempotent AND self-healing:
-    # stale paths from older releases get cleaned, retired scripts get
-    # removed, and the canonical set goes in fresh.
     scrubbed = _scrub_watchmen_hooks(hooks)
     if scrubbed:
-        print(f"cleaned {scrubbed} existing watchmen hook entr(ies) "
-              f"(stale paths / retired scripts) before reinstall")
+        print(f"  {host.name}: cleaned {scrubbed} existing watchmen entr(ies) "
+              "(stale paths / retired scripts) before reinstall")
 
+    supported = host.supported_events
     added = 0
     for event, scripts in WATCHMEN_HOOKS.items():
+        if supported is not None and event not in supported:
+            continue
         existing = hooks.setdefault(event, [])
         for script_key, matcher in scripts:
             cmd_str = str(WATCHMEN_SCRIPTS[script_key])
@@ -148,56 +209,96 @@ def install() -> int:
             existing.append(entry)
             added += 1
 
-    _save_settings(settings)
-    print(f"installed watchmen hooks: {added} entries across {len(WATCHMEN_HOOKS)} events")
-    for key, p in WATCHMEN_SCRIPTS.items():
-        print(f"  - {key}: {p}")
-    print("Note: start the local hooks server with `uv run python -m watchmen.server` in a terminal so events are captured.")
-    return 0
+    _save_settings(path, settings)
+    print(f"  {host.name}: installed {added} entries → {path}")
+    return True, added
 
 
-def uninstall() -> int:
-    if not SETTINGS_FILE.exists():
-        print("no settings.json — nothing to uninstall")
-        return 0
+def _uninstall_one(host: _Host) -> tuple[bool, int]:
+    """Scrub watchmen entries from one host's config. Returns (touched, removed)."""
+    path = _host_path(host)
+    if not path.exists():
+        print(f"  {host.name}: no config at {path} — skipped")
+        return False, 0
 
-    settings = _load_settings()
+    settings = _load_settings(path)
     hooks = settings.get("hooks") or {}
     if not hooks:
-        print("no hooks block — nothing to uninstall")
-        return 0
+        print(f"  {host.name}: no hooks block at {path} — skipped")
+        return False, 0
 
-    backup_path = _backup()
-    print(f"backed up existing settings → {backup_path}")
+    backup_path = _backup(path)
+    if backup_path:
+        print(f"  {host.name}: backed up → {backup_path}")
 
     removed = _scrub_watchmen_hooks(hooks)
     if not hooks:
         settings.pop("hooks", None)
     else:
         settings["hooks"] = hooks
-    _save_settings(settings)
-    print(f"uninstalled {removed} watchmen hook entries")
+    _save_settings(path, settings)
+    print(f"  {host.name}: removed {removed} watchmen entr(ies) from {path}")
+    return True, removed
+
+
+def install() -> int:
+    missing = [str(p) for p in WATCHMEN_SCRIPTS.values() if not p.exists()]
+    if missing:
+        print(f"ERROR: hook script(s) not found: {', '.join(missing)}")
+        return 1
+    for p in WATCHMEN_SCRIPTS.values():
+        p.chmod(0o755)
+
+    print("wiring watchmen hooks into supported agents:")
+    any_touched = False
+    for host in HOSTS:
+        touched, _added = _install_one(host)
+        any_touched = any_touched or touched
+
+    if not any_touched:
+        print("no supported agent detected (~/.claude or ~/.codex) — nothing wired.")
+        return 1
+
+    for key, p in WATCHMEN_SCRIPTS.items():
+        print(f"hook script: {key} → {p}")
+    print("Note: start the local hooks server with `uv run python -m watchmen.server` in a terminal so events are captured.")
+    return 0
+
+
+def uninstall() -> int:
+    print("scrubbing watchmen hook entries from supported agents:")
+    any_touched = False
+    for host in HOSTS:
+        touched, _removed = _uninstall_one(host)
+        any_touched = any_touched or touched
+    if not any_touched:
+        print("no agent config files found — nothing to uninstall.")
     return 0
 
 
 def status() -> int:
-    if not SETTINGS_FILE.exists():
-        print(f"settings.json not found at {SETTINGS_FILE}")
-        return 0
-    settings = _load_settings()
-    hooks = settings.get("hooks") or {}
     for key, p in WATCHMEN_SCRIPTS.items():
         print(f"watchmen {key}: {p}")
-    print(f"settings.json:    {SETTINGS_FILE}")
     print()
-    for event, scripts in WATCHMEN_HOOKS.items():
-        entries = hooks.get(event) or []
-        for script_key, _matcher in scripts:
-            cmd_str = str(WATCHMEN_SCRIPTS[script_key])
-            present = any(
-                any(h.get("command") == cmd_str for h in e.get("hooks", []))
-                for e in entries
-            )
-            marker = "✓" if present else "·"
-            print(f"  {marker} {event:<18} ({script_key})")
+    for host in HOSTS:
+        path = _host_path(host)
+        if not path.exists():
+            print(f"{host.name}: {path} (not present)")
+            continue
+        settings = _load_settings(path)
+        hooks = settings.get("hooks") or {}
+        print(f"{host.name}: {path}")
+        for event, scripts in WATCHMEN_HOOKS.items():
+            if host.supported_events is not None and event not in host.supported_events:
+                continue
+            entries = hooks.get(event) or []
+            for script_key, _matcher in scripts:
+                cmd_str = str(WATCHMEN_SCRIPTS[script_key])
+                present = any(
+                    any(h.get("command") == cmd_str for h in e.get("hooks", []))
+                    for e in entries
+                )
+                marker = "✓" if present else "·"
+                print(f"  {marker} {event:<18} ({script_key})")
+        print()
     return 0
