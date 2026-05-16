@@ -6,6 +6,30 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — profile card at `/card` (FIFA-style stats card)
+- New viewer page at `http://127.0.0.1:8979/card` renders a server-side
+  SVG trading card for how the user works with coding agents. Six axes
+  on a hexagonal spider chart:
+  - **Throughput** — prompts per active day
+  - **Frugality** — inverse $/prompt
+  - **Reliability** — 1 − tool error rate
+  - **Curiosity** — distinct tool names used
+  - **Range** — distinct projects touched
+  - **Mastery** — curated skill bundles on disk
+- Each axis normalized 0–1 against tunable elite caps. Overall rating
+  mapped to 40–99 (FIFA convention; even an empty corpus still gets a
+  Newcomer card at 40). Card tier color shifts gold / silver / bronze /
+  indigo with the rating.
+- Archetype label picked from the dominant axis when one is clearly
+  ahead: Speedrunner (throughput), Minimalist (frugality), Perfectionist
+  (reliability), Explorer (curiosity), Polyglot (range), Curator
+  (mastery). Otherwise Generalist; empty corpus → Newcomer.
+- Window selector (30 / 90 / 180 / 365 / 730 days) restricts the
+  corpus.db slice; mastery (bundle count) is always-current since
+  curated skills don't age out.
+- Card uses pure SVG, screenshots cleanly for sharing. Right-side panel
+  lists the six axes with one-line definitions + how the rating works.
+
 ### Fixed — stale Claude Code hook entries from older watchmen installs
 - `watchmen hooks install` is now self-healing: it scrubs any existing
   watchmen entry from `~/.claude/settings.json` (matched by script

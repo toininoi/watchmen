@@ -20,11 +20,19 @@ from watchmen import metrics as _metrics
 @pytest.fixture
 def fresh_metrics(tmp_path: Path, monkeypatch):
     """Redirect the metrics module's CORPUS_DB constant to a temp file
-    using monkeypatch.setattr. This avoids the sys.modules reloading dance
-    (and the cross-test contamination it caused) — when the test ends,
-    monkeypatch restores the real CORPUS_DB automatically."""
+    using monkeypatch.setattr — and inside `compute_card_stats`, the
+    BUNDLES_DIR import is re-resolved against an empty temp dir so the
+    mastery axis doesn't read the developer's real bundles directory.
+    monkeypatch restores both on teardown."""
     corpus_path = tmp_path / "corpus.db"
+    bundles_path = tmp_path / "bundles"
+    bundles_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(_metrics, "CORPUS_DB", corpus_path)
+    # `compute_card_stats` does `from watchmen.paths import BUNDLES_DIR`
+    # at call time, so the patch has to target watchmen.paths rather than
+    # the metrics module.
+    from watchmen import paths as _paths
+    monkeypatch.setattr(_paths, "BUNDLES_DIR", bundles_path)
     return _metrics
 
 
@@ -146,3 +154,167 @@ def test_unknown_agent_falls_through_to_raw_slug(fresh_metrics, tmp_path):
     ])
     rows = fresh_metrics.adapter_breakdown_all(days=30)
     assert rows[0]["label"] == "cursor"
+
+
+# ─── compute_card_stats ──────────────────────────────────────────────────
+
+
+def _seed_corpus_with_tools(corpus_path: Path, sessions: list[dict], tool_calls: list[dict]) -> None:
+    """Extended fixture: sessions + tool_calls tables. The card metric
+    pulls distinct tool names from tool_calls, so we need both."""
+    schema = """
+    CREATE TABLE sessions (
+        session_id TEXT PRIMARY KEY,
+        project_dir TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        user_prompt_count INTEGER NOT NULL DEFAULT 0,
+        tool_use_count INTEGER NOT NULL DEFAULT 0,
+        tool_error_count INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        is_subagent INTEGER NOT NULL DEFAULT 0,
+        agent TEXT NOT NULL DEFAULT 'claude_code'
+    );
+    CREATE TABLE tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT,
+        timestamp TEXT,
+        tool_name TEXT,
+        is_error INTEGER NOT NULL DEFAULT 0
+    );
+    """
+    with sqlite3.connect(str(corpus_path)) as conn:
+        conn.executescript(schema)
+        for s in sessions:
+            conn.execute(
+                "INSERT INTO sessions (session_id, project_dir, started_at, "
+                "user_prompt_count, tool_use_count, tool_error_count, "
+                "input_tokens, cache_creation_tokens, cache_read_tokens, "
+                "output_tokens, cost_usd, is_subagent, agent) VALUES "
+                "(:session_id, :project_dir, :started_at, "
+                ":user_prompt_count, :tool_use_count, :tool_error_count, "
+                ":input_tokens, :cache_creation_tokens, :cache_read_tokens, "
+                ":output_tokens, :cost_usd, :is_subagent, :agent)",
+                s,
+            )
+        for t in tool_calls:
+            conn.execute(
+                "INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error) "
+                "VALUES (:session_id, :timestamp, :tool_name, :is_error)",
+                t,
+            )
+
+
+def _ses(session_id, *, agent="claude_code", project_dir="/p", days_ago=0,
+         prompts=0, tool_uses=0, tool_errors=0, cost=0.0, is_subagent=0):
+    return {
+        "session_id": session_id,
+        "project_dir": project_dir,
+        "started_at": (datetime.now() - timedelta(days=days_ago)).isoformat(),
+        "user_prompt_count": prompts,
+        "tool_use_count": tool_uses,
+        "tool_error_count": tool_errors,
+        "input_tokens": 0, "cache_creation_tokens": 0,
+        "cache_read_tokens": 0, "output_tokens": 0,
+        "cost_usd": cost, "is_subagent": is_subagent, "agent": agent,
+    }
+
+
+def _tc(session_id, *, tool, days_ago=0, is_error=0):
+    return {
+        "session_id": session_id,
+        "timestamp": (datetime.now() - timedelta(days=days_ago)).isoformat(),
+        "tool_name": tool,
+        "is_error": is_error,
+    }
+
+
+def test_card_stats_newcomer_when_corpus_empty(fresh_metrics):
+    """No corpus.db / no sessions → Newcomer archetype, rating floor 40,
+    every axis at zero. Card still renders so even a fresh install has
+    something to look at."""
+    s = fresh_metrics.compute_card_stats(days=90)
+    assert s["rating"] == 40
+    assert s["archetype"][0] == "Newcomer"
+    assert all(v == 0.0 for v in s["axes"].values())
+    assert s["sessions"] == 0
+    assert s["top_agent"] is None and s["top_tool"] is None
+
+
+def test_card_stats_rating_in_range_and_archetype_set(fresh_metrics, tmp_path):
+    """A moderate corpus produces a non-floor rating and picks a real
+    archetype (not Newcomer). Specific number is implementation-defined;
+    just verify the contract: 40 ≤ rating ≤ 99 and archetype isn't None."""
+    _seed_corpus_with_tools(
+        tmp_path / "corpus.db",
+        sessions=[
+            _ses("s1", project_dir="/p1", days_ago=2, prompts=20, tool_uses=40, tool_errors=2, cost=0.50),
+            _ses("s2", project_dir="/p2", days_ago=5, prompts=15, tool_uses=30, tool_errors=1, cost=0.30),
+            _ses("s3", project_dir="/p3", days_ago=8, prompts=10, tool_uses=20, tool_errors=0, cost=0.20),
+        ],
+        tool_calls=[
+            _tc("s1", tool="Read"), _tc("s1", tool="Edit"), _tc("s1", tool="Bash"),
+            _tc("s2", tool="Read"), _tc("s2", tool="Grep"),
+            _tc("s3", tool="Write"),
+        ],
+    )
+    s = fresh_metrics.compute_card_stats(days=90)
+    assert 40 <= s["rating"] <= 99
+    assert s["archetype"][0] != "Newcomer"
+    assert s["sessions"] == 3
+    assert s["axes_raw"]["curiosity"] == 5  # Read, Edit, Bash, Grep, Write
+    assert s["axes_raw"]["range"] == 3      # /p1, /p2, /p3
+    assert s["top_tool"][0] == "Read" and s["top_tool"][1] == 2
+
+
+def test_card_stats_dominant_axis_picks_specific_archetype(fresh_metrics, tmp_path):
+    """When one axis dominates by ≥1.25× the runner-up AND ≥0.4 absolute,
+    the corresponding archetype label is used. Seed a corpus with the
+    range axis maxed (12 projects = cap) and zero tool activity so no
+    other axis competes — should land cleanly on Polyglot."""
+    sessions = [
+        _ses(f"s{i}", project_dir=f"/p{i}", days_ago=i, prompts=1, tool_uses=0)
+        for i in range(12)
+    ]
+    _seed_corpus_with_tools(tmp_path / "corpus.db", sessions=sessions, tool_calls=[])
+    s = fresh_metrics.compute_card_stats(days=90)
+    assert s["archetype"][0] == "Polyglot", f"got {s['archetype']!r}"
+    assert s["axes_raw"]["range"] == 12
+
+
+def test_card_stats_subagent_sessions_excluded(fresh_metrics, tmp_path):
+    """Subagent sessions are curator-internal noise and must not inflate
+    user-facing stats. Same exclusion rule as adapter_breakdown_all."""
+    _seed_corpus_with_tools(
+        tmp_path / "corpus.db",
+        sessions=[
+            _ses("real", project_dir="/p", days_ago=1, prompts=5),
+            _ses("sub", project_dir="/p", days_ago=1, prompts=100, is_subagent=1),
+        ],
+        tool_calls=[],
+    )
+    s = fresh_metrics.compute_card_stats(days=90)
+    assert s["sessions"] == 1
+    assert s["prompts"] == 5
+
+
+def test_card_svg_renders_with_expected_landmarks(fresh_metrics, tmp_path):
+    """SVG output is hard to assert on visually, but we can check that
+    each axis label, the rating number, and the archetype name all
+    appear in the rendered string. Catches regressions where a label
+    or anchor stops being included."""
+    _seed_corpus_with_tools(
+        tmp_path / "corpus.db",
+        sessions=[_ses("s1", project_dir="/p", days_ago=1, prompts=5, tool_uses=5)],
+        tool_calls=[_tc("s1", tool="Read")],
+    )
+    s = fresh_metrics.compute_card_stats(days=90)
+    svg = fresh_metrics.card_svg(s)
+    assert svg.startswith("<svg") and svg.endswith("</svg>")
+    for axis in ("THROUGHPUT", "FRUGALITY", "RELIABILITY", "CURIOSITY", "RANGE", "MASTERY"):
+        assert axis in svg, f"axis label {axis} missing from card SVG"
+    assert str(s["rating"]) in svg
+    assert s["archetype"][0] in svg

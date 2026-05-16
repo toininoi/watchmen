@@ -276,6 +276,22 @@ def runs_page(request: Request):
     })
 
 
+@app.get("/card", response_class=HTMLResponse)
+def card_page(request: Request, days: int = 90):
+    """FIFA-style profile card with a 6-axis spider chart + rating +
+    archetype. Pure SVG, screenshottable, server-rendered from
+    corpus.db + bundles. Window defaults to 90 days; override with
+    ?days=N for a longer/shorter slice."""
+    from watchmen import metrics as _metrics
+    stats = _metrics.compute_card_stats(days=days)
+    svg = _metrics.card_svg(stats)
+    return TEMPLATES.TemplateResponse(request, "card.html", {
+        "stats": stats,
+        "card_svg": svg,
+        "days": days,
+    })
+
+
 @app.get("/insights", response_class=HTMLResponse)
 def insights_page(request: Request):
     """HTML version of `watchmen insights`. Same static aggregation +

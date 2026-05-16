@@ -1528,6 +1528,27 @@ def test_viewer_insights_route_returns_html_with_key_sections():
     assert "/insights" in html
 
 
+def test_viewer_card_route_renders_with_landmarks():
+    """The /card route is the fun profile page. The SVG should render
+    with the six axis labels regardless of corpus state — empty corpus
+    just produces a Newcomer card."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/card")
+    assert r.status_code == 200, f"/card returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    assert "Your card" in html
+    for axis in ("THROUGHPUT", "FRUGALITY", "RELIABILITY", "CURIOSITY", "RANGE", "MASTERY"):
+        assert axis in html, f"axis label {axis} missing from /card"
+    # Window selector + nav presence regression guards.
+    assert 'name="days"' in html
+    assert 'href="/card"' in html
+
+
 def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
     """The /metrics route is the raw-numbers dashboard. It should render
     cleanly with or without corpus data. When corpus.db has sessions, the

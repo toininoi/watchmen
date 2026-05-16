@@ -867,6 +867,369 @@ def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, c
     )
 
 
+# ─── Profile card (per-user spider stats) ────────────────────────────────
+#
+# The fun tab at /card. Six axes computed from corpus.db and the
+# bundles directory, normalized 0..1 against tunable elite caps, then
+# rendered as a FIFA-style SVG card with a rating + archetype.
+#
+# The caps are deliberately reachable — fresh users still get a card
+# (Newcomer archetype, rating 40), and a power user with months of
+# tracked sessions ends up in the 80s/90s.
+
+CARD_AXES = ("throughput", "frugality", "reliability", "curiosity", "range", "mastery")
+
+# Elite caps for normalization. A user hitting all six caps lands at 99.
+# Tuned against my own ~3-month corpus to put a heavy user in the 85-95 band.
+_CARD_CAPS = {
+    "throughput":    40.0,   # prompts per active day
+    "frugality":     0.04,   # USD per prompt — LOWER is better (inverted below)
+    "reliability":   1.0,    # 1 - error rate; already 0..1
+    "curiosity":     30.0,   # distinct tool names used
+    "range":         12.0,   # distinct project dirs touched
+    "mastery":       25.0,   # curated skills across all bundles
+}
+
+# Archetype name + 1-line flavor, keyed by the dominant axis.
+_ARCHETYPES = {
+    "throughput":   ("Speedrunner",   "Volume player. Ships in bursts, iterates fast."),
+    "frugality":    ("Minimalist",    "Wastes no tokens. Surgical prompts."),
+    "reliability":  ("Perfectionist", "Tool calls land. Errors are rare."),
+    "curiosity":    ("Explorer",      "Reaches for new tools instead of the same hammer."),
+    "range":        ("Polyglot",      "Hops repos without losing context."),
+    "mastery":      ("Curator",       "Turns sessions into reusable skill bundles."),
+}
+
+# Returned when every axis is below 0.15 — no data yet to characterize.
+_NEWCOMER = ("Newcomer", "Brand new corpus. Stats sharpen as you use it.")
+_GENERALIST = ("Generalist", "Balanced across the board. No single dominant strength.")
+
+
+def _normalize(value: float, cap: float, *, invert: bool = False) -> float:
+    """Map a raw axis value into 0..1, capped. `invert=True` is for axes
+    where lower is better (cost-per-prompt → frugality)."""
+    if cap <= 0:
+        return 0.0
+    if invert:
+        if value <= 0:
+            return 1.0
+        return max(0.0, min(1.0, cap / value))
+    return max(0.0, min(1.0, value / cap))
+
+
+def compute_card_stats(days: int = 90) -> dict:
+    """Spider-chart inputs for the user's profile card at /card.
+
+    Pulls from corpus.db (sessions, tool_calls) over the last `days` days
+    plus the BUNDLES_DIR for the mastery axis. Returns a dict with:
+
+      - axes:       dict {name → 0..1 normalized}
+      - axes_raw:   dict {name → raw value, for the right-side stat list}
+      - rating:     int 40..99 (FIFA-style; never 0 so empty corpora still
+                    get a respectable card)
+      - archetype:  (name, flavor) tuple
+      - sessions, prompts, cost_usd, active_days, tool_calls, tool_errors
+      - first_seen, last_seen: ISO dates (or None for empty corpus)
+      - top_agent:  most-active agent slug + count
+      - top_tool:   most-used tool name + count
+
+    Empty corpus → Newcomer card, rating 40, every axis 0.
+    """
+    from watchmen.paths import BUNDLES_DIR
+
+    out: dict = {
+        "axes": {a: 0.0 for a in CARD_AXES},
+        "axes_raw": {a: 0.0 for a in CARD_AXES},
+        "sessions": 0, "prompts": 0, "cost_usd": 0.0,
+        "active_days": 0, "tool_calls": 0, "tool_errors": 0,
+        "first_seen": None, "last_seen": None,
+        "top_agent": None, "top_tool": None,
+    }
+
+    if CORPUS_DB.exists():
+        cutoff = (date.today() - timedelta(days=days - 1)).isoformat()
+        with sqlite3.connect(str(CORPUS_DB)) as conn:
+            conn.row_factory = sqlite3.Row
+            agg = conn.execute(
+                """SELECT COUNT(*)                            AS sessions,
+                          COALESCE(SUM(user_prompt_count),0)  AS prompts,
+                          COALESCE(SUM(tool_use_count),0)     AS tool_calls,
+                          COALESCE(SUM(tool_error_count),0)   AS tool_errors,
+                          COALESCE(SUM(cost_usd),0.0)         AS cost_usd,
+                          COUNT(DISTINCT project_dir)         AS projects,
+                          COUNT(DISTINCT date(started_at, 'localtime')) AS active_days,
+                          MIN(date(started_at, 'localtime'))  AS first_seen,
+                          MAX(date(started_at, 'localtime'))  AS last_seen
+                     FROM sessions
+                    WHERE is_subagent = 0
+                      AND date(started_at, 'localtime') >= ?""",
+                [cutoff],
+            ).fetchone()
+            out.update({
+                "sessions":    agg["sessions"] or 0,
+                "prompts":     agg["prompts"] or 0,
+                "tool_calls":  agg["tool_calls"] or 0,
+                "tool_errors": agg["tool_errors"] or 0,
+                "cost_usd":    agg["cost_usd"] or 0.0,
+                "active_days": agg["active_days"] or 0,
+                "first_seen":  agg["first_seen"],
+                "last_seen":   agg["last_seen"],
+                "projects":    agg["projects"] or 0,
+            })
+            distinct_tools = conn.execute(
+                """SELECT COUNT(DISTINCT tc.tool_name) AS n
+                     FROM tool_calls tc
+                     JOIN sessions s ON s.session_id = tc.session_id
+                    WHERE s.is_subagent = 0
+                      AND date(s.started_at, 'localtime') >= ?""",
+                [cutoff],
+            ).fetchone()["n"] or 0
+            top_agent_row = conn.execute(
+                """SELECT agent, COUNT(*) AS n
+                     FROM sessions
+                    WHERE is_subagent = 0
+                      AND date(started_at, 'localtime') >= ?
+                 GROUP BY agent ORDER BY n DESC LIMIT 1""",
+                [cutoff],
+            ).fetchone()
+            if top_agent_row:
+                out["top_agent"] = (top_agent_row["agent"], top_agent_row["n"])
+            top_tool_row = conn.execute(
+                """SELECT tc.tool_name AS t, COUNT(*) AS n
+                     FROM tool_calls tc
+                     JOIN sessions s ON s.session_id = tc.session_id
+                    WHERE s.is_subagent = 0
+                      AND date(s.started_at, 'localtime') >= ?
+                 GROUP BY tc.tool_name ORDER BY n DESC LIMIT 1""",
+                [cutoff],
+            ).fetchone()
+            if top_tool_row:
+                out["top_tool"] = (top_tool_row["t"], top_tool_row["n"])
+    else:
+        distinct_tools = 0
+
+    # Mastery from on-disk bundles, independent of the corpus window. A
+    # curated skill stays curated even if the source sessions aged out.
+    curated_skills = 0
+    if BUNDLES_DIR.exists():
+        for proj_dir in BUNDLES_DIR.iterdir():
+            skills_dir = proj_dir / "skills"
+            if skills_dir.is_dir():
+                curated_skills += sum(1 for d in skills_dir.iterdir() if d.is_dir())
+
+    # Raw axis values.
+    throughput   = (out["prompts"] / out["active_days"]) if out["active_days"] else 0.0
+    cost_per_prm = (out["cost_usd"] / out["prompts"]) if out["prompts"] else 0.0
+    reliability  = (1.0 - out["tool_errors"] / out["tool_calls"]) if out["tool_calls"] else 0.0
+    curiosity    = float(distinct_tools)
+    proj_range   = float(out.get("projects") or 0)
+    mastery      = float(curated_skills)
+
+    out["axes_raw"] = {
+        "throughput":  round(throughput, 1),
+        "frugality":   round(cost_per_prm, 4),  # show raw $/prompt
+        "reliability": round(reliability, 3),
+        "curiosity":   int(curiosity),
+        "range":       int(proj_range),
+        "mastery":     int(mastery),
+    }
+    # Frugality + reliability only register when there's source data. A
+    # corpus with zero spend or zero tool calls is missing-data, not
+    # perfect frugality / perfect reliability — otherwise Newcomers
+    # would falsely score 1.0 on both axes from a divide-by-zero.
+    frugality_axis = (
+        _normalize(cost_per_prm, _CARD_CAPS["frugality"], invert=True)
+        if out["prompts"] > 0 and out["cost_usd"] > 0 else 0.0
+    )
+    reliability_axis = (
+        _normalize(reliability, _CARD_CAPS["reliability"])
+        if out["tool_calls"] > 0 else 0.0
+    )
+    out["axes"] = {
+        "throughput":  _normalize(throughput,  _CARD_CAPS["throughput"]),
+        "frugality":   frugality_axis,
+        "reliability": reliability_axis,
+        "curiosity":   _normalize(curiosity,   _CARD_CAPS["curiosity"]),
+        "range":       _normalize(proj_range,  _CARD_CAPS["range"]),
+        "mastery":     _normalize(mastery,     _CARD_CAPS["mastery"]),
+    }
+
+    # Rating: weighted average mapped to 40..99 so even a Newcomer gets a
+    # card, and the elite ceiling stays sub-100 (FIFA convention).
+    avg = sum(out["axes"].values()) / len(out["axes"])
+    out["rating"] = max(40, min(99, round(40 + 59 * avg)))
+
+    # Archetype: dominant axis if it's clearly ahead, else Generalist.
+    # Newcomer overrides everything when there's basically no data yet.
+    if max(out["axes"].values()) < 0.15 and out["sessions"] < 5:
+        out["archetype"] = _NEWCOMER
+    else:
+        top_axis = max(out["axes"], key=out["axes"].get)
+        top_val = out["axes"][top_axis]
+        runner_up = sorted(out["axes"].values(), reverse=True)[1]
+        # "Clearly ahead" = at least 1.25× the runner-up AND ≥ 0.4 absolute.
+        if top_val >= 0.4 and (runner_up == 0 or top_val / runner_up >= 1.25):
+            out["archetype"] = _ARCHETYPES[top_axis]
+        else:
+            out["archetype"] = _GENERALIST
+    return out
+
+
+def card_svg(stats: dict, *, width: int = 640, height: int = 880) -> str:
+    """FIFA-style card with a 6-axis spider chart, rating, and archetype.
+
+    Pure SVG so it renders identically without JS, copies cleanly into
+    screenshots, and inherits the page's typography stack. Polygons are
+    pre-computed in Python; the template just embeds the returned blob.
+    """
+    import math
+
+    rating = stats["rating"]
+    arch_name, arch_flavor = stats["archetype"]
+    axes = stats["axes"]
+    raw = stats["axes_raw"]
+
+    # Card tier colors. Mirrors FIFA but tuned for the watchmen palette.
+    if rating >= 90:
+        tier_grad = ("#fde68a", "#f59e0b")  # gold
+        tier_text = "#78350f"
+    elif rating >= 80:
+        tier_grad = ("#e5e7eb", "#9ca3af")  # silver
+        tier_text = "#374151"
+    elif rating >= 70:
+        tier_grad = ("#fed7aa", "#c2410c")  # bronze
+        tier_text = "#7c2d12"
+    else:
+        tier_grad = ("#e0e7ff", "#6366f1")  # indigo — Newcomer / Generalist
+        tier_text = "#3730a3"
+
+    # Spider geometry: hexagon, top vertex straight up.
+    cx, cy, r = width / 2, 470, 175
+    n = len(CARD_AXES)
+    angles = [(-math.pi / 2) + (2 * math.pi * i / n) for i in range(n)]
+    rings = [0.25, 0.5, 0.75, 1.0]
+    grid_polys: list[str] = []
+    for ring in rings:
+        pts = [
+            f"{cx + r * ring * math.cos(a):.1f},{cy + r * ring * math.sin(a):.1f}"
+            for a in angles
+        ]
+        grid_polys.append(
+            f'<polygon points="{" ".join(pts)}" fill="none" stroke="#e5e7eb" stroke-width="1"/>'
+        )
+    axis_lines: list[str] = []
+    label_marks: list[str] = []
+    for i, a in enumerate(angles):
+        x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+        axis_lines.append(
+            f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x:.1f}" y2="{y:.1f}" '
+            f'stroke="#e5e7eb" stroke-width="1"/>'
+        )
+        # Labels sit just outside the outer ring; anchor varies by quadrant
+        # so text doesn't overlap the polygon.
+        lx, ly = cx + (r + 22) * math.cos(a), cy + (r + 22) * math.sin(a)
+        if abs(math.cos(a)) < 0.1:
+            anchor = "middle"
+        elif math.cos(a) > 0:
+            anchor = "start"
+        else:
+            anchor = "end"
+        name = CARD_AXES[i]
+        label_marks.append(
+            f'<text x="{lx:.1f}" y="{ly + 4:.1f}" text-anchor="{anchor}" '
+            f'font-size="11" font-weight="600" fill="#374151" '
+            f'letter-spacing="0.05em">{name.upper()}</text>'
+        )
+        # Numeric value just below the label.
+        if name == "frugality":
+            num = f"${raw[name]:.3f}/prm" if raw[name] else "—"
+        elif name == "reliability":
+            num = f"{int(raw[name] * 100)}%"
+        else:
+            num = str(raw[name])
+        label_marks.append(
+            f'<text x="{lx:.1f}" y="{ly + 18:.1f}" text-anchor="{anchor}" '
+            f'font-size="11" fill="#6b7280">{num}</text>'
+        )
+
+    # The user's actual spider polygon.
+    user_pts = []
+    for i, a in enumerate(angles):
+        val = max(0.02, axes[CARD_AXES[i]])  # floor so axis is visible
+        x = cx + r * val * math.cos(a)
+        y = cy + r * val * math.sin(a)
+        user_pts.append(f"{x:.1f},{y:.1f}")
+    user_poly_pts = " ".join(user_pts)
+
+    # Bottom strip: total sessions / cost / top agent / favorite tool.
+    sessions_str = f"{stats['sessions']:,}"
+    cost_str = f"${stats['cost_usd']:,.2f}"
+    agent_str = adapter_label(stats["top_agent"][0]) if stats["top_agent"] else "—"
+    tool_str = stats["top_tool"][0] if stats["top_tool"] else "—"
+    first = stats["first_seen"] or "—"
+    last = stats["last_seen"] or "—"
+
+    arch_name_x = _xml_escape(arch_name)
+    arch_flavor_x = _xml_escape(arch_flavor)
+    agent_x = _xml_escape(agent_str)
+    tool_x = _xml_escape(tool_str)
+
+    return f'''<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="watchmen profile card">
+  <defs>
+    <linearGradient id="card-tier" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="{tier_grad[0]}"/>
+      <stop offset="100%" stop-color="{tier_grad[1]}"/>
+    </linearGradient>
+    <linearGradient id="user-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#4f46e5" stop-opacity="0.20"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Card body -->
+  <rect x="20" y="20" width="{width-40}" height="{height-40}" rx="24" ry="24"
+        fill="white" stroke="url(#card-tier)" stroke-width="6"/>
+
+  <!-- Header strip -->
+  <rect x="32" y="32" width="{width-64}" height="120" rx="14" ry="14"
+        fill="url(#card-tier)" opacity="0.18"/>
+
+  <!-- Rating (large, top-left) -->
+  <text x="80" y="120" font-size="86" font-weight="800" fill="{tier_text}"
+        letter-spacing="-0.04em" font-variant-numeric="tabular-nums">{rating}</text>
+  <text x="80" y="146" font-size="11" font-weight="700" fill="{tier_text}"
+        letter-spacing="0.18em">OVR</text>
+
+  <!-- Archetype -->
+  <text x="225" y="86" font-size="26" font-weight="700" fill="#111827"
+        letter-spacing="-0.01em">{arch_name_x}</text>
+  <text x="225" y="112" font-size="13" fill="#4b5563">{arch_flavor_x}</text>
+  <text x="225" y="138" font-size="11" fill="#6b7280" letter-spacing="0.05em">
+    {sessions_str} SESSIONS  ·  {first} → {last}
+  </text>
+
+  <!-- Spider chart -->
+  {''.join(grid_polys)}
+  {''.join(axis_lines)}
+  <polygon points="{user_poly_pts}"
+           fill="url(#user-fill)" stroke="#4f46e5" stroke-width="2.5"
+           stroke-linejoin="round"/>
+  {''.join(label_marks)}
+
+  <!-- Footer strip -->
+  <line x1="56" y1="745" x2="{width-56}" y2="745" stroke="#e5e7eb" stroke-width="1"/>
+
+  <text x="80" y="785" font-size="11" font-weight="600" fill="#6b7280" letter-spacing="0.1em">TOTAL SPEND</text>
+  <text x="80" y="815" font-size="24" font-weight="700" fill="#111827" font-variant-numeric="tabular-nums">{cost_str}</text>
+
+  <text x="240" y="785" font-size="11" font-weight="600" fill="#6b7280" letter-spacing="0.1em">TOP AGENT</text>
+  <text x="240" y="815" font-size="20" font-weight="700" fill="#111827">{agent_x}</text>
+
+  <text x="430" y="785" font-size="11" font-weight="600" fill="#6b7280" letter-spacing="0.1em">FAV TOOL</text>
+  <text x="430" y="815" font-size="20" font-weight="700" fill="#111827">{tool_x}</text>
+</svg>'''
+
+
 if __name__ == "__main__":
     # Quick CLI for dev: python metrics.py <project_key>
     import sys
