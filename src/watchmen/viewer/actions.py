@@ -182,10 +182,10 @@ def next_best_actions(
                 "kind": "high_friction",
                 "project_key": key,
                 "title": f"{key}: {' · '.join(bits)} in recent sessions",
-                "reason": "Cluster may indicate a missing skill or a brittle adapter. Check the insights digest.",
+                "reason": "Cluster may indicate a missing skill or a brittle adapter. Open the project to dig in.",
                 "command": "watchmen insights",
                 "run_action": None,
-                "href": "/insights",
+                "href": f"/p/{key}",
             })
 
     # Stable sort by severity (high > medium > low), preserving project

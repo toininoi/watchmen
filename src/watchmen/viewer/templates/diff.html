@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ commit.short }} — {{ project.project_key }} — watchmen{% endblock %}
+{% block title %}{{ commit.short }} · {{ project.project_key }} · watchmen{% endblock %}
 {% block content %}
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html@3.4.48/bundles/css/diff2html.min.css" />
@@ -35,7 +35,7 @@
 
 {% if is_initial %}
 <div class="mb-4 px-4 py-3 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
-  <strong>Baseline snapshot.</strong> This is the first commit for this project — git has no parent to compare against, so the renderer shows every file as added. The content was already on disk before this; we just took the initial snapshot here. The <em>next</em> curator run will produce a real diff against this baseline.
+  <strong>Baseline snapshot.</strong> This is the first commit for this project, so git has no parent to compare against and the renderer shows every file as added. The content was already on disk before this; we just took the initial snapshot here. The <em>next</em> curator run will produce a real diff against this baseline.
 </div>
 {% endif %}
 

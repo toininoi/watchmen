@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}insights — watchmen{% endblock %}
+{% block title %}insights · watchmen{% endblock %}
 {% block content %}
 
 <style>
@@ -17,7 +17,7 @@
 
 <div class="mb-6 flex items-end justify-between">
   <div>
-    <h1 class="text-2xl font-semibold">◷ Watchmen — insights</h1>
+    <h1 class="text-2xl font-semibold">Watchmen insights</h1>
     <div class="text-sm text-gray-600 mt-1">
       LLM-synthesized digest grounded in your corpus across Claude Code,
       Codex, and pi.dev. Cross-repo patterns, friction signals, untapped
@@ -28,7 +28,7 @@
     <div class="text-xs text-gray-500 mt-2">
       Looking for raw numbers? See
       <a href="/metrics" class="text-blue-600 font-medium hover:underline">↗ aggregated metrics</a>
-      — sessions, cost, tool errors, per-agent breakdown.
+      for sessions, cost, tool errors, per-agent breakdown.
     </div>
   </div>
   <div class="text-xs text-gray-500 text-right">
@@ -208,7 +208,7 @@
       {% endif %}
     </div>
   </div>
-  <div class="wm-cmp__narrative prose prose-sm max-w-none">
+  <div class="wm-cmp__narrative markdown-body">
     {{ cmp_narrative_html|safe }}
   </div>
 </section>
@@ -229,7 +229,7 @@
 </div>
 {% else %}
 <div class="bg-gray-50 border border-gray-200 rounded-lg p-6 text-sm text-gray-600 mb-8">
-  No cached deep digest yet. Run <code class="bg-white px-1.5 py-0.5 rounded border">watchmen insights</code> from the CLI to generate one — it'll cache under <code>~/.watchmen/insights/</code> and appear here on next page load.
+  No cached deep digest yet. Run <code class="bg-white px-1.5 py-0.5 rounded border">watchmen insights</code> from the CLI to generate one. It'll cache under <code>~/.watchmen/insights/</code> and appear here on next page load.
 </div>
 {% endif %}
 

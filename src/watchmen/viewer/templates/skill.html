@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ skill_slug }} — {{ project_key }} — watchmen{% endblock %}
+{% block title %}{{ skill_slug }} · {{ project_key }} · watchmen{% endblock %}
 {% block content %}
 
 <div class="mb-6 flex items-start justify-between gap-4">
@@ -116,7 +116,7 @@
             <td class="py-1.5 pr-3 text-xs">
               <span class="adapter-pill">{{ s.agent }}</span>
             </td>
-            <td class="py-1.5 pr-3 text-xs text-gray-600">{{ s.date or "—" }}</td>
+            <td class="py-1.5 pr-3 text-xs text-gray-600">{{ s.date or "·" }}</td>
             <td class="py-1.5 text-xs {% if s.found %}text-gray-700{% else %}text-gray-400 italic{% endif %}">
               {{ s.snippet }}{% if not s.found %} <span class="text-gray-400">(not in corpus)</span>{% endif %}
             </td>

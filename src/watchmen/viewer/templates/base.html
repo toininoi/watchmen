@@ -396,24 +396,18 @@
       font-size: 11px;
       font-family: ui-monospace, SFMono-Regular, monospace;
     }
+    /* Narrative typography is delegated to .markdown-body (the github-
+       markdown-css class also used by the deep-digest body) so both
+       LLM-rendered sections on /insights match in size + spacing. We
+       only override the outer wrapper margin here. */
     .wm-cmp__narrative {
       margin-bottom: 22px;
-      font-size: 13.5px;
-      line-height: 1.65;
-      color: hsl(var(--foreground));
     }
-    .wm-cmp__narrative h3 {
-      font-size: 14px;
-      font-weight: 600;
-      margin-top: 16px;
-      margin-bottom: 6px;
-      color: hsl(var(--foreground));
+    .wm-cmp__narrative.markdown-body {
+      padding: 0;
+      max-width: 100%;
+      background: transparent;
     }
-    .wm-cmp__narrative h3:first-child { margin-top: 0; }
-    .wm-cmp__narrative p { margin: 8px 0; }
-    .wm-cmp__narrative ul { margin: 8px 0 8px 18px; }
-    .wm-cmp__narrative li { margin: 4px 0; }
-    .wm-cmp__narrative strong { color: hsl(var(--foreground)); font-weight: 600; }
     .wm-cmp__grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -599,11 +593,6 @@
       letter-spacing: 0.06em; text-transform: uppercase;
       color: hsl(var(--foreground));
     }
-    .wm-actions__dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: hsl(var(--accent));
-      box-shadow: 0 0 0 3px hsl(var(--accent) / 0.18);
-    }
     .wm-actions__sub {
       font-size: 11px; color: hsl(var(--muted-foreground));
     }
@@ -644,11 +633,10 @@
       padding: 10px 12px;
       border: 1px solid hsl(var(--border));
       border-radius: 10px;
-      background: hsl(var(--muted) / 0.25);
+      background: hsl(var(--card));
+      transition: border-color 120ms ease;
     }
-    .wm-actions__item--high   { border-left: 3px solid hsl(0 75% 50%); }
-    .wm-actions__item--medium { border-left: 3px solid hsl(35 90% 50%); }
-    .wm-actions__item--low    { border-left: 3px solid hsl(217 91% 60%); }
+    .wm-actions__item:hover { border-color: hsl(var(--border-strong)); }
     .wm-actions__item-left {
       display: flex; align-items: flex-start; gap: 10px;
       min-width: 0; flex: 1;
@@ -772,7 +760,7 @@
     <div class="max-w-7xl mx-auto flex items-center justify-between">
       <div class="flex items-center gap-2">
         <a href="/" class="font-semibold text-base mr-3" style="color: hsl(var(--foreground));">
-          <span aria-hidden="true">◷</span> watchmen
+          watchmen
         </a>
         {% set path = request.url.path if request else '' %}
         <a href="/"         class="wm-nav-link text-sm {% if path == '/' %}is-active{% endif %}">Dashboard</a>
@@ -782,7 +770,7 @@
         <a href="/doctor"   class="wm-nav-link text-sm {% if path.startswith('/doctor') %}is-active{% endif %}">Doctor</a>
         <a href="/settings" class="wm-nav-link text-sm {% if path.startswith('/settings') %}is-active{% endif %}">Settings</a>
       </div>
-      <div class="text-xs" style="color: hsl(var(--muted-foreground));">local viewer</div>
+      <div></div>
     </div>
   </nav>
   <main class="max-w-7xl mx-auto px-6 py-6">
@@ -846,20 +834,26 @@
         const chart = echarts.init(el, null, { renderer: 'svg' });
         el.__wmChart = chart;
 
-        // Sparse axis labels: aim for ~5-7 ticks regardless of point count.
+        // Sparklines (height < 60px) hide their x-axis tick labels because the
+        // canvas is too narrow for any meaningful date ticks — they'd overlap
+        // into "Apr 28Apr 28May 8May 8" mush. Hover tooltip still surfaces the
+        // exact date, so users never lose access to the temporal anchor.
+        const isSparkline = (el.clientHeight || 0) < 60;
         const labelInterval = Math.max(0, Math.floor(points.length / 6) - 1);
 
         chart.setOption({
           animation: false,
-          grid: { left: 4, right: 4, top: 10, bottom: 22, containLabel: false },
+          grid: { left: 4, right: 4, top: 4, bottom: isSparkline ? 4 : 22, containLabel: false },
           xAxis: {
             type: 'category',
             data: points.map(p => p.date),
             boundaryGap: false,
             axisLine:  { show: false },
             axisTick:  { show: false },
-            axisLabel: { color: AXIS_LABEL, fontSize: 10, interval: labelInterval,
-                         formatter: (v) => fmtDate(v).short },
+            axisLabel: isSparkline
+              ? { show: false }
+              : { color: AXIS_LABEL, fontSize: 10, interval: labelInterval,
+                  formatter: (v) => fmtDate(v).short },
           },
           yAxis: {
             type: 'value',
