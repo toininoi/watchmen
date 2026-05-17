@@ -1,5 +1,6 @@
 """watchmen viewer — local FastAPI dashboard for browsing analyses + skill bundles + CLAUDE.md."""
 
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -8,9 +9,16 @@ from pathlib import Path
 import bleach
 import markdown as md
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, STATE_DB
+from watchmen.util import (
+    ADAPTER_SHORT,
+    BLOCKLIST_FILE,
+    PINNED_FILE,
+    read_skill_list,
+    write_skill_list,
+)
 
 ROOT = Path(__file__).parent.parent  # src/watchmen/
 ANALYSES = ANALYSES_DIR
@@ -124,6 +132,135 @@ def list_recent_runs(limit: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _curation_log_excerpt(proj_dir: Path, skill_slug: str, skill_name: str) -> str:
+    """Pull the relevant block from _curation_log.md for a given skill.
+    Mirrors commands.inspect._curation_log_excerpt; copied here to keep the
+    viewer module standalone (no cross-imports into commands/)."""
+    log = proj_dir / "_curation_log.md"
+    if not log.exists():
+        return ""
+    lines = log.read_text().splitlines()
+    needles = (skill_slug.lower(), skill_name.lower())
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and any(n in line.lower() for n in needles):
+            body = [line]
+            for j in range(i + 1, min(len(lines), i + 30)):
+                if lines[j].startswith("## "):
+                    break
+                body.append(lines[j])
+            return "\n".join(body).strip()
+    return ""
+
+
+def get_skill_provenance(project_key: str, skill_slug: str) -> dict:
+    """Why does this skill exist? Returns the candidate's stated triggers,
+    source files (with existence check), source sessions cross-referenced
+    against corpus.db, and the curator's rationale excerpt.
+
+    Returns {} when there's no candidate match — callers should treat that
+    as "no provenance available" and skip the section in the template."""
+    proj_dir = BUNDLES / project_key
+    candidates_path = proj_dir / "_candidates.json"
+    if not candidates_path.exists():
+        return {}
+    try:
+        cands = json.loads(candidates_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    match = next(
+        (c for c in cands if c.get("slug") == skill_slug
+         or c.get("name", "").lower() == skill_slug.lower()),
+        None,
+    )
+    if not match:
+        return {}
+
+    name = match.get("name", skill_slug)
+    slug = match.get("slug", skill_slug)
+    when_to_use = match.get("when_to_use") or []
+    if isinstance(when_to_use, str):
+        when_to_use = [when_to_use]
+    source_files = match.get("source_files") or []
+    source_files_resolved = [
+        {"path": f, "exists": Path(f).exists()} for f in source_files
+    ]
+
+    # Cross-reference session ids with corpus.db. Tolerates free-form
+    # labels (codex/pi sessions sometimes include annotations) by matching
+    # on the first whitespace/paren-delimited token via LIKE prefix.
+    sessions: list[dict] = []
+    raw_ids = match.get("session_ids") or []
+    if raw_ids and CORPUS_DB.exists():
+        try:
+            cc = sqlite3.connect(str(CORPUS_DB))
+            cc.row_factory = sqlite3.Row
+            try:
+                cc.execute("SELECT 1 FROM sessions LIMIT 1")
+            except sqlite3.OperationalError:
+                cc.close()
+                cc = None
+        except sqlite3.Error:
+            cc = None
+        if cc is not None:
+            for sid in raw_ids:
+                short = (
+                    sid.split()[0].split("(")[0].strip()
+                    if isinstance(sid, str) else str(sid)
+                )
+                row = cc.execute(
+                    """SELECT s.session_id, s.agent, s.started_at,
+                              (SELECT text FROM prompts
+                               WHERE session_id = s.session_id
+                               ORDER BY rowid LIMIT 1) AS first_prompt
+                       FROM sessions s
+                       WHERE s.session_id LIKE ? || '%' LIMIT 1""",
+                    (short,),
+                ).fetchone()
+                if row:
+                    snippet = (row["first_prompt"] or "").replace("\n", " ")[:120]
+                    sessions.append({
+                        "id": short[:14],
+                        "agent": ADAPTER_SHORT.get(row["agent"], row["agent"]),
+                        "agent_full": row["agent"],
+                        "date": (row["started_at"] or "")[:10],
+                        "snippet": snippet,
+                        "found": True,
+                    })
+                else:
+                    sessions.append({
+                        "id": short[:14],
+                        "agent": "?",
+                        "agent_full": "",
+                        "date": "",
+                        "snippet": str(sid)[:120],
+                        "found": False,
+                    })
+            cc.close()
+
+    excerpt = _curation_log_excerpt(proj_dir, slug, name)
+    return {
+        "name": name,
+        "slug": slug,
+        "description": match.get("description", ""),
+        "when_to_use": list(when_to_use)[:8],
+        "when_to_use_more": max(0, len(when_to_use) - 8),
+        "source_files": source_files_resolved,
+        "sessions": sessions,
+        "curator_excerpt": excerpt,
+    }
+
+
+def get_skill_status(project_key: str, skill_slug: str) -> dict:
+    """Pinned / blocked status of a skill. Drives the control buttons:
+    Pin vs Unpin label, Drop confirm prompt, restore-from-blocklist hint."""
+    pinned = read_skill_list(project_key, PINNED_FILE)
+    blocked = read_skill_list(project_key, BLOCKLIST_FILE)
+    return {
+        "pinned": skill_slug in pinned,
+        "blocked": skill_slug in blocked,
+    }
+
+
 # ─── App ────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="watchmen viewer")
@@ -211,12 +348,74 @@ def skill_page(request: Request, project_key: str, skill_slug: str):
                 "rel": str(f.relative_to(skill_dir)),
                 "size": f.stat().st_size,
             })
+    provenance = get_skill_provenance(project_key, skill_slug)
+    status = get_skill_status(project_key, skill_slug)
     return TEMPLATES.TemplateResponse(request, "skill.html", {
         "project_key": project_key,
         "skill_slug": skill_slug,
         "skill_md": skill_md_html,
         "files": files,
+        "provenance": provenance,
+        "status": status,
     })
+
+
+# ─── Skill control endpoints ────────────────────────────────────────────────
+# Mutate pin/blocklist state and (for drop) remove the bundle directory.
+# Plain POST → 303 redirect pattern: keeps the browser back-button sane and
+# avoids needing JSON fetch. CLI parity comes from the shared util helpers.
+
+def _skill_or_404(project_key: str, skill_slug: str) -> Path:
+    skill_dir = BUNDLES / project_key / "skills" / skill_slug
+    if not skill_dir.exists():
+        raise HTTPException(404, f"skill {skill_slug} not found")
+    return skill_dir
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/pin")
+def skill_pin(project_key: str, skill_slug: str):
+    _skill_or_404(project_key, skill_slug)
+    pinned = read_skill_list(project_key, PINNED_FILE)
+    pinned.add(skill_slug)
+    write_skill_list(project_key, PINNED_FILE, pinned)
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/unpin")
+def skill_unpin(project_key: str, skill_slug: str):
+    pinned = read_skill_list(project_key, PINNED_FILE)
+    pinned.discard(skill_slug)
+    write_skill_list(project_key, PINNED_FILE, pinned)
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/drop")
+def skill_drop(project_key: str, skill_slug: str):
+    """Add to blocklist + remove the bundle directory. After this the skill
+    page 404s — so redirect to the project page instead."""
+    skill_dir = _skill_or_404(project_key, skill_slug)
+    blocklist = read_skill_list(project_key, BLOCKLIST_FILE)
+    blocklist.add(skill_slug)
+    write_skill_list(project_key, BLOCKLIST_FILE, blocklist)
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
+    return RedirectResponse(url=f"/p/{project_key}", status_code=303)
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/restore")
+def skill_restore(project_key: str, skill_slug: str):
+    """Remove from blocklist; the next curator run can re-propose the slug.
+    Used on a still-present bundle that was *marked* blocked but not dropped."""
+    blocklist = read_skill_list(project_key, BLOCKLIST_FILE)
+    blocklist.discard(skill_slug)
+    write_skill_list(project_key, BLOCKLIST_FILE, blocklist)
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
 
 
 @app.get("/p/{project_key}/skills/{skill_slug}/files/{file_rel:path}", response_class=HTMLResponse)

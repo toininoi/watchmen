@@ -500,37 +500,63 @@
        a theme tuned to our HSL design tokens (gradient area fill, dashed
        grid, hover-vertical-line tooltip). Templates only set sizes +
        optional title/footer wrapper. */
-    /* Axis legend below the radar — explains what each spoke measures so
-       the chart isn't a "what does CURIOSITY mean" puzzle. Two-column dl
-       (axis name → description + elite cap) for clean alignment. */
+    /* Axis legend — full-width band below the hero. Sits as a footnote
+       to the spider chart: a quiet, three-column strip that explains
+       each spoke without competing with the chart or the stat grid. */
     .wm-axis-legend {
-      margin: 14px 4px 0;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 6px 16px;
+      margin: 4px 28px 18px;
+      padding: 14px 18px;
+      background: hsl(var(--muted) / 0.4);
+      border: 1px solid hsl(var(--border));
+      border-radius: 12px;
     }
-    .wm-axis-legend__row {
-      display: grid;
-      grid-template-columns: 78px 1fr;
-      align-items: baseline;
-      column-gap: 8px;
-      padding-top: 6px;
-      border-top: 1px solid hsl(var(--border));
+    .wm-axis-legend > summary {
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: hsl(var(--muted-foreground));
+      list-style: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
     }
-    .wm-axis-legend dt {
+    .wm-axis-legend > summary::-webkit-details-marker { display: none; }
+    .wm-axis-legend > summary::before {
+      content: "▸";
+      font-size: 10px;
+      transition: transform 160ms ease;
+      color: hsl(var(--muted-foreground));
+    }
+    .wm-axis-legend[open] > summary::before { transform: rotate(90deg); }
+    .wm-axis-legend > summary:hover { color: hsl(var(--foreground)); }
+    .wm-axis-legend__grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px 28px;
+    }
+    @media (max-width: 900px) {
+      .wm-axis-legend__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 560px) {
+      .wm-axis-legend__grid { grid-template-columns: 1fr; }
+    }
+    .wm-axis-legend__item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .wm-axis-legend__name {
       font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
       color: hsl(var(--foreground));
       text-transform: uppercase;
-      margin: 0;
-    }
-    .wm-axis-legend dd {
-      margin: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
     }
     .wm-axis-legend__desc {
-      font-size: 11.5px; line-height: 1.35;
+      font-size: 12px; line-height: 1.4;
       color: hsl(var(--foreground));
     }
     .wm-axis-legend__elite {

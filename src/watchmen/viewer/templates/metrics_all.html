@@ -60,17 +60,6 @@
            data-wm-chart="radar"
            data-color="hsl(217, 91%, 60%)"
            data-points='{{ card_radar_data|tojson }}'></div>
-      <dl class="wm-axis-legend">
-        {% for a in card_axis_legend %}
-        <div class="wm-axis-legend__row">
-          <dt>{{ a.name }}</dt>
-          <dd>
-            <span class="wm-axis-legend__desc">{{ a.desc }}</span>
-            <span class="wm-axis-legend__elite">elite ≈ {{ a.elite }}</span>
-          </dd>
-        </div>
-        {% endfor %}
-      </dl>
     </div>
     <div class="wm-profile__grid">
       {% for group in card_stats.attribute_groups %}
@@ -86,6 +75,21 @@
       {% endfor %}
     </div>
   </div>
+
+  <!-- Axis legend: full-width muted band explaining what each spider spoke
+       measures. Lives BELOW the hero so it doesn't cramp the chart column. -->
+  <details class="wm-axis-legend" open>
+    <summary>What do these axes measure?</summary>
+    <div class="wm-axis-legend__grid">
+      {% for a in card_axis_legend %}
+      <div class="wm-axis-legend__item">
+        <div class="wm-axis-legend__name">{{ a.name }}</div>
+        <div class="wm-axis-legend__desc">{{ a.desc }}</div>
+        <div class="wm-axis-legend__elite">elite ≈ {{ a.elite }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
 
   <!-- Mini-visualization row: agent donut · top tools bars · activity sparklines. -->
   <div class="wm-profile__visuals">
