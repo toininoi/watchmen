@@ -1741,6 +1741,71 @@ def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
             assert "Claude Code" in html
 
 
+def test_viewer_skill_page_renders_provenance_and_controls(tmp_path, monkeypatch):
+    """Skill detail page should surface `watchmen why` data inline
+    (triggers, source files, sessions, curator excerpt) AND let the user
+    pin/drop without dropping to CLI. Verifies the GET payload contains
+    the new landmarks AND the POST /pin handler mutates _pinned.json."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import json as _json
+    from fastapi.testclient import TestClient
+    from watchmen import cli as _cli
+    from watchmen.viewer import server as viewer_server
+
+    # Build a fake bundle: skills/demo/SKILL.md + _candidates.json with the
+    # slug "demo" so get_skill_provenance() has triggers + source_files +
+    # session_ids to render. No corpus.db, so sessions show "(not in corpus)".
+    project = "smoke-demo"
+    bundles = tmp_path / "bundles"
+    skill_dir = bundles / project / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: smoke test skill\n---\n\n# Demo\n")
+    (bundles / project / "_candidates.json").write_text(_json.dumps([
+        {
+            "slug": "demo",
+            "name": "demo",
+            "description": "smoke test skill",
+            "when_to_use": ["whenever the smoke test runs"],
+            "source_files": [str(skill_dir / "SKILL.md")],
+            "session_ids": ["sess-abc123"],
+        }
+    ]))
+    (bundles / project / "_curation_log.md").write_text(
+        "## 2026-05-16\n## demo\n- rationale: keep it green\n"
+    )
+
+    # Override cli.ROOT so util.bundle_dir() points at our tmp bundles AND
+    # patch the viewer's module-global BUNDLES constant (captured at import).
+    monkeypatch.setattr(_cli, "ROOT", tmp_path)
+    monkeypatch.setattr(viewer_server, "BUNDLES", bundles)
+
+    client = TestClient(viewer_server.app)
+    r = client.get(f"/p/{project}/skills/demo")
+    assert r.status_code == 200, f"skill page returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    # Provenance landmarks.
+    assert "Provenance" in html
+    assert "When to use" in html
+    assert "whenever the smoke test runs" in html
+    assert "Source files" in html
+    assert "rationale: keep it green" in html  # curator excerpt
+    # Controls.
+    assert f'action="/p/{project}/skills/demo/pin"' in html
+    assert f'action="/p/{project}/skills/demo/drop"' in html
+
+    # POST /pin should write _pinned.json + 303 to the skill page.
+    r2 = client.post(f"/p/{project}/skills/demo/pin", follow_redirects=False)
+    assert r2.status_code == 303
+    assert r2.headers["location"].endswith(f"/p/{project}/skills/demo")
+    pinned_file = bundles / project / "_pinned.json"
+    assert pinned_file.exists() and "demo" in _json.loads(pinned_file.read_text())
+
+    # Page now flips Pin → Unpin and shows the pill.
+    r3 = client.get(f"/p/{project}/skills/demo")
+    assert "Unpin" in r3.text and "pinned" in r3.text
+
+
 def test_viewer_base_template_exposes_insights_nav_link():
     """Regression guard for the nav: the Insights link must live in
     base.html (visible from every viewer page), not just on the insights

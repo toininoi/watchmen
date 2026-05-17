@@ -2,16 +2,143 @@
 {% block title %}{{ skill_slug }} — {{ project_key }} — watchmen{% endblock %}
 {% block content %}
 
-<div class="mb-6">
-  <div class="text-xs text-gray-500 mb-1">
-    <a href="/" class="hover:text-gray-700">dashboard</a> /
-    <a href="/p/{{ project_key }}" class="hover:text-gray-700">{{ project_key }}</a> /
+<div class="mb-6 flex items-start justify-between gap-4">
+  <div class="min-w-0 flex-1">
+    <div class="text-xs text-gray-500 mb-1">
+      <a href="/" class="hover:text-gray-700">dashboard</a> /
+      <a href="/p/{{ project_key }}" class="hover:text-gray-700">{{ project_key }}</a> /
+    </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <h1 class="text-2xl font-semibold">{{ skill_slug }}</h1>
+      {% if status.pinned %}
+        <span class="wm-pill wm-pill-running" title="The next curator run will skip re-curating this skill.">🔒 pinned</span>
+      {% endif %}
+      {% if status.blocked %}
+        <span class="wm-pill wm-pill-fail" title="Slug is in the blocklist. Curator can't regenerate it until restored.">⊘ blocked</span>
+      {% endif %}
+    </div>
+    {% if provenance and provenance.description %}
+    <div class="text-sm text-gray-600 mt-1">{{ provenance.description }}</div>
+    {% endif %}
   </div>
-  <h1 class="text-2xl font-semibold">{{ skill_slug }}</h1>
+
+  <!-- Skill controls: pin/unpin + drop. POST → 303 redirect. -->
+  <div class="flex items-center gap-2 flex-shrink-0">
+    {% if status.pinned %}
+      <form method="post" action="/p/{{ project_key }}/skills/{{ skill_slug }}/unpin">
+        <button type="submit"
+                class="text-xs px-3 py-1.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50"
+                title="Unpin: future curator runs may regenerate this skill.">
+          Unpin
+        </button>
+      </form>
+    {% else %}
+      <form method="post" action="/p/{{ project_key }}/skills/{{ skill_slug }}/pin">
+        <button type="submit"
+                class="text-xs px-3 py-1.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50"
+                title="Pin: the next curator run will skip re-curating this skill.">
+          🔒 Pin
+        </button>
+      </form>
+    {% endif %}
+    <form method="post" action="/p/{{ project_key }}/skills/{{ skill_slug }}/drop"
+          onsubmit="return confirm('Drop {{ skill_slug }}? This removes the bundle directory and blocklists the slug so the curator can\'t regenerate it.');">
+      <button type="submit"
+              class="text-xs px-3 py-1.5 rounded-md border border-red-300 bg-white text-red-700 hover:bg-red-50"
+              title="Drop: remove the bundle and blocklist the slug.">
+        Drop
+      </button>
+    </form>
+  </div>
 </div>
 
+{% if provenance %}
+<!-- ── Provenance: where this skill came from ──────────────────────── -->
+<section class="wm-card mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold tracking-wide text-gray-800 uppercase">Provenance</h2>
+    <span class="text-xs text-gray-500">
+      from <code class="bg-gray-100 px-1.5 py-0.5 rounded">_candidates.json</code>
+      · CLI: <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen why {{ project_key }} {{ skill_slug }}</code>
+    </span>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+    {% if provenance.when_to_use %}
+    <div>
+      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">When to use</div>
+      <ul class="space-y-1 text-sm text-gray-800">
+        {% for t in provenance.when_to_use %}
+        <li class="flex gap-2"><span class="text-gray-400">•</span><span>{{ t }}</span></li>
+        {% endfor %}
+        {% if provenance.when_to_use_more %}
+        <li class="text-xs text-gray-500 italic">… {{ provenance.when_to_use_more }} more triggers</li>
+        {% endif %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if provenance.source_files %}
+    <div>
+      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Source files ({{ provenance.source_files|length }})</div>
+      <ul class="space-y-1 text-xs font-mono">
+        {% for sf in provenance.source_files[:10] %}
+        <li class="flex gap-2 items-baseline">
+          {% if sf.exists %}<span class="text-green-600">✓</span>{% else %}<span class="text-amber-500">?</span>{% endif %}
+          <span class="text-gray-700 truncate" title="{{ sf.path }}">{{ sf.path }}</span>
+        </li>
+        {% endfor %}
+        {% if provenance.source_files|length > 10 %}
+        <li class="text-xs text-gray-500 italic font-sans">… {{ provenance.source_files|length - 10 }} more</li>
+        {% endif %}
+      </ul>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if provenance.sessions %}
+  <div class="mt-5">
+    <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Source sessions ({{ provenance.sessions|length }})</div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm tabular">
+        <thead>
+          <tr class="text-xs text-gray-500 border-b border-gray-200">
+            <th class="text-left font-medium py-1.5 pr-3">session</th>
+            <th class="text-left font-medium py-1.5 pr-3">agent</th>
+            <th class="text-left font-medium py-1.5 pr-3">date</th>
+            <th class="text-left font-medium py-1.5">first prompt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in provenance.sessions %}
+          <tr class="border-b border-gray-100 last:border-b-0">
+            <td class="py-1.5 pr-3 font-mono text-xs text-gray-700">{{ s.id }}</td>
+            <td class="py-1.5 pr-3 text-xs">
+              <span class="adapter-pill">{{ s.agent }}</span>
+            </td>
+            <td class="py-1.5 pr-3 text-xs text-gray-600">{{ s.date or "—" }}</td>
+            <td class="py-1.5 text-xs {% if s.found %}text-gray-700{% else %}text-gray-400 italic{% endif %}">
+              {{ s.snippet }}{% if not s.found %} <span class="text-gray-400">(not in corpus)</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if provenance.curator_excerpt %}
+  <details class="mt-5">
+    <summary class="text-xs font-semibold text-gray-500 uppercase tracking-wide cursor-pointer hover:text-gray-700">Curator rationale</summary>
+    <pre class="mt-2 bg-gray-50 border border-gray-200 rounded p-3 text-xs text-gray-700 whitespace-pre-wrap font-mono leading-relaxed overflow-x-auto">{{ provenance.curator_excerpt }}</pre>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if files %}
-<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+<div class="wm-card mb-6">
   <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Files in this bundle</div>
   <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
     {% for f in files %}
@@ -25,7 +152,7 @@
 {% endif %}
 
 {% if skill_md %}
-<article class="bg-white border border-gray-200 rounded-lg markdown-body">
+<article class="wm-card markdown-body">
   {{ skill_md|safe }}
 </article>
 {% else %}
