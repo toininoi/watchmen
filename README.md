@@ -36,6 +36,18 @@ While you work, it:
 
 You install it. It runs. Your agents get better every day you use them.
 
+## The CLI
+
+```
+watchmen init
+```
+
+<p align="center">
+  <img src="docs/images/cli-banner.png" alt="watchmen onboarding banner" width="100%">
+</p>
+
+Six steps. Most run in seconds; the LLM passes (analyze + curate) are the only slow ones — you see the cost estimate before they run. Stop at any confirmation gate; nothing partial is left behind.
+
 ## Mission control
 
 A local web dashboard at `http://127.0.0.1:8979` — no cloud, no account. Top-of-page tells you:
@@ -45,25 +57,19 @@ A local web dashboard at `http://127.0.0.1:8979` — no cloud, no account. Top-o
 - **Active repos** — what's getting work this week?
 - **Skill leaderboard** — which repo's skills are firing most
 - **Status tiles** — traffic-light health per project (healthy / stale / uncurated)
-- **Next actions** — ranked queue: "kai-bench has 28 prompts to analyze · Run"
-
-<p align="center">
-  <img src="docs/images/mission-control.png" alt="watchmen mission control dashboard" width="100%">
-</p>
+- **Next actions** — ranked queue, e.g. "kai-bench has 28 prompts to analyze · Run"
 
 ### Per-project impact
 
 Drill into any tracked repo and you get a **before/after** view scoped to that project. 16-week chart of tool errors per session with a dashed annotation at the date the curator first landed. Pre/post comparison table: sessions, median tool errors, median prompts, median cost. Honest empty states when there isn't enough post-treatment data yet — never silently disappears.
-
-<p align="center">
-  <img src="docs/images/impact-card.png" alt="per-project impact card" width="100%">
-</p>
 
 Subtitle reads "Correlation only — not a controlled experiment." We don't oversell the signal.
 
 ### Three themes
 
 Light comic-pulp newsprint by default. **Doomsday** noir mode for the dark-mode crowd. **Rorschach** sepia-typewriter for diary-mode fans. Switch instantly at `/settings` — picker persists per browser via `localStorage`, no reload.
+
+> Dashboard + impact-card screenshots ship with v0.6 — generated against a mock corpus so no real project data leaks into the docs.
 
 ## Install
 
