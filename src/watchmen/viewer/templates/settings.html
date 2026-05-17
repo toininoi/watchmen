@@ -1,5 +1,80 @@
 {% extends "base.html" %}
 {% block title %}settings · watchmen{% endblock %}
+
+{% block head_extra %}
+<style>
+  /* Theme picker grid — 3 cards on desktop, stacks on mobile. The
+     swatch row is a flat horizontal strip showing the four spot
+     colors of each theme, so users can scan palettes at a glance.
+     Currently-active card gets a yellow check + accent ring. */
+  .wm-theme-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .wm-theme-card {
+    position: relative;
+    text-align: left;
+    padding: 14px 16px 16px;
+    background: hsl(var(--card));
+    border: 1.5px solid hsl(var(--ink) / 0.25);
+    border-radius: var(--panel-radius, 4px);
+    cursor: pointer;
+    transition: border-color 120ms ease, transform 120ms ease;
+    font-family: inherit;
+    color: inherit;
+  }
+  .wm-theme-card:hover {
+    border-color: hsl(var(--ink));
+    transform: translateY(-1px);
+  }
+  .wm-theme-card.is-active {
+    border-color: hsl(var(--ink));
+    box-shadow: 3px 3px 0 0 hsl(var(--ink));
+  }
+  .wm-theme-card__swatches {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    height: 28px;
+    border: 1px solid hsl(var(--ink) / 0.3);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+  .wm-theme-card__swatches > span { display: block; }
+  .wm-theme-card__name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: var(--h3-letter, 0.04em);
+    text-transform: var(--h3-transform, uppercase);
+    display: block;
+    color: hsl(var(--ink));
+  }
+  .wm-theme-card__desc {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: hsl(var(--ink-soft));
+    line-height: 1.45;
+  }
+  .wm-theme-card__check {
+    position: absolute;
+    top: 10px; right: 12px;
+    width: 22px; height: 22px;
+    display: none;
+    align-items: center; justify-content: center;
+    background: hsl(var(--watch-yellow));
+    color: hsl(var(--ink));
+    border: 1.5px solid hsl(var(--ink));
+    border-radius: 2px;
+    font-size: 14px; font-weight: 700;
+  }
+  .wm-theme-card.is-active .wm-theme-card__check { display: flex; }
+</style>
+{% endblock %}
+
 {% block content %}
 
 <div class="mb-6">
@@ -77,6 +152,55 @@
   </div>
 </div>
 
+<!-- ── Appearance / theme picker ─────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">Appearance</h2>
+
+<div class="wm-card mb-6">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-3">Theme</div>
+  <div class="text-sm text-gray-600 mb-4">
+    Saved per browser via <code class="bg-gray-100 px-1 rounded">localStorage</code>;
+    applies instantly with no reload.
+  </div>
+
+  <div class="wm-theme-grid">
+    <button type="button" data-wm-theme="comic" class="wm-theme-card">
+      <span class="wm-theme-card__swatches" aria-hidden="true">
+        <span style="background:#F1E8D2"></span>
+        <span style="background:#F5C518"></span>
+        <span style="background:#BC1D2E"></span>
+        <span style="background:#131316"></span>
+      </span>
+      <span class="wm-theme-card__name">Comic Pulp</span>
+      <span class="wm-theme-card__desc">Newsprint cream, ink panels, Watchmen yellow. The default.</span>
+      <span class="wm-theme-card__check" aria-hidden="true">✓</span>
+    </button>
+
+    <button type="button" data-wm-theme="doomsday" class="wm-theme-card">
+      <span class="wm-theme-card__swatches" aria-hidden="true">
+        <span style="background:#0E0F13"></span>
+        <span style="background:#16171D"></span>
+        <span style="background:#DC2832"></span>
+        <span style="background:#E8E9EE"></span>
+      </span>
+      <span class="wm-theme-card__name">Doomsday</span>
+      <span class="wm-theme-card__desc">Pure noir dark. Charcoal + sparing blood red for criticality.</span>
+      <span class="wm-theme-card__check" aria-hidden="true">✓</span>
+    </button>
+
+    <button type="button" data-wm-theme="rorschach" class="wm-theme-card">
+      <span class="wm-theme-card__swatches" aria-hidden="true">
+        <span style="background:#EFE4CC"></span>
+        <span style="background:#3D2C1A"></span>
+        <span style="background:#B8541F"></span>
+        <span style="background:#8B2528"></span>
+      </span>
+      <span class="wm-theme-card__name">Rorschach</span>
+      <span class="wm-theme-card__desc">Sepia notebook. Typewriter throughout. Diary mode.</span>
+      <span class="wm-theme-card__check" aria-hidden="true">✓</span>
+    </button>
+  </div>
+</div>
+
 <!-- ── Per-project settings ──────────────────────────────────────────── -->
 <h2 class="text-lg font-semibold mb-3">Tracked projects</h2>
 
@@ -135,5 +259,29 @@
   <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
 </div>
 {% endif %}
+
+<script>
+  // Theme picker: applies live + persists to localStorage. The FOUC-
+  // prevention script in base.html's <head> reads the same key before
+  // first paint on every page load, so the choice survives navigation.
+  (function () {
+    const STORAGE_KEY = 'watchmen.theme';
+    const cards = document.querySelectorAll('[data-wm-theme]');
+    const current = localStorage.getItem(STORAGE_KEY) || 'comic';
+
+    function applyTheme(name) {
+      document.documentElement.setAttribute('data-theme', name);
+      try { localStorage.setItem(STORAGE_KEY, name); } catch (_) {}
+      cards.forEach(c => c.classList.toggle('is-active', c.dataset.wmTheme === name));
+    }
+
+    cards.forEach(c => {
+      c.addEventListener('click', () => applyTheme(c.dataset.wmTheme));
+    });
+
+    // Initialize active state from current storage (default 'comic').
+    cards.forEach(c => c.classList.toggle('is-active', c.dataset.wmTheme === current));
+  })();
+</script>
 
 {% endblock %}

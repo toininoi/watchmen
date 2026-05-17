@@ -1,16 +1,30 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{{ theme_choice|default('comic') }}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}watchmen{% endblock %}</title>
 
-  <!-- Three font families via Bunny Fonts (GDPR-safe Google Fonts mirror):
-       Inter for body copy, Oswald for editorial display (h1/h2/h3 + brand
-       wordmark + section labels), Special Elite for accent moments (Latin
-       tagline + doctor mood-line). Used sparingly to stay restrained. -->
+  <!-- Pre-paint theme application. localStorage lookup runs before any CSS
+       loads, so the chosen theme is on <html> before first paint. Avoids
+       a flash from comic → doomsday/rorschach on every page load. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('watchmen.theme');
+        if (t === 'comic' || t === 'doomsday' || t === 'rorschach') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch (_) { /* localStorage disabled — fall back to server value */ }
+    })();
+  </script>
+
+  <!-- Four font families via Bunny Fonts (GDPR-safe Google Fonts mirror):
+       Inter for body, Oswald for comic-theme editorial display, Special
+       Elite for accent (typewriter), JetBrains Mono for doomsday + code
+       accents. All themes pick from this same set via CSS vars below. -->
   <link rel="preconnect" href="https://fonts.bunny.net" crossorigin />
-  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=inter:400,500,600,700|oswald:500,600,700|special-elite&display=swap" />
+  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=inter:400,500,600,700|oswald:500,600,700|special-elite|jetbrains-mono:400,500,600,700&display=swap" />
 
   <!-- Tailwind config has to be inlined BEFORE the CDN script so the JIT
        compiler picks up the extended theme on first render. -->
@@ -85,6 +99,73 @@
       --accent-soft:      221 50% 90%;   /* pale royal for active pills */
       --cyan:             185 80% 36%;
       --teal:             185 80% 36%;
+
+      /* ── Theme variables (overridden per data-theme) ──────────────
+         Every theme-sensitive surface reads its font and decorative
+         treatment through these so the alt themes ([data-theme] blocks
+         at the bottom of this <style>) only have to overwrite the
+         tokens, not duplicate the rules. */
+      --font-body:    'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+      --font-display: 'Oswald', 'Inter', system-ui, sans-serif;
+      --font-accent:  'Special Elite', Georgia, serif;
+      --font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+      /* h1/h2/h3 text-transform per theme — comic uppercases h2/h3 to
+         feel like newspaper section labels; doomsday + rorschach
+         don't. */
+      --h1-transform: none;
+      --h2-transform: uppercase;
+      --h2-letter:    0.02em;
+      --h3-transform: uppercase;
+      --h3-letter:    0.04em;
+      --h1-weight:    700;
+      --h1-letter:    -0.005em;
+
+      /* Page background pattern: halftone dots for comic; flat for
+         doomsday; horizontal ruled lines for rorschach. */
+      --bg-pattern: radial-gradient(circle at 1px 1px, hsl(var(--ink) / 0.06) 1px, transparent 1.2px);
+      --bg-size:    18px 18px;
+
+      /* Panel framing — comic uses sharp ink corners + hard offset
+         shadow; doomsday softens both; rorschach uses a small drop
+         shadow. */
+      --panel-radius:        4px;
+      --panel-border:        1.5px solid hsl(var(--ink));
+      --panel-shadow:        3px 3px 0 0 hsl(var(--ink));
+      --panel-shadow-hover:  4px 4px 0 0 hsl(var(--ink));
+      --panel-shadow-table:  2px 2px 0 0 hsl(var(--ink));
+      --panel-shadow-lg:     4px 4px 0 0 hsl(var(--ink));
+      --panel-shadow-profile:5px 5px 0 0 hsl(var(--ink));
+
+      /* Severity stamp fills — comic uses blood/yellow flat fills;
+         doomsday uses outlined chips; rorschach uses warm stamps. */
+      --sev-high-bg:     hsl(var(--blood));
+      --sev-high-fg:     hsl(var(--paper));
+      --sev-high-border: hsl(var(--ink));
+      --sev-med-bg:      hsl(var(--watch-yellow));
+      --sev-med-fg:      hsl(var(--ink));
+      --sev-med-border:  hsl(var(--ink));
+      --sev-low-bg:      hsl(var(--paper-2));
+      --sev-low-fg:      hsl(var(--ink));
+      --sev-low-border:  hsl(var(--ink));
+
+      /* Primary CTA — comic's ink-on-yellow stamp. */
+      --cta-bg:     hsl(var(--watch-yellow));
+      --cta-fg:     hsl(var(--ink));
+      --cta-border: 1.5px solid hsl(var(--ink));
+      --cta-bg-hover: hsl(var(--watch-yellow-2));
+
+      /* Verdict tile (Doctor) — comic uses a yellow stamp; doomsday
+         uses a thin red left-stripe; rorschach uses a sepia frame. */
+      --verdict-warn-bg:     hsl(var(--watch-yellow));
+      --verdict-warn-fg:     hsl(var(--ink));
+      --verdict-warn-border: hsl(var(--ink));
+      --verdict-fail-bg:     hsl(var(--blood) / 0.18);
+      --verdict-fail-fg:     hsl(var(--ink));
+      --verdict-fail-border: hsl(var(--ink));
+      --verdict-ok-bg:       hsl(142 50% 86%);
+      --verdict-ok-fg:       hsl(var(--ink));
+      --verdict-ok-border:   hsl(var(--ink));
     }
 
     /* ── Typography rhythm ──────────────────────────────────────────
@@ -93,31 +174,30 @@
        a Watchmen-era pulp poster without veering into kitsch.
        Special Elite (typewriter) reserved for accent moments only. */
     body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+      font-family: var(--font-body);
       font-feature-settings: 'cv11', 'ss01', 'ss03';
       letter-spacing: -0.005em;
       background-color: hsl(var(--paper));
-      /* Subtle halftone-dot newsprint texture. Low alpha so it reads as
-         "paper grain" rather than a pattern; fixed attachment so it
-         doesn't shift on scroll (would feel like a moving carpet). */
-      background-image:
-        radial-gradient(circle at 1px 1px, hsl(var(--ink) / 0.06) 1px, transparent 1.2px);
-      background-size: 18px 18px;
+      /* Per-theme background pattern: halftone dots (comic), flat
+         (doomsday), or horizontal ruled lines (rorschach). Fixed
+         attachment so it doesn't shift on scroll. */
+      background-image: var(--bg-pattern);
+      background-size: var(--bg-size);
       background-attachment: fixed;
       color: hsl(var(--ink));
     }
-    /* Display headings use Oswald — flat tracking, slightly uppercase
-       for h2/h3 section labels. h1 stays in title case so page titles
-       (project keys, skill slugs) read naturally. */
+    /* Display headings — font-family + transforms come from tokens so
+       each theme can choose its own voice (Oswald for comic, Inter
+       for doomsday, Special Elite for rorschach). */
     h1, h2, h3 {
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-weight: 600;
       letter-spacing: -0.005em;
       color: hsl(var(--ink));
     }
-    h1 { line-height: 1.1; font-weight: 700; }
-    h2 { line-height: 1.2; text-transform: uppercase; letter-spacing: 0.02em; }
-    h3 { line-height: 1.3; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.95rem; }
+    h1 { line-height: 1.1; font-weight: var(--h1-weight); letter-spacing: var(--h1-letter); text-transform: var(--h1-transform); }
+    h2 { line-height: 1.2; text-transform: var(--h2-transform); letter-spacing: var(--h2-letter); }
+    h3 { line-height: 1.3; text-transform: var(--h3-transform); letter-spacing: var(--h3-letter); font-size: 0.95rem; }
     /* Markdown body keeps its own header rhythm (github-markdown-css)
        — restore there so long-form content reads as documentation, not
        comic panels. */
@@ -163,7 +243,7 @@
       display: inline-block; flex: 0 0 auto;
     }
     .wm-brand__name {
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-weight: 700;
       font-size: 18px;
       letter-spacing: 0.06em;
@@ -172,7 +252,7 @@
       line-height: 1;
     }
     .wm-brand__tagline {
-      font-family: 'Special Elite', Georgia, serif;
+      font-family: var(--font-accent);
       font-size: 10.5px;
       color: hsl(var(--ink) / 0.6);
       letter-spacing: 0.02em;
@@ -205,24 +285,24 @@
     .stat-card, .wm-card {
       background: hsl(var(--card));
       color: hsl(var(--ink));
-      border: 1.5px solid hsl(var(--ink));
-      border-radius: 4px;
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
       padding: 16px 18px;
-      box-shadow: 3px 3px 0 0 hsl(var(--ink));
+      box-shadow: var(--panel-shadow);
       transition: transform 120ms ease, box-shadow 120ms ease;
     }
     .stat-card:hover, .wm-card:hover {
       transform: translate(-1px, -1px);
-      box-shadow: 4px 4px 0 0 hsl(var(--ink));
+      box-shadow: var(--panel-shadow-hover);
     }
     /* Table-host cards: no hard offset shadow, just the ink border.
        Dense rows already create enough rhythm. */
     .wm-card-table {
-      box-shadow: 2px 2px 0 0 hsl(var(--ink));
+      box-shadow: var(--panel-shadow-table);
     }
     .wm-card-table:hover {
       transform: none;
-      box-shadow: 2px 2px 0 0 hsl(var(--ink));
+      box-shadow: var(--panel-shadow-table);
     }
     /* Markdown-body cards (CLAUDE.md, SKILL.md, deep digest) drop the
        offset shadow entirely — the comic frame would compete with
@@ -306,11 +386,11 @@
     .wm-profile {
       position: relative;
       background: hsl(var(--card));
-      border: 1.5px solid hsl(var(--ink));
-      border-radius: 4px;
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
       padding: 0;
       overflow: hidden;
-      box-shadow: 5px 5px 0 0 hsl(var(--ink));
+      box-shadow: var(--panel-shadow-profile);
     }
     .wm-profile__header {
       padding: 22px 28px;
@@ -325,18 +405,18 @@
       letter-spacing: -0.04em; font-variant-numeric: tabular-nums;
     }
     .wm-profile__ovr {
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-size: 10.5px; font-weight: 700; letter-spacing: 0.2em;
       margin-top: 4px; text-transform: uppercase;
     }
     .wm-profile__arch {
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-size: 24px; font-weight: 700;
       letter-spacing: 0.02em; text-transform: uppercase;
       color: hsl(var(--ink));
     }
     .wm-profile__flavor {
-      font-family: 'Special Elite', Georgia, serif;
+      font-family: var(--font-accent);
       font-size: 13px; color: hsl(var(--ink-soft));
       margin-top: 4px;
     }
@@ -510,10 +590,10 @@
        /insights. Card grid auto-fits 2 columns on desktop, 1 on mobile. */
     .wm-cmp {
       background: hsl(var(--card));
-      border: 1.5px solid hsl(var(--ink));
-      border-radius: 4px;
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
       padding: 22px 26px 26px;
-      box-shadow: 4px 4px 0 0 hsl(var(--ink));
+      box-shadow: var(--panel-shadow-lg);
     }
     .wm-cmp__header {
       margin-bottom: 18px;
@@ -521,7 +601,7 @@
       border-bottom: 1.5px solid hsl(var(--ink));
     }
     .wm-cmp__title {
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-size: 19px; font-weight: 700;
       letter-spacing: 0.04em; text-transform: uppercase;
       color: hsl(var(--ink));
@@ -717,10 +797,10 @@
        Quiet when there's nothing to do (template skips render).      */
     .wm-actions {
       background: hsl(var(--card));
-      border: 1.5px solid hsl(var(--ink));
-      border-radius: 4px;
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
       padding: 16px 18px;
-      box-shadow: 4px 4px 0 0 hsl(var(--ink));
+      box-shadow: var(--panel-shadow-lg);
     }
     .wm-actions__header {
       display: flex; align-items: center; justify-content: space-between;
@@ -730,7 +810,7 @@
     }
     .wm-actions__title {
       display: flex; align-items: center; gap: 8px;
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-size: 17px; font-weight: 700;
       letter-spacing: 0.06em; text-transform: uppercase;
       color: hsl(var(--ink));
@@ -792,7 +872,7 @@
        paint-fill backgrounds. High → blood crimson. Medium → Watchmen
        yellow. Low → cream paper. */
     .wm-actions__sev {
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-size: 10px; font-weight: 700;
       letter-spacing: 0.1em; text-transform: uppercase;
       padding: 2px 7px;
@@ -802,9 +882,9 @@
       flex: 0 0 auto;
       line-height: 1.3;
     }
-    .wm-actions__sev--high   { background: hsl(var(--blood));        color: hsl(var(--paper)); }
-    .wm-actions__sev--medium { background: hsl(var(--watch-yellow)); color: hsl(var(--ink)); }
-    .wm-actions__sev--low    { background: hsl(var(--paper-2));      color: hsl(var(--ink)); }
+    .wm-actions__sev--high   { background: var(--sev-high-bg); color: var(--sev-high-fg); border-color: var(--sev-high-border); }
+    .wm-actions__sev--medium { background: var(--sev-med-bg);  color: var(--sev-med-fg);  border-color: var(--sev-med-border); }
+    .wm-actions__sev--low    { background: var(--sev-low-bg);  color: var(--sev-low-fg);  border-color: var(--sev-low-border); }
     .wm-actions__item-title {
       font-size: 13px; font-weight: 600;
       color: hsl(var(--foreground));
@@ -847,20 +927,20 @@
        rather than a glossy material button. */
     .wm-actions__run-btn {
       display: inline-block;
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-size: 12px; font-weight: 700;
       letter-spacing: 0.06em; text-transform: uppercase;
       padding: 5px 12px;
       border-radius: 3px;
-      background: hsl(var(--watch-yellow));
-      color: hsl(var(--ink));
-      border: 1.5px solid hsl(var(--ink));
+      background: var(--cta-bg);
+      color: var(--cta-fg);
+      border: var(--cta-border);
       cursor: pointer;
       text-decoration: none;
       transition: background 120ms ease, transform 80ms ease;
     }
     .wm-actions__run-btn:hover {
-      background: hsl(var(--watch-yellow-2));
+      background: var(--cta-bg-hover);
       transform: translateY(-1px);
     }
     .wm-actions__run-btn:active { transform: translateY(0); }
@@ -880,14 +960,14 @@
        Special-Elite mood line (typewriter accent, like a Rorschach
        journal one-liner). The colored fill carries the verdict. */
     .wm-doctor-verdict {
-      border-radius: 4px;
+      border-radius: var(--panel-radius);
       padding: 16px 20px;
-      border: 1.5px solid hsl(var(--ink));
-      box-shadow: 4px 4px 0 0 hsl(var(--ink));
+      border: var(--panel-border);
+      box-shadow: var(--panel-shadow-lg);
     }
-    .wm-doctor-verdict--ok   { background: hsl(142 50% 86%); color: hsl(var(--ink)); }
-    .wm-doctor-verdict--warn { background: hsl(var(--watch-yellow)); color: hsl(var(--ink)); }
-    .wm-doctor-verdict--fail { background: hsl(var(--blood) / 0.18); color: hsl(var(--ink)); }
+    .wm-doctor-verdict--ok   { background: var(--verdict-ok-bg);   color: var(--verdict-ok-fg);   border-color: var(--verdict-ok-border); }
+    .wm-doctor-verdict--warn { background: var(--verdict-warn-bg); color: var(--verdict-warn-fg); border-color: var(--verdict-warn-border); }
+    .wm-doctor-verdict--fail { background: var(--verdict-fail-bg); color: var(--verdict-fail-fg); border-color: var(--verdict-fail-border); }
     .wm-doctor-verdict__icon {
       font-size: 22px; font-weight: 700;
       width: 36px; height: 36px;
@@ -897,12 +977,12 @@
       background: hsl(var(--paper));
     }
     .wm-doctor-verdict__label {
-      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-family: var(--font-display);
       font-size: 15px; font-weight: 700;
       letter-spacing: 0.08em; text-transform: uppercase;
     }
     .wm-doctor-verdict__mood {
-      font-family: 'Special Elite', Georgia, serif;
+      font-family: var(--font-accent);
       font-size: 12.5px;
       opacity: 0.9;
       margin-top: 2px;
@@ -922,6 +1002,275 @@
       max-height: 70vh;
       overflow-y: auto;
     }
+
+    /* ═════════════════════════════════════════════════════════════════
+       Theme: Doomsday (pure noir / nightwatch — dark mode)
+       ═════════════════════════════════════════════════════════════════
+       Charcoal + warm dark grays, cool white body type, sparing blood
+       red for "minute to midnight" criticality. No yellow — kept
+       exclusive to the comic theme so they don't compete. Inter for
+       body + display, JetBrains Mono only for technical accents.       */
+    :root[data-theme="doomsday"] {
+      /* Color tokens */
+      --paper:             225  8%  8%;    /* #0E0F13 — slate-black w/ warm undertone */
+      --paper-2:           225  9% 14%;    /* raised panels */
+      --ink:               220 13% 92%;    /* cool white body */
+      --ink-soft:          222  8% 65%;
+      --card:              225  9% 11%;
+      --card-foreground:   220 13% 92%;
+      --background:        225  8%  8%;
+      --foreground:        220 13% 92%;
+      --muted:             225  8% 16%;
+      --muted-foreground:  222  8% 56%;
+      --border:            225  9% 22%;
+      --border-strong:     225  9% 30%;
+      --accent:            355 75% 50%;    /* Watchmen blood — links + CTA */
+      --accent-strong:     355 75% 42%;
+      --accent-soft:       355 75% 18%;
+      --blood:             355 75% 50%;
+      --blood-soft:        355 60% 18%;
+      --watch-yellow:      225  9% 14%;    /* re-mapped: anywhere yellow was used now reads as raised dark surface */
+      --watch-yellow-2:    225  9% 18%;
+
+      /* Fonts */
+      --font-display: 'Inter', -apple-system, system-ui, sans-serif;
+      --font-accent:  'JetBrains Mono', ui-monospace, monospace;
+      --font-mono:    'JetBrains Mono', ui-monospace, monospace;
+
+      /* Headings — no uppercase shouting; clean editorial sans. */
+      --h1-transform: none;
+      --h1-weight:    700;
+      --h1-letter:    -0.012em;
+      --h2-transform: uppercase;
+      --h2-letter:    0.14em;
+      --h3-transform: uppercase;
+      --h3-letter:    0.16em;
+
+      /* Background: flat dark — no halftone dots. */
+      --bg-pattern: none;
+      --bg-size:    100%;
+
+      /* Panel framing: subtle 1px border + soft drop shadow, NOT
+         hard-offset (would look out of place on dark). */
+      --panel-radius:        6px;
+      --panel-border:        1px solid hsl(var(--border));
+      --panel-shadow:        none;
+      --panel-shadow-hover:  0 4px 14px -4px hsl(0 0% 0% / 0.5);
+      --panel-shadow-table:  none;
+      --panel-shadow-lg:     none;
+      --panel-shadow-profile:none;
+
+      /* Severity stamps — outlined chips, not flat fills. High = blood
+         outline on dark; medium = muted gray; low = pale paper. */
+      --sev-high-bg:     hsl(var(--blood-soft));
+      --sev-high-fg:     hsl(var(--blood));
+      --sev-high-border: hsl(var(--blood));
+      --sev-med-bg:      hsl(var(--muted));
+      --sev-med-fg:      hsl(var(--ink-soft));
+      --sev-med-border:  hsl(var(--border-strong));
+      --sev-low-bg:      hsl(var(--paper-2));
+      --sev-low-fg:      hsl(var(--ink-soft));
+      --sev-low-border:  hsl(var(--border-strong));
+
+      /* Primary CTA — subtle dark with red border-on-hover (not a
+         shouting yellow stamp). */
+      --cta-bg:        hsl(var(--paper-2));
+      --cta-fg:        hsl(var(--ink));
+      --cta-border:    1px solid hsl(var(--border-strong));
+      --cta-bg-hover:  hsl(var(--blood-soft));
+
+      /* Verdict tile — red left stripe + dark surface. The colored
+         fills become subtle tinted backgrounds. */
+      --verdict-warn-bg:     hsl(var(--paper-2));
+      --verdict-warn-fg:     hsl(var(--ink));
+      --verdict-warn-border: hsl(var(--blood));
+      --verdict-fail-bg:     hsl(var(--blood-soft));
+      --verdict-fail-fg:     hsl(var(--blood));
+      --verdict-fail-border: hsl(var(--blood));
+      --verdict-ok-bg:       hsl(var(--paper-2));
+      --verdict-ok-fg:       hsl(var(--ink));
+      --verdict-ok-border:   hsl(142 50% 40%);
+    }
+    /* Doomsday: nav bar matches the page (no comic-style ink underline). */
+    :root[data-theme="doomsday"] body > nav,
+    :root[data-theme="doomsday"] nav.px-6 {
+      background: hsl(var(--card)) !important;
+      border-bottom: 1px solid hsl(var(--border)) !important;
+    }
+    /* Doomsday: brand wordmark stays clean Inter (not Oswald). */
+    :root[data-theme="doomsday"] .wm-brand__name {
+      font-family: var(--font-display);
+      font-weight: 700; letter-spacing: 0.16em;
+    }
+    :root[data-theme="doomsday"] .wm-brand__tagline {
+      color: hsl(var(--blood));
+      font-weight: 500;
+    }
+    /* Doomsday: pill stamps in run tables get outlined treatment. */
+    :root[data-theme="doomsday"] .wm-pill-ok { background: hsl(142 40% 18%); color: hsl(142 60% 65%); }
+    :root[data-theme="doomsday"] .wm-pill-running { background: hsl(var(--blood-soft)); color: hsl(var(--blood)); }
+    :root[data-theme="doomsday"] .wm-pill-fail { background: hsl(var(--blood-soft)); color: hsl(var(--blood)); }
+    :root[data-theme="doomsday"] .wm-pill-muted { background: hsl(var(--muted)); color: hsl(var(--ink-soft)); }
+    /* Doomsday: doctor verdict left-stripe accent. */
+    :root[data-theme="doomsday"] .wm-doctor-verdict--warn,
+    :root[data-theme="doomsday"] .wm-doctor-verdict--fail {
+      border-left-width: 3px;
+      border-left-color: hsl(var(--blood));
+    }
+    :root[data-theme="doomsday"] .wm-doctor-verdict__icon {
+      background: hsl(var(--blood-soft));
+      color: hsl(var(--blood));
+      border-color: hsl(var(--blood));
+      border-radius: 50%;
+    }
+    /* Doomsday: tone down the markdown-body — github-markdown-light
+       reads poorly on dark. Swap to a brighter foreground. */
+    :root[data-theme="doomsday"] .markdown-body {
+      color: hsl(var(--ink));
+      background: transparent;
+    }
+    :root[data-theme="doomsday"] .markdown-body code,
+    :root[data-theme="doomsday"] .markdown-body pre {
+      background: hsl(var(--muted));
+      color: hsl(var(--ink));
+    }
+    :root[data-theme="doomsday"] .markdown-body a { color: hsl(var(--blood)); }
+    :root[data-theme="doomsday"] .markdown-body table { color: hsl(var(--ink)); }
+    :root[data-theme="doomsday"] .markdown-body table tr {
+      background: transparent;
+      border-color: hsl(var(--border));
+    }
+    :root[data-theme="doomsday"] .markdown-body table tr:nth-child(2n) { background: hsl(var(--muted) / 0.5); }
+    :root[data-theme="doomsday"] .markdown-body th { border-color: hsl(var(--border)); }
+    :root[data-theme="doomsday"] .markdown-body td { border-color: hsl(var(--border)); }
+    :root[data-theme="doomsday"] .markdown-body h1,
+    :root[data-theme="doomsday"] .markdown-body h2 { border-bottom-color: hsl(var(--border)); }
+
+    /* ═════════════════════════════════════════════════════════════════
+       Theme: Rorschach (sepia notebook — diary mode)
+       ═════════════════════════════════════════════════════════════════
+       Aged paper, sepia ink, Special Elite typewriter as the primary
+       voice (body AND display), faint horizontal ruled-line bg, no
+       uppercase transforms (handwritten feel).                          */
+    :root[data-theme="rorschach"] {
+      /* Color tokens */
+      --paper:             40 38% 86%;    /* #EFE4CC — aged paper */
+      --paper-2:           38 30% 78%;
+      --ink:               28 40% 16%;    /* #3D2C1A — sepia ink */
+      --ink-soft:          28 30% 36%;
+      --card:              40 45% 90%;    /* slightly brighter parchment for tiles */
+      --card-foreground:   28 40% 16%;
+      --background:        40 38% 86%;
+      --foreground:        28 40% 16%;
+      --muted:             38 30% 80%;
+      --muted-foreground:  28 30% 36%;
+      --border:            28 35% 36%;
+      --border-strong:     28 40% 22%;
+      --accent:            355 60% 32%;   /* deep crimson — sparingly */
+      --accent-strong:     355 65% 24%;
+      --accent-soft:       28 35% 76%;
+      --blood:             355 60% 32%;
+      --blood-soft:        355 35% 80%;
+      --watch-yellow:       25 50% 42%;   /* re-mapped to a warm rust for "warn" */
+      --watch-yellow-2:     25 55% 36%;
+
+      /* Fonts — Special Elite typewriter everywhere, even body. */
+      --font-body:    'Special Elite', Georgia, serif;
+      --font-display: 'Special Elite', Georgia, serif;
+      --font-accent:  'Special Elite', Georgia, serif;
+      --font-mono:    'Special Elite', Georgia, serif;
+
+      /* No uppercase shouting; period-punctuated handwritten feel. */
+      --h1-transform: none;
+      --h1-weight:    400;
+      --h1-letter:    0;
+      --h2-transform: none;
+      --h2-letter:    0;
+      --h3-transform: none;
+      --h3-letter:    0;
+
+      /* Background: faint horizontal ruled lines (legal-pad feel). */
+      --bg-pattern: repeating-linear-gradient(
+                      0deg,
+                      transparent 0px,
+                      transparent 22px,
+                      hsl(28 40% 16% / 0.05) 22px,
+                      hsl(28 40% 16% / 0.05) 23px
+                    );
+      --bg-size:    100% 23px;
+
+      /* Panel framing — thin sepia border + subtle drop shadow, not
+         hard offset (would feel too crisp for a journal). */
+      --panel-radius:        2px;
+      --panel-border:        1px solid hsl(var(--border));
+      --panel-shadow:        2px 2px 0 0 hsl(var(--ink) / 0.4);
+      --panel-shadow-hover:  3px 3px 0 0 hsl(var(--ink) / 0.5);
+      --panel-shadow-table:  1px 1px 0 0 hsl(var(--ink) / 0.3);
+      --panel-shadow-lg:     2px 2px 0 0 hsl(var(--ink) / 0.45);
+      --panel-shadow-profile:3px 3px 0 0 hsl(var(--ink) / 0.45);
+
+      /* Severity stamps — crimson + rust (warm warning) + cream low. */
+      --sev-high-bg:     hsl(var(--blood));
+      --sev-high-fg:     hsl(var(--paper));
+      --sev-high-border: hsl(var(--blood));
+      --sev-med-bg:      hsl(var(--watch-yellow));
+      --sev-med-fg:      hsl(var(--paper));
+      --sev-med-border:  hsl(var(--watch-yellow));
+      --sev-low-bg:      hsl(var(--card));
+      --sev-low-fg:      hsl(var(--ink));
+      --sev-low-border:  hsl(var(--ink));
+
+      /* Primary CTA — dark sepia stamp on parchment. */
+      --cta-bg:        hsl(var(--ink));
+      --cta-fg:        hsl(var(--paper));
+      --cta-border:    1px solid hsl(var(--ink));
+      --cta-bg-hover:  hsl(var(--ink-soft));
+
+      /* Verdict tile — colored fills, sepia frame. */
+      --verdict-warn-bg:     hsl(var(--watch-yellow) / 0.25);
+      --verdict-warn-fg:     hsl(var(--ink));
+      --verdict-warn-border: hsl(var(--ink));
+      --verdict-fail-bg:     hsl(var(--blood) / 0.18);
+      --verdict-fail-fg:     hsl(var(--ink));
+      --verdict-fail-border: hsl(var(--blood));
+      --verdict-ok-bg:       hsl(140 30% 75%);
+      --verdict-ok-fg:       hsl(var(--ink));
+      --verdict-ok-border:   hsl(var(--ink));
+    }
+    /* Rorschach: nav stays parchment; everything in typewriter. */
+    :root[data-theme="rorschach"] body > nav,
+    :root[data-theme="rorschach"] nav.px-6 {
+      background: hsl(var(--paper)) !important;
+      border-bottom: 1px solid hsl(var(--ink)) !important;
+    }
+    :root[data-theme="rorschach"] .wm-brand__name {
+      font-weight: 400; letter-spacing: 0.02em; text-transform: lowercase;
+      font-size: 19px;
+    }
+    :root[data-theme="rorschach"] .wm-brand__name::after { content: "."; }
+    :root[data-theme="rorschach"] .wm-brand__tagline { font-style: italic; }
+    :root[data-theme="rorschach"] .wm-nav-link { text-transform: lowercase; }
+    /* Rorschach: section/banner labels stay sentence-case, not yelling. */
+    :root[data-theme="rorschach"] .wm-actions__title,
+    :root[data-theme="rorschach"] .wm-cmp__title,
+    :root[data-theme="rorschach"] .wm-doctor-verdict__label,
+    :root[data-theme="rorschach"] .wm-profile__arch {
+      text-transform: none;
+      letter-spacing: 0.01em;
+      font-weight: 400;
+    }
+    :root[data-theme="rorschach"] .wm-actions__sev,
+    :root[data-theme="rorschach"] .wm-actions__run-btn {
+      text-transform: lowercase;
+      letter-spacing: 0.02em;
+      font-weight: 400;
+    }
+    :root[data-theme="rorschach"] .wm-profile__flavor { font-style: italic; }
+    /* Rorschach: pill stamps for run tables. */
+    :root[data-theme="rorschach"] .wm-pill { text-transform: lowercase; letter-spacing: 0.02em; font-weight: 400; }
+    :root[data-theme="rorschach"] .wm-pill-ok { background: hsl(140 30% 70%); color: hsl(var(--ink)); }
+    :root[data-theme="rorschach"] .wm-pill-running { background: hsl(var(--watch-yellow) / 0.3); color: hsl(var(--ink)); }
+    :root[data-theme="rorschach"] .wm-pill-fail { background: hsl(var(--blood) / 0.25); color: hsl(var(--blood)); }
   </style>
 </head>
 <body class="text-[hsl(var(--ink))]">
