@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ project.project_key }} — watchmen{% endblock %}
+{% block title %}{{ project.project_key }} · watchmen{% endblock %}
 {% block content %}
 
 <div class="mb-6 flex items-center justify-between">
@@ -51,7 +51,7 @@
   {{ claude_md|safe }}
 </article>
 {% else %}
-<div class="text-sm text-gray-500">No CLAUDE.md generated yet — run <code>watchmen curate {{ project.project_key }}</code>.</div>
+<div class="text-sm text-gray-500">No CLAUDE.md generated yet. Run <code>watchmen curate {{ project.project_key }}</code>.</div>
 {% endif %}
 
 {% endblock %}

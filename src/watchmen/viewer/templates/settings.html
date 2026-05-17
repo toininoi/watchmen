@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}settings — watchmen{% endblock %}
+{% block title %}settings · watchmen{% endblock %}
 {% block content %}
 
 <div class="mb-6">
-  <h1 class="text-2xl font-semibold">◷ settings</h1>
+  <h1 class="text-2xl font-semibold">Settings</h1>
   <div class="text-sm text-gray-600 mt-1">
     Configure the OpenRouter API key, viewer port, and per-project
-    cadence. Mirrors <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen settings</code> —
+    cadence. Mirrors <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen settings</code>:
     edits write to <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">~/.config/watchmen/.env</code>
     and <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">state.db</code>, the same paths the CLI uses.
   </div>
@@ -100,7 +100,7 @@
             <a href="/p/{{ p.project_key }}" class="text-blue-600 hover:underline">{{ p.project_key }}</a>
           </td>
           <td class="px-4 py-2.5 text-xs text-gray-600 font-mono truncate max-w-[20rem]" title="{{ p.source_repo }}">
-            {{ p.source_repo|replace("/Users/" ~ p.source_repo.split("/")[2], "~") if p.source_repo else "—" }}
+            {{ p.source_repo|replace("/Users/" ~ p.source_repo.split("/")[2], "~") if p.source_repo else "·" }}
           </td>
           <td class="px-4 py-2.5 text-center">
             <label class="inline-flex items-center gap-1 cursor-pointer">

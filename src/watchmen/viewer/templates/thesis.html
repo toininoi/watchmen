@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}thesis — {{ project_key }} — watchmen{% endblock %}
+{% block title %}thesis · {{ project_key }} · watchmen{% endblock %}
 {% block content %}
 
 <div class="mb-6">
@@ -28,7 +28,7 @@
   {{ running_html|safe }}
 </article>
 {% else %}
-<div class="text-sm text-gray-500">No thesis generated yet — run <code>watchmen analyze {{ project_key }}</code>.</div>
+<div class="text-sm text-gray-500">No thesis generated yet. Run <code>watchmen analyze {{ project_key }}</code>.</div>
 {% endif %}
 
 {% endblock %}

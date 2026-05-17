@@ -1,23 +1,15 @@
 {% extends "base.html" %}
-{% block title %}metrics — watchmen{% endblock %}
+{% block title %}metrics · watchmen{% endblock %}
 {% block content %}
 
-<div class="mb-6 flex items-end justify-between">
-  <div>
-    <h1 class="text-2xl font-semibold">Aggregated metrics</h1>
-    <div class="text-sm text-gray-600 mt-1">
-      {% if tracked_only %}
-        Summed across your <span class="font-medium">tracked</span> watchmen projects only.
-      {% else %}
-        Summed across <span class="font-medium">every</span> coding-agent session in your corpus (Claude Code, Codex, pi.dev — tracked + untracked).
-      {% endif %}
-    </div>
-  </div>
-  <div class="inline-flex rounded-md shadow-sm" role="group">
-    <a href="/metrics"
-       class="px-3 py-1.5 text-sm rounded-l-md border border-gray-300 {% if not tracked_only %}bg-blue-600 text-white border-blue-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">All activity</a>
-    <a href="/metrics?tracked=1"
-       class="px-3 py-1.5 text-sm rounded-r-md border border-gray-300 -ml-px {% if tracked_only %}bg-blue-600 text-white border-blue-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">Tracked only</a>
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold">Aggregated metrics</h1>
+  <div class="text-sm text-gray-600 mt-1">
+    Coding-agent activity across your corpus. Profile card and cross-agent
+    panel below always show <span class="font-medium">all</span> activity;
+    the daily breakdowns further down respect the
+    <a href="#by-coding-agent" class="text-blue-600 hover:underline">All&nbsp;activity / Tracked&nbsp;only</a>
+    toggle.
   </div>
 </div>
 
@@ -327,6 +319,24 @@
     {% set total_in = last7.input_tokens + last7.cache_creation_tokens + last7.cache_read_tokens %}
     <div class="value">{{ "%.0f"|format(100 * last7.cache_read_tokens / total_in if total_in else 0) }}%</div>
     <div class="sub">cache read / total input</div>
+  </div>
+</div>
+
+<!-- ── Scope toggle: starts affecting rendering from this row down ─── -->
+<div id="by-coding-agent" class="mb-6 mt-4 flex items-center justify-between gap-3 flex-wrap pt-6 border-t border-gray-200">
+  <div class="text-sm text-gray-600">
+    {% if tracked_only %}
+      Showing <span class="font-medium">tracked</span> watchmen projects only.
+    {% else %}
+      Showing <span class="font-medium">every</span> coding-agent session in your corpus, tracked + untracked.
+    {% endif %}
+    <span class="text-xs text-gray-500 ml-1">(applies to sections below)</span>
+  </div>
+  <div class="inline-flex rounded-md shadow-sm" role="group">
+    <a href="/metrics#by-coding-agent"
+       class="px-3 py-1.5 text-sm rounded-l-md border border-gray-300 {% if not tracked_only %}bg-blue-600 text-white border-blue-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">All activity</a>
+    <a href="/metrics?tracked=1#by-coding-agent"
+       class="px-3 py-1.5 text-sm rounded-r-md border border-gray-300 -ml-px {% if tracked_only %}bg-blue-600 text-white border-blue-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">Tracked only</a>
   </div>
 </div>
 

@@ -1659,7 +1659,7 @@ def test_viewer_insights_route_returns_html_with_key_sections():
     r = client.get("/insights")
     assert r.status_code == 200, f"/insights returned {r.status_code}: {r.text[:200]}"
     html = r.text
-    assert "Watchmen — insights" in html
+    assert "Watchmen insights" in html
     # Cross-link to raw metrics page (the de-dup pointer).
     assert 'href="/metrics"' in html
     # Repo table is still here for LLM-context.
