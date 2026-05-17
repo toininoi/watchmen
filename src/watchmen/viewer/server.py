@@ -347,6 +347,10 @@ def project_page(request: Request, project_key: str):
             r for r in wm_actions.list_runs(limit=10)
             if r["alive"] and r.get("project_key") == project_key
         ],
+        # Per-project before/after view for the Impact card.  Renders an
+        # empty state when treatment_date is None or pre/post N < 3, so
+        # the section is always safe to include.
+        "impact": wm_homepage.project_impact(project_key, weeks=16),
     })
 
 

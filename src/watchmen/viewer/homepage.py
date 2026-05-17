@@ -301,3 +301,205 @@ def status_tiles() -> list[dict]:
             "status": status,
         })
     return out
+
+
+# ─── 5. Per-project impact card  ────────────────────────────────────────────
+
+def _median(xs: list[float]) -> float:
+    """Plain median, returns 0.0 on empty input (matches the rest of this module's
+    "degrade-gracefully" style)."""
+    if not xs:
+        return 0.0
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def _treatment_date_for_project(project_key: str) -> datetime | None:
+    """Earliest skill-curation timestamp for this project.
+
+    Prefers `state.runs` (recorded events) but falls back to SKILL.md file
+    mtimes when `runs` is empty — early curator runs predate the runs-table
+    schema, so SKILL.md mtime is the only ground truth for those projects.
+    """
+    try:
+        rows = list(
+            state.conn().execute(
+                "SELECT MIN(started_at) AS first_run FROM runs "
+                "WHERE project_key=? AND kind LIKE 'curator%' AND status='ok'",
+                (project_key,),
+            )
+        )
+        if rows and rows[0]["first_run"]:
+            try:
+                return datetime.fromisoformat(rows[0]["first_run"].replace("Z", "+00:00"))
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    # Fallback: file-mtime of the earliest SKILL.md under bundles/<key>/skills/
+    skills_root = BUNDLES_DIR / project_key / "skills"
+    if skills_root.exists():
+        mtimes: list[float] = []
+        for sd in skills_root.iterdir():
+            sk = sd / "SKILL.md"
+            if sk.exists():
+                mtimes.append(sk.stat().st_mtime)
+        if mtimes:
+            return datetime.fromtimestamp(min(mtimes), tz=timezone.utc)
+    return None
+
+
+def project_impact(project_key: str, weeks: int = 16) -> dict:
+    """Per-project before/after view for the Impact card on /p/<key>.
+
+    Returns a dict shaped for the template — same `degrade-gracefully`
+    contract as the other functions: missing corpus.db or no sessions
+    yields `enough_data: False` with `verdict_reason` filled in so the
+    template can render a polite empty state.
+
+    Schema:
+      treatment_date         : ISO date string  (or None)
+      treatment_bucket_date  : ISO date of the *weekly bucket* that
+                               contains the treatment date — used by the
+                               chart to position its dashed annotation
+      days_since_treatment   : int (or None)
+      weekly_series          : [{date, value, sessions}] — value is
+                               mean tool_error_count for that week
+      pre  / post            : {sessions_n, median_errors,
+                                median_prompts, median_cost}
+      verdict                : short string describing the direction of
+                               the deltas; never makes a causation claim
+      enough_data            : bool — True iff treatment_date is set AND
+                               pre/post each have ≥3 sessions
+      verdict_reason         : string explaining why enough_data is False
+                               (only set when False)
+    """
+    out = {
+        "treatment_date": None,
+        "treatment_bucket_date": None,
+        "days_since_treatment": None,
+        "weekly_series": [],
+        "pre": {"sessions_n": 0, "median_errors": 0.0, "median_prompts": 0.0, "median_cost": 0.0},
+        "post": {"sessions_n": 0, "median_errors": 0.0, "median_prompts": 0.0, "median_cost": 0.0},
+        "verdict": "",
+        "verdict_reason": "",
+        "enough_data": False,
+    }
+
+    proj = state.get_project(project_key)
+    if not proj:
+        out["verdict_reason"] = "Project not tracked."
+        return out
+    source_repo = proj["source_repo"]
+
+    treatment = _treatment_date_for_project(project_key)
+    if treatment is None:
+        out["verdict_reason"] = "No curator runs yet for this project."
+        return out
+    out["treatment_date"] = treatment.date().isoformat()
+    out["days_since_treatment"] = (_now() - treatment).days
+
+    cc = _conn_ro()
+    if cc is None:
+        out["verdict_reason"] = "corpus.db not found — no session data captured yet."
+        return out
+
+    try:
+        anchor = (_now() - timedelta(weeks=weeks)).isoformat()
+        sessions = list(
+            cc.execute(
+                "SELECT started_at, tool_error_count, user_prompt_count, cost_usd "
+                "FROM sessions WHERE is_subagent = 0 AND project_dir = ? "
+                "AND started_at >= ? ORDER BY started_at",
+                (source_repo, anchor),
+            )
+        )
+    finally:
+        cc.close()
+
+    if not sessions:
+        out["verdict_reason"] = "No sessions captured for this project in the last 16 weeks."
+        return out
+
+    # ── Weekly series (all sessions, project-scoped, mean errors/session)
+    buckets: dict[str, list[sqlite3.Row]] = {}
+    bucket_first_ts: dict[str, str] = {}
+    for s in sessions:
+        ts_raw = s["started_at"]
+        try:
+            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        iso = ts.isocalendar()
+        bk = f"{iso.year}-W{iso.week:02d}"
+        if bk not in buckets:
+            buckets[bk] = []
+            bucket_first_ts[bk] = ts_raw[:10]
+        buckets[bk].append(s)
+    weekly: list[dict] = []
+    for bk in sorted(buckets):
+        rs = buckets[bk]
+        weekly.append({
+            "date": bucket_first_ts[bk],
+            "value": sum((r["tool_error_count"] or 0) for r in rs) / len(rs),
+            "sessions": len(rs),
+        })
+    out["weekly_series"] = weekly
+
+    # Map the treatment timestamp to a bucket label that ACTUALLY appears
+    # in the series. If the treatment week itself has zero sessions, we
+    # fall back to the first bucket date >= treatment, so the marker
+    # snaps onto a real category instead of vanishing.
+    treat_iso = treatment.isocalendar()
+    treat_bk = f"{treat_iso.year}-W{treat_iso.week:02d}"
+    if treat_bk in bucket_first_ts:
+        out["treatment_bucket_date"] = bucket_first_ts[treat_bk]
+    else:
+        # First bucket on or after treatment date
+        treat_date_str = treatment.date().isoformat()
+        for bk in sorted(buckets):
+            if bucket_first_ts[bk] >= treat_date_str:
+                out["treatment_bucket_date"] = bucket_first_ts[bk]
+                break
+
+    # ── Pre / post aggregates ─────────────────────────────────────────
+    pre_rows: list[sqlite3.Row] = []
+    post_rows: list[sqlite3.Row] = []
+    treat_iso_str = treatment.isoformat()
+    for s in sessions:
+        if (s["started_at"] or "") < treat_iso_str:
+            pre_rows.append(s)
+        else:
+            post_rows.append(s)
+
+    def _agg(rs: list[sqlite3.Row]) -> dict:
+        return {
+            "sessions_n": len(rs),
+            "median_errors":  _median([float(r["tool_error_count"] or 0) for r in rs]),
+            "median_prompts": _median([float(r["user_prompt_count"] or 0) for r in rs]),
+            "median_cost":    _median([float(r["cost_usd"] or 0.0)         for r in rs]),
+        }
+
+    out["pre"]  = _agg(pre_rows)
+    out["post"] = _agg(post_rows)
+
+    if out["pre"]["sessions_n"] < 3 or out["post"]["sessions_n"] < 3:
+        out["verdict_reason"] = (
+            f"Need ≥3 sessions on each side of the curator date "
+            f"(have {out['pre']['sessions_n']} pre, {out['post']['sessions_n']} post)."
+        )
+        return out
+
+    out["enough_data"] = True
+
+    # ── Verdict line (descriptive, not causal) ────────────────────────
+    bits: list[str] = []
+    if out["pre"]["median_errors"] != out["post"]["median_errors"]:
+        d = out["post"]["median_errors"] - out["pre"]["median_errors"]
+        bits.append(f"tool errors {'↓' if d < 0 else '↑'}")
+    if out["pre"]["median_prompts"] != out["post"]["median_prompts"]:
+        d = out["post"]["median_prompts"] - out["pre"]["median_prompts"]
+        bits.append(f"prompts/session {'↓' if d < 0 else '↑'}")
+    out["verdict"] = ", ".join(bits) if bits else "no measurable change"
+    return out
