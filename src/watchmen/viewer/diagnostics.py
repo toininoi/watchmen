@@ -54,17 +54,17 @@ def _check_openrouter_key(key: str) -> tuple[bool, str]:
         usage = info.get("usage")
         limit = info.get("limit")
         if usage is not None and limit is not None and limit > 0:
-            return True, f"valid — credits used ${float(usage):.2f} of ${float(limit):.2f}"
+            return True, f"valid · credits used ${float(usage):.2f} of ${float(limit):.2f}"
         if usage is not None and limit is None:
-            return True, f"valid — credits used ${float(usage):.2f} (no hard limit)"
+            return True, f"valid · credits used ${float(usage):.2f} (no hard limit)"
         return True, "valid"
     if r.status_code == 401:
         try:
             msg = (r.json().get("error") or {}).get("message", "")
         except (ValueError, AttributeError):
             msg = ""
-        return False, f"401 — {msg or 'unauthorized'}"
-    return False, f"HTTP {r.status_code} — {r.text[:120]}"
+        return False, f"401 · {msg or 'unauthorized'}"
+    return False, f"HTTP {r.status_code} · {r.text[:120]}"
 
 
 def run_checks(*, check_openrouter: bool = True) -> dict:
@@ -208,7 +208,7 @@ def run_checks(*, check_openrouter: bool = True) -> dict:
             age_str = f"{hours:.1f}h ago" if hours < 48 else f"{age.days}d ago"
             rows.append(_row(
                 "latest run", "ok",
-                f"{last['kind']} for {last['project_key']} — {age_str} ({last['status']})",
+                f"{last['kind']} for {last['project_key']} · {age_str} ({last['status']})",
             ))
         except Exception:
             rows.append(_row("latest run", "ok",
@@ -236,7 +236,7 @@ def run_checks(*, check_openrouter: bool = True) -> dict:
         mood = "Everything's connected. The pattern holds."
     elif fails == 0:
         verdict = f"{warns} warning{'s' if warns != 1 else ''}"
-        mood = "A pattern frays — observable, not yet consequential."
+        mood = "A pattern frays. Observable, not yet consequential."
     else:
         verdict = f"{fails} failure{'s' if fails != 1 else ''}"
         mood = "A discontinuity. Required for the rest to function."

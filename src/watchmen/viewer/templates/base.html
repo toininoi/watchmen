@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}watchmen{% endblock %}</title>
 
-  <!-- Inter via Bunny Fonts (GDPR-safe Google Fonts mirror; no third-party
-       cookies). Stays cached in the browser; falls back to system fonts. -->
+  <!-- Three font families via Bunny Fonts (GDPR-safe Google Fonts mirror):
+       Inter for body copy, Oswald for editorial display (h1/h2/h3 + brand
+       wordmark + section labels), Special Elite for accent moments (Latin
+       tagline + doctor mood-line). Used sparingly to stay restrained. -->
   <link rel="preconnect" href="https://fonts.bunny.net" crossorigin />
-  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=inter:400,500,600,700&display=swap" />
+  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=inter:400,500,600,700|oswald:500,600,700|special-elite&display=swap" />
 
   <!-- Tailwind config has to be inlined BEFORE the CDN script so the JIT
        compiler picks up the extended theme on first render. -->
@@ -18,14 +20,17 @@
       theme: {
         extend: {
           fontFamily: {
-            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
+            sans:    ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
+            display: ['Oswald', 'Inter', 'system-ui', 'sans-serif'],
+            elite:   ['"Special Elite"', 'Georgia', 'serif'],
           },
           borderRadius: {
-            'card': '0.75rem',  // 12px — softer than rounded-lg, our default for cards
+            'card': '4px',  // sharp comic-panel corners, just barely rounded
           },
           boxShadow: {
-            'card': '0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 1px 0 rgb(0 0 0 / 0.02)',
-            'card-hover': '0 4px 6px -1px rgb(0 0 0 / 0.06), 0 2px 4px -2px rgb(0 0 0 / 0.04)',
+            'panel':       '3px 3px 0 0 hsl(240 8% 8%)',
+            'panel-hover': '4px 4px 0 0 hsl(240 8% 8%)',
+            'panel-lg':    '5px 5px 0 0 hsl(240 8% 8%)',
           },
         },
       },
@@ -42,39 +47,87 @@
 
   <style>
     /* ── Design tokens ────────────────────────────────────────────────
-       Loose shadcn-light palette mapped to HSL so future variants
-       (dark mode, accent themes) only need to swap these triples.
-       The accent shifted from indigo to a cleaner blue → the cyan /
-       teal supporting colors give the profile card its "elegant
-       productivity app" vibe without going full dark mode. */
+       Watchmen newsprint-pulp palette. Spot colors (yellow + blood +
+       bruise) appear on brand surfaces; the bulk of the UI sits on
+       warm cream paper over ink-black borders so tables + markdown
+       remain legible. The legacy `--accent` / `--background` / etc.
+       names are preserved so existing components (spider chart, area
+       charts, run-btn) keep rendering without per-call rewrites — they
+       just inherit the new palette. */
     :root {
       --max: 1100px;
-      --background:        220 14% 98%;
-      --foreground:        222  9% 15%;
-      --muted:             220 13% 95%;
-      --muted-foreground:  220  9% 46%;
-      --card:                0  0% 100%;
-      --card-foreground:   222  9% 15%;
-      --border:            220 13% 91%;
-      --border-strong:     220 13% 82%;
-      --accent:            217 91% 60%;  /* blue-500 — replaces indigo */
-      --accent-strong:     221 83% 53%;  /* blue-600 — for hover states */
-      --accent-soft:       213 100% 96%; /* blue-50 — for active pills */
-      --cyan:              189 94% 43%;  /* cyan-500 */
-      --teal:              173 80% 40%;  /* teal-500 */
+
+      /* Spot brand colors */
+      --paper:             42 56% 92%;   /* #F1E8D2 — warm newsprint cream */
+      --paper-2:           40 38% 86%;   /* aged paper for raised panels */
+      --ink:              240  8%  8%;   /* #131316 — near-black with warm tint */
+      --ink-soft:         240  6% 24%;   /* body text on cream */
+      --watch-yellow:      48 95% 53%;   /* #F5C518 — Watchmen smiley */
+      --watch-yellow-2:    46 100% 46%;  /* darker yellow for hover/press */
+      --blood:            358 75% 42%;   /* #BC1D2E — smiley blood-streak / urgency */
+      --blood-soft:       358 60% 88%;   /* pale red tint for stamp backgrounds */
+      --bruise:           273 50% 28%;   /* #3D2566 — bruise purple for accents */
+      --nite-royal:       221 85% 32%;   /* #0E2B96 — Nite Owl blue for links */
+      --manhattan:        185 80% 36%;   /* Doc Manhattan teal — running/active */
+
+      /* Compatibility aliases mapped to the new palette so existing CSS
+         using `hsl(var(--accent))` etc. keeps working without churn. */
+      --background:       var(--paper);
+      --foreground:       var(--ink);
+      --muted:            42 30% 84%;
+      --muted-foreground: 240  6% 32%;
+      --card:             42 56% 96%;   /* slightly brighter cream for raised tiles */
+      --card-foreground:  var(--ink);
+      --border:           240  8% 12%;   /* ink-ish border by default */
+      --border-strong:    240  8%  8%;
+      --accent:           221 85% 32%;   /* nite royal — links + primary CTA */
+      --accent-strong:    221 85% 24%;
+      --accent-soft:      221 50% 90%;   /* pale royal for active pills */
+      --cyan:             185 80% 36%;
+      --teal:             185 80% 36%;
     }
 
-    /* ── Typography rhythm ────────────────────────────────────────── */
+    /* ── Typography rhythm ──────────────────────────────────────────
+       Body copy stays Inter (highest legibility). Display headings
+       move to Oswald — condensed editorial sans, period-correct for
+       a Watchmen-era pulp poster without veering into kitsch.
+       Special Elite (typewriter) reserved for accent moments only. */
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
       font-feature-settings: 'cv11', 'ss01', 'ss03';
       letter-spacing: -0.005em;
-      background: hsl(var(--background));
-      color: hsl(var(--foreground));
+      background-color: hsl(var(--paper));
+      /* Subtle halftone-dot newsprint texture. Low alpha so it reads as
+         "paper grain" rather than a pattern; fixed attachment so it
+         doesn't shift on scroll (would feel like a moving carpet). */
+      background-image:
+        radial-gradient(circle at 1px 1px, hsl(var(--ink) / 0.06) 1px, transparent 1.2px);
+      background-size: 18px 18px;
+      background-attachment: fixed;
+      color: hsl(var(--ink));
     }
-    h1, h2, h3 { letter-spacing: -0.018em; }
-    h1 { line-height: 1.2; }
-    h2, h3 { line-height: 1.3; }
+    /* Display headings use Oswald — flat tracking, slightly uppercase
+       for h2/h3 section labels. h1 stays in title case so page titles
+       (project keys, skill slugs) read naturally. */
+    h1, h2, h3 {
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-weight: 600;
+      letter-spacing: -0.005em;
+      color: hsl(var(--ink));
+    }
+    h1 { line-height: 1.1; font-weight: 700; }
+    h2 { line-height: 1.2; text-transform: uppercase; letter-spacing: 0.02em; }
+    h3 { line-height: 1.3; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.95rem; }
+    /* Markdown body keeps its own header rhythm (github-markdown-css)
+       — restore there so long-form content reads as documentation, not
+       comic panels. */
+    .markdown-body h1, .markdown-body h2, .markdown-body h3,
+    .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+      font-family: 'Inter', system-ui, sans-serif;
+      text-transform: none;
+      letter-spacing: -0.005em;
+      font-weight: 600;
+    }
 
     .markdown-body {
       box-sizing: border-box;
@@ -96,36 +149,92 @@
     code { font-size: 13px; }
     pre code { font-size: 13px; }
 
-    /* ── Nav: pill-style active highlight, smoother hovers ───────── */
+    /* ── Brand: nav wordmark + nav links ──────────────────────────
+       The nav reads as a newspaper masthead: black bar on top of the
+       cream paper, smiley mark + Oswald wordmark + Latin tagline in
+       Special Elite. Active page link gets an ink underline rather
+       than a tinted background — quieter, more editorial. */
+    .wm-brand {
+      display: inline-flex; align-items: center; gap: 10px;
+      text-decoration: none;
+    }
+    .wm-brand__mark {
+      width: 26px; height: 26px;
+      display: inline-block; flex: 0 0 auto;
+    }
+    .wm-brand__name {
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: hsl(var(--ink));
+      line-height: 1;
+    }
+    .wm-brand__tagline {
+      font-family: 'Special Elite', Georgia, serif;
+      font-size: 10.5px;
+      color: hsl(var(--ink) / 0.6);
+      letter-spacing: 0.02em;
+      margin-left: 4px;
+    }
     .wm-nav-link {
-      color: hsl(var(--muted-foreground));
-      padding: 4px 10px;
-      border-radius: 6px;
-      transition: color 150ms ease, background-color 150ms ease;
+      color: hsl(var(--ink) / 0.65);
+      padding: 4px 2px;
+      margin: 0 6px;
+      border-bottom: 2px solid transparent;
+      font-weight: 500;
+      transition: color 120ms ease, border-color 120ms ease;
     }
     .wm-nav-link:hover {
-      color: hsl(var(--foreground));
-      background: hsl(var(--muted));
+      color: hsl(var(--ink));
+      border-bottom-color: hsl(var(--ink) / 0.35);
     }
     .wm-nav-link.is-active {
-      color: hsl(var(--foreground));
-      background: hsl(var(--accent-soft));
+      color: hsl(var(--ink));
+      border-bottom-color: hsl(var(--watch-yellow));
     }
 
-    /* ── Card baseline: applies to legacy .stat-card AND new .wm-card.
-       Templates can opt into the polished look without rewriting class
-       lists. The shadow stays subtle; hover lifts borders, not shadows,
-       to avoid the "everything is floating" feeling shadcn avoids. ── */
+    /* ── Card baseline: comic-panel framing ────────────────────────
+       Cards now read as comic panels: ink border + hard offset shadow.
+       Cream paper sits inside; corners are nearly sharp (4px). Hover
+       lifts the card 1px so it reads as interactive on dashboards
+       without inviting clicks on inert tiles (the lift is small).
+       Tables override below — they keep a quieter, borderless feel
+       so dense data stays legible. */
     .stat-card, .wm-card {
       background: hsl(var(--card));
-      color: hsl(var(--card-foreground));
-      border: 1px solid hsl(var(--border));
-      border-radius: 12px;
+      color: hsl(var(--ink));
+      border: 1.5px solid hsl(var(--ink));
+      border-radius: 4px;
       padding: 16px 18px;
-      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
-      transition: border-color 150ms ease, box-shadow 150ms ease;
+      box-shadow: 3px 3px 0 0 hsl(var(--ink));
+      transition: transform 120ms ease, box-shadow 120ms ease;
     }
-    .stat-card:hover, .wm-card:hover { border-color: hsl(var(--border-strong)); }
+    .stat-card:hover, .wm-card:hover {
+      transform: translate(-1px, -1px);
+      box-shadow: 4px 4px 0 0 hsl(var(--ink));
+    }
+    /* Table-host cards: no hard offset shadow, just the ink border.
+       Dense rows already create enough rhythm. */
+    .wm-card-table {
+      box-shadow: 2px 2px 0 0 hsl(var(--ink));
+    }
+    .wm-card-table:hover {
+      transform: none;
+      box-shadow: 2px 2px 0 0 hsl(var(--ink));
+    }
+    /* Markdown-body cards (CLAUDE.md, SKILL.md, deep digest) drop the
+       offset shadow entirely — the comic frame would compete with
+       the document content rendered inside. */
+    .wm-card.markdown-body, article.wm-card.markdown-body {
+      box-shadow: none;
+      border-color: hsl(var(--ink) / 0.4);
+    }
+    .wm-card.markdown-body:hover {
+      transform: none;
+      box-shadow: none;
+    }
     .stat-card .label, .wm-card .label {
       font-size: 11px;
       font-weight: 500;
@@ -169,32 +278,39 @@
        this lines them up properly. Cheap; high effect. ── */
     .tabular { font-variant-numeric: tabular-nums; }
 
-    /* ── Status pills used in run tables (ok / running / failed). The
-       small font + rounded-full + tinted bg matches shadcn's Badge.   */
+    /* ── Status pills (run tables, skill controls) ────────────────
+       Restyled to read as small stamped chips: uppercase, bordered,
+       slightly heavier weight. Colors map to the new palette. */
     .wm-pill {
       display: inline-flex;
       align-items: center;
       gap: 4px;
       padding: 2px 8px;
-      font-size: 11px;
-      font-weight: 500;
-      border-radius: 999px;
-      letter-spacing: 0.01em;
+      font-size: 10.5px;
+      font-weight: 700;
+      border-radius: 3px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border: 1px solid currentColor;
     }
-    .wm-pill-ok      { background: hsl(142 60% 94%); color: hsl(142 60% 26%); }
-    .wm-pill-running { background: hsl(45  90% 92%); color: hsl(35  70% 32%); }
-    .wm-pill-fail    { background: hsl(0   75% 95%); color: hsl(0   75% 38%); }
-    .wm-pill-muted   { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
+    .wm-pill-ok      { background: hsl(142 50% 88%); color: hsl(142 75% 22%); }
+    .wm-pill-running { background: hsl(var(--watch-yellow) / 0.55); color: hsl(var(--ink)); }
+    .wm-pill-fail    { background: hsl(var(--blood-soft));     color: hsl(var(--blood)); }
+    .wm-pill-muted   { background: hsl(var(--paper-2));        color: hsl(var(--ink-soft)); }
 
-    /* ── Profile card (top of /metrics) — Football-Manager-style ── */
+    /* ── Profile card (top of /metrics) — Football-Manager-style ──
+       Promoted to a hero comic-panel: ink frame + offset shadow.
+       The 64-pt rating stays in Inter (numerals look better in Inter's
+       tabular-nums than Oswald), but the archetype name + OVR label
+       pick up the display font for brand consistency. */
     .wm-profile {
       position: relative;
       background: hsl(var(--card));
-      border: 1px solid hsl(var(--border));
-      border-radius: 16px;
+      border: 1.5px solid hsl(var(--ink));
+      border-radius: 4px;
       padding: 0;
       overflow: hidden;
-      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+      box-shadow: 5px 5px 0 0 hsl(var(--ink));
     }
     .wm-profile__header {
       padding: 22px 28px;
@@ -202,16 +318,29 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      border-bottom: 1px solid hsl(var(--border));
+      border-bottom: 1.5px solid hsl(var(--ink));
     }
     .wm-profile__rating {
       font-size: 64px; font-weight: 800; line-height: 1;
       letter-spacing: -0.04em; font-variant-numeric: tabular-nums;
     }
-    .wm-profile__ovr { font-size: 10px; font-weight: 700; letter-spacing: 0.18em; margin-top: 4px; }
-    .wm-profile__arch { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
-    .wm-profile__flavor { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
-    .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--muted-foreground)); margin-top: 6px; text-transform: uppercase; }
+    .wm-profile__ovr {
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-size: 10.5px; font-weight: 700; letter-spacing: 0.2em;
+      margin-top: 4px; text-transform: uppercase;
+    }
+    .wm-profile__arch {
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-size: 24px; font-weight: 700;
+      letter-spacing: 0.02em; text-transform: uppercase;
+      color: hsl(var(--ink));
+    }
+    .wm-profile__flavor {
+      font-family: 'Special Elite', Georgia, serif;
+      font-size: 13px; color: hsl(var(--ink-soft));
+      margin-top: 4px;
+    }
+    .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--ink-soft)); margin-top: 6px; text-transform: uppercase; }
     /* Hero row: compact spider chart (~320px) on the left, 3-column
        stat grid expanding into the freed space on the right. */
     .wm-profile__hero {
@@ -381,14 +510,23 @@
        /insights. Card grid auto-fits 2 columns on desktop, 1 on mobile. */
     .wm-cmp {
       background: hsl(var(--card));
-      border: 1px solid hsl(var(--border));
-      border-radius: 12px;
+      border: 1.5px solid hsl(var(--ink));
+      border-radius: 4px;
       padding: 22px 26px 26px;
-      box-shadow: 0 1px 3px hsl(var(--foreground) / 0.04);
+      box-shadow: 4px 4px 0 0 hsl(var(--ink));
     }
-    .wm-cmp__header { margin-bottom: 18px; }
-    .wm-cmp__title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; color: hsl(var(--foreground)); }
-    .wm-cmp__sub   { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 4px; }
+    .wm-cmp__header {
+      margin-bottom: 18px;
+      padding-bottom: 10px;
+      border-bottom: 1.5px solid hsl(var(--ink));
+    }
+    .wm-cmp__title {
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-size: 19px; font-weight: 700;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      color: hsl(var(--ink));
+    }
+    .wm-cmp__sub   { font-size: 12px; color: hsl(var(--ink-soft)); margin-top: 4px; }
     .wm-cmp__sub code {
       background: hsl(var(--muted));
       padding: 1px 6px;
@@ -573,25 +711,29 @@
     }
 
     /* ── Next-best-action banner ──────────────────────────────────────
-       Always-on, top-of-page suggestion strip. Quiet when there's nothing
-       to do (the template skips render). Each item is one-line on wide
-       screens, stacks gracefully on narrow. */
+       The hero surface on dashboards and project pages. Reads as a
+       comic page's top panel: ink border + offset shadow, headline in
+       display font, severity chips stamped into the inset items.
+       Quiet when there's nothing to do (template skips render).      */
     .wm-actions {
       background: hsl(var(--card));
-      border: 1px solid hsl(var(--border));
-      border-radius: 12px;
-      padding: 14px 18px;
-      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+      border: 1.5px solid hsl(var(--ink));
+      border-radius: 4px;
+      padding: 16px 18px;
+      box-shadow: 4px 4px 0 0 hsl(var(--ink));
     }
     .wm-actions__header {
       display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 10px;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1.5px solid hsl(var(--ink));
     }
     .wm-actions__title {
       display: flex; align-items: center; gap: 8px;
-      font-size: 12px; font-weight: 600;
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-size: 17px; font-weight: 700;
       letter-spacing: 0.06em; text-transform: uppercase;
-      color: hsl(var(--foreground));
+      color: hsl(var(--ink));
     }
     .wm-actions__sub {
       font-size: 11px; color: hsl(var(--muted-foreground));
@@ -602,14 +744,16 @@
     }
     .wm-actions__run-pill {
       display: inline-flex; align-items: center; gap: 6px;
-      font-size: 11px;
+      font-size: 10.5px; font-weight: 700;
+      letter-spacing: 0.05em; text-transform: uppercase;
       padding: 3px 10px;
-      border-radius: 999px;
-      background: hsl(45 90% 92%);
-      color: hsl(35 70% 32%);
+      border: 1px solid hsl(var(--ink));
+      border-radius: 3px;
+      background: hsl(var(--watch-yellow));
+      color: hsl(var(--ink));
       text-decoration: none;
     }
-    .wm-actions__run-pill:hover { background: hsl(45 90% 88%); }
+    .wm-actions__run-pill:hover { background: hsl(var(--watch-yellow-2)); }
     .wm-actions__run-dur {
       font-variant-numeric: tabular-nums;
       opacity: 0.7;
@@ -619,7 +763,7 @@
       display: inline-block;
       width: 8px; height: 8px;
       border-radius: 50%;
-      background: hsl(35 90% 50%);
+      background: hsl(var(--blood));
       animation: wm-pulse 1.2s ease-in-out infinite;
     }
     @keyframes wm-pulse {
@@ -631,27 +775,36 @@
       display: flex; align-items: center; justify-content: space-between;
       gap: 12px;
       padding: 10px 12px;
-      border: 1px solid hsl(var(--border));
-      border-radius: 10px;
-      background: hsl(var(--card));
-      transition: border-color 120ms ease;
+      border: 1px solid hsl(var(--ink) / 0.25);
+      border-radius: 3px;
+      background: hsl(var(--paper) / 0.5);
+      transition: border-color 120ms ease, background 120ms ease;
     }
-    .wm-actions__item:hover { border-color: hsl(var(--border-strong)); }
+    .wm-actions__item:hover {
+      border-color: hsl(var(--ink) / 0.6);
+      background: hsl(var(--paper) / 0.8);
+    }
     .wm-actions__item-left {
       display: flex; align-items: flex-start; gap: 10px;
       min-width: 0; flex: 1;
     }
+    /* Severity chips read as stamped warnings: black ink frames + flat
+       paint-fill backgrounds. High → blood crimson. Medium → Watchmen
+       yellow. Low → cream paper. */
     .wm-actions__sev {
-      font-size: 9px; font-weight: 700;
-      letter-spacing: 0.08em; text-transform: uppercase;
-      padding: 3px 7px;
-      border-radius: 4px;
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-size: 10px; font-weight: 700;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      padding: 2px 7px;
+      border: 1.5px solid hsl(var(--ink));
+      border-radius: 2px;
       margin-top: 2px;
       flex: 0 0 auto;
+      line-height: 1.3;
     }
-    .wm-actions__sev--high   { background: hsl(0 75% 95%);  color: hsl(0 75% 38%); }
-    .wm-actions__sev--medium { background: hsl(35 90% 92%); color: hsl(35 70% 32%); }
-    .wm-actions__sev--low    { background: hsl(var(--accent-soft)); color: hsl(var(--accent-strong)); }
+    .wm-actions__sev--high   { background: hsl(var(--blood));        color: hsl(var(--paper)); }
+    .wm-actions__sev--medium { background: hsl(var(--watch-yellow)); color: hsl(var(--ink)); }
+    .wm-actions__sev--low    { background: hsl(var(--paper-2));      color: hsl(var(--ink)); }
     .wm-actions__item-title {
       font-size: 13px; font-weight: 600;
       color: hsl(var(--foreground));
@@ -672,71 +825,87 @@
       font-family: ui-monospace, 'SF Mono', Menlo, monospace;
       font-size: 11px;
       padding: 4px 8px;
-      background: hsl(var(--background));
-      border: 1px solid hsl(var(--border));
-      border-radius: 6px;
-      color: hsl(var(--foreground));
+      background: hsl(var(--paper-2) / 0.7);
+      border: 1px solid hsl(var(--ink) / 0.3);
+      border-radius: 3px;
+      color: hsl(var(--ink));
       cursor: pointer;
       user-select: all;
       transition: border-color 120ms ease, background 120ms ease;
     }
     .wm-actions__cmd:hover {
-      border-color: hsl(var(--accent));
-      background: hsl(var(--accent-soft));
+      border-color: hsl(var(--ink));
+      background: hsl(var(--paper-2));
     }
     .wm-actions__cmd--copied {
-      color: hsl(142 60% 30%);
-      border-color: hsl(142 60% 60%);
-      background: hsl(142 60% 94%);
+      color: hsl(142 75% 22%);
+      border-color: hsl(142 60% 35%);
+      background: hsl(142 50% 88%);
     }
+    /* Primary CTA — ink-on-yellow, the Watchmen palette signature.
+       The flat fill + ink border make it read as a stamped button
+       rather than a glossy material button. */
     .wm-actions__run-btn {
       display: inline-block;
-      font-size: 12px; font-weight: 500;
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-size: 12px; font-weight: 700;
+      letter-spacing: 0.06em; text-transform: uppercase;
       padding: 5px 12px;
-      border-radius: 6px;
-      background: hsl(var(--accent));
-      color: white;
-      border: 1px solid hsl(var(--accent-strong));
+      border-radius: 3px;
+      background: hsl(var(--watch-yellow));
+      color: hsl(var(--ink));
+      border: 1.5px solid hsl(var(--ink));
       cursor: pointer;
       text-decoration: none;
-      transition: background 120ms ease;
+      transition: background 120ms ease, transform 80ms ease;
     }
-    .wm-actions__run-btn:hover { background: hsl(var(--accent-strong)); }
+    .wm-actions__run-btn:hover {
+      background: hsl(var(--watch-yellow-2));
+      transform: translateY(-1px);
+    }
+    .wm-actions__run-btn:active { transform: translateY(0); }
     .wm-actions__run-btn--link {
-      background: white;
-      color: hsl(var(--foreground));
-      border-color: hsl(var(--border));
+      background: hsl(var(--paper));
+      color: hsl(var(--ink));
+      border-color: hsl(var(--ink));
     }
-    .wm-actions__run-btn--link:hover { background: hsl(var(--muted)); }
+    .wm-actions__run-btn--link:hover { background: hsl(var(--paper-2)); }
     @media (max-width: 720px) {
       .wm-actions__item { flex-direction: column; align-items: stretch; }
       .wm-actions__item-right { justify-content: flex-start; flex-wrap: wrap; }
     }
 
-    /* ── Doctor verdict tile ──────────────────────────────────────── */
+    /* ── Doctor verdict tile ────────────────────────────────────────
+       Stamped-report card: ink frame + offset shadow + Oswald label +
+       Special-Elite mood line (typewriter accent, like a Rorschach
+       journal one-liner). The colored fill carries the verdict. */
     .wm-doctor-verdict {
-      border-radius: 12px;
+      border-radius: 4px;
       padding: 16px 20px;
-      border: 1px solid;
+      border: 1.5px solid hsl(var(--ink));
+      box-shadow: 4px 4px 0 0 hsl(var(--ink));
     }
-    .wm-doctor-verdict--ok   { background: hsl(142 60% 96%); border-color: hsl(142 60% 80%); color: hsl(142 60% 26%); }
-    .wm-doctor-verdict--warn { background: hsl(45 90% 95%);  border-color: hsl(45 90% 80%);  color: hsl(35 70% 32%); }
-    .wm-doctor-verdict--fail { background: hsl(0 75% 96%);   border-color: hsl(0 75% 80%);   color: hsl(0 75% 38%); }
+    .wm-doctor-verdict--ok   { background: hsl(142 50% 86%); color: hsl(var(--ink)); }
+    .wm-doctor-verdict--warn { background: hsl(var(--watch-yellow)); color: hsl(var(--ink)); }
+    .wm-doctor-verdict--fail { background: hsl(var(--blood) / 0.18); color: hsl(var(--ink)); }
     .wm-doctor-verdict__icon {
       font-size: 22px; font-weight: 700;
       width: 36px; height: 36px;
       display: flex; align-items: center; justify-content: center;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.6);
+      border-radius: 3px;
+      border: 1.5px solid hsl(var(--ink));
+      background: hsl(var(--paper));
     }
     .wm-doctor-verdict__label {
-      font-size: 13px; font-weight: 700;
-      letter-spacing: 0.06em; text-transform: uppercase;
+      font-family: 'Oswald', 'Inter', system-ui, sans-serif;
+      font-size: 15px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
     }
     .wm-doctor-verdict__mood {
-      font-size: 12px; font-style: italic;
-      opacity: 0.85;
-      margin-top: 1px;
+      font-family: 'Special Elite', Georgia, serif;
+      font-size: 12.5px;
+      opacity: 0.9;
+      margin-top: 2px;
     }
 
     /* ── Action run log viewer ────────────────────────────────────── */
@@ -755,12 +924,25 @@
     }
   </style>
 </head>
-<body class="bg-[hsl(var(--background))] text-[hsl(var(--foreground))]">
-  <nav class="bg-white border-b border-[hsl(var(--border))] px-6 py-3">
-    <div class="max-w-7xl mx-auto flex items-center justify-between">
-      <div class="flex items-center gap-2">
-        <a href="/" class="font-semibold text-base mr-3" style="color: hsl(var(--foreground));">
-          watchmen
+<body class="text-[hsl(var(--ink))]">
+  <nav class="px-6 py-3" style="background: hsl(var(--paper)); border-bottom: 2px solid hsl(var(--ink));">
+    <div class="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-3">
+      <div class="flex items-center gap-3 flex-wrap">
+        <a href="/" class="wm-brand mr-2" aria-label="watchmen — home">
+          <!-- Smiley with blood streak: the iconic Watchmen mark.
+               Yellow disc, ink eyes + smile, blood-crimson slash from
+               upper-left through the right eye. SVG inline so it picks
+               up the current palette tokens via Tailwind utility colors
+               aren't needed — colors are baked. -->
+          <svg class="wm-brand__mark" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="12" cy="12" r="11" fill="#F5C518" stroke="#131316" stroke-width="1.5"/>
+            <circle cx="8.5" cy="10.5" r="1.15" fill="#131316"/>
+            <circle cx="15.5" cy="10.5" r="1.15" fill="#131316"/>
+            <path d="M 7.6 14.4 Q 12 17.6 16.4 14.4" stroke="#131316" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+            <path d="M 3.2 6.5 L 17 11.4" stroke="#BC1D2E" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <span class="wm-brand__name">WATCHMEN</span>
+          <span class="wm-brand__tagline" title="Quis custodiet ipsos custodes? — Juvenal, c. 100 AD">quis custodiet</span>
         </a>
         {% set path = request.url.path if request else '' %}
         <a href="/"         class="wm-nav-link text-sm {% if path == '/' %}is-active{% endif %}">Dashboard</a>

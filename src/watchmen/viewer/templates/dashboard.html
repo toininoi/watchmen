@@ -70,9 +70,9 @@
         <td class="text-sm">
           {% if p.claude_md_size %}
             {{ "%.1f"|format(p.claude_md_size/1024) }} KB
-          {% else %}<span class="text-gray-400">—</span>{% endif %}
+          {% else %}<span class="text-gray-400">·</span>{% endif %}
         </td>
-        <td class="text-sm text-gray-600">{{ p.last_analyst_day or "—" }}</td>
+        <td class="text-sm text-gray-600">{{ p.last_analyst_day or "·" }}</td>
         <td class="text-xs text-gray-500 font-mono">{{ p.source_repo|replace("/Users/batuhanaktas", "~") }}</td>
       </tr>
       {% endfor %}
