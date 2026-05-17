@@ -1506,6 +1506,28 @@
                 ],
               },
             },
+            // Optional treatment annotation: a vertical dashed line at the
+            // category whose label matches `data-mark-date` on the host
+            // element.  Used by the per-project Impact card to mark the
+            // first-curator-landed date.  Silent so it never steals the
+            // tooltip; sits *behind* the line series via z=0.
+            ...(el.dataset.markDate && points.some(p => p.date === el.dataset.markDate) ? {
+              markLine: {
+                symbol: 'none',
+                silent: true,
+                animation: false,
+                lineStyle: { color: 'hsl(355 75% 50%)', type: 'dashed', width: 1.4 },
+                label: {
+                  show: true,
+                  position: 'insideStartTop',
+                  formatter: el.dataset.markLabel || 'curated',
+                  color: 'hsl(355 75% 50%)',
+                  fontSize: 10,
+                  fontWeight: 600,
+                },
+                data: [{ xAxis: el.dataset.markDate }],
+              },
+            } : {}),
             emphasis: { focus: 'series' },
           }],
         });
