@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}settings — watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold">◷ settings</h1>
+  <div class="text-sm text-gray-600 mt-1">
+    Configure the OpenRouter API key, viewer port, and per-project
+    cadence. Mirrors <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen settings</code> —
+    edits write to <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">~/.config/watchmen/.env</code>
+    and <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">state.db</code>, the same paths the CLI uses.
+  </div>
+</div>
+
+{% if flash %}
+  {% if flash.startswith("ok:") %}
+  <div class="mb-6 rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">
+    ✓ {{ flash[3:] }}
+  </div>
+  {% elif flash.startswith("err:") %}
+  <div class="mb-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+    ✗ {{ flash[4:] }}
+  </div>
+  {% endif %}
+{% endif %}
+
+<!-- ── Global settings ───────────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">Global</h2>
+
+<div class="wm-card mb-4">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">OpenRouter API key</div>
+  <div class="mb-3">
+    {% if api_key_set %}
+    <span class="font-mono text-sm text-gray-700">{{ api_key_masked }}</span>
+    <span class="wm-pill wm-pill-ok ml-2">set</span>
+    {% else %}
+    <span class="text-sm text-gray-500">not set</span>
+    <span class="wm-pill wm-pill-fail ml-2">missing</span>
+    {% endif %}
+  </div>
+  <form method="post" action="/settings/api-key" class="flex gap-2 items-center">
+    <input type="password" name="value" required
+           placeholder="sk-or-v1-…"
+           autocomplete="off"
+           class="flex-1 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+    <button type="submit"
+            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+      Save
+    </button>
+  </form>
+  <div class="text-xs text-gray-500 mt-2">
+    Saved to <code>~/.config/watchmen/.env</code>. Check validity at
+    <a href="/doctor" class="text-blue-600 hover:underline">/doctor</a>.
+  </div>
+</div>
+
+<div class="wm-card mb-6">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Viewer port</div>
+  <div class="mb-3">
+    <span class="font-mono text-sm text-gray-700">{{ viewer_port }}</span>
+    <span class="text-xs text-gray-500 ml-2">({{ viewer_port_source }})</span>
+  </div>
+  <form method="post" action="/settings/port" class="flex gap-2 items-center">
+    <input type="number" name="value" min="1024" max="65535"
+           value="{{ viewer_port }}"
+           class="w-32 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+    <button type="submit"
+            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+      Save
+    </button>
+  </form>
+  <div class="text-xs text-gray-500 mt-2">
+    Default {{ viewer_port_default }}. Range 1024–65535. After changing,
+    reinstall the launchd/systemd agent with
+    <code class="bg-gray-100 px-1 py-0.5 rounded">watchmen viewer install</code>
+    so the service agent picks up the new port.
+  </div>
+</div>
+
+<!-- ── Per-project settings ──────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">Tracked projects</h2>
+
+{% if projects %}
+<div class="wm-card overflow-hidden p-0">
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="border-b border-gray-200">
+        <th class="text-left font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Project</th>
+        <th class="text-left font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Repo</th>
+        <th class="text-center font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Enabled</th>
+        <th class="text-center font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Threshold</th>
+        <th class="px-4 py-2.5 w-20"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in projects %}
+      <tr class="border-b border-gray-100 last:border-b-0">
+        <form method="post" action="/settings/project/{{ p.project_key }}">
+          <td class="px-4 py-2.5 font-medium">
+            <a href="/p/{{ p.project_key }}" class="text-blue-600 hover:underline">{{ p.project_key }}</a>
+          </td>
+          <td class="px-4 py-2.5 text-xs text-gray-600 font-mono truncate max-w-[20rem]" title="{{ p.source_repo }}">
+            {{ p.source_repo|replace("/Users/" ~ p.source_repo.split("/")[2], "~") if p.source_repo else "—" }}
+          </td>
+          <td class="px-4 py-2.5 text-center">
+            <label class="inline-flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" name="enabled" value="1" {% if p.enabled %}checked{% endif %}
+                     class="rounded">
+            </label>
+          </td>
+          <td class="px-4 py-2.5 text-center">
+            <input type="number" name="threshold_new_prompts" min="1" value="{{ p.threshold_new_prompts }}"
+                   class="w-20 text-sm font-mono px-2 py-1 border border-gray-300 rounded-md text-center">
+          </td>
+          <td class="px-4 py-2.5 text-right">
+            <button type="submit"
+                    class="text-xs px-2.5 py-1 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+              Save
+            </button>
+          </td>
+        </form>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="text-xs text-gray-500 mt-2">
+  CLI equivalents: <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen settings show &lt;project&gt;</code> ·
+  <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen settings set &lt;project&gt; threshold_new_prompts N</code>
+</div>
+{% else %}
+<div class="wm-card text-sm text-gray-500">
+  No projects tracked yet. Run
+  <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen init</code> or
+  <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
+</div>
+{% endif %}
+
+{% endblock %}
