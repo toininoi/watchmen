@@ -20,6 +20,7 @@ from watchmen.util import (
     write_skill_list,
 )
 from watchmen.viewer import actions as wm_actions
+from watchmen.viewer import homepage as wm_homepage
 from watchmen.viewer import diagnostics as wm_diag
 
 ROOT = Path(__file__).parent.parent  # src/watchmen/
@@ -316,8 +317,14 @@ def dashboard(request: Request):
         "runs": runs,
         "changelog_version": changelog_version,
         "changelog_body_html": changelog_body_html,
-        "next_actions": wm_actions.next_best_actions(limit=5),
+        "next_actions": wm_actions.next_best_actions(limit=6),
         "active_web_runs": [r for r in wm_actions.list_runs(limit=5) if r["alive"]],
+        # Mission-control surfaces — all degrade to empty/zero when
+        # corpus.db is missing, so a fresh install still renders fine.
+        "impact": wm_homepage.impact_strip(),
+        "leaderboard": wm_homepage.skill_leaderboard(window_days=7, limit=6),
+        "status_tiles": wm_homepage.status_tiles(),
+        "sparkline_data": wm_homepage.weekly_sparkline_data(weeks=12),
     })
 
 
