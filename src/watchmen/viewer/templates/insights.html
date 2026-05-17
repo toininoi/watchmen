@@ -71,7 +71,7 @@
           {% if r.pending_n %}<span class="text-amber-700 font-semibold">{{ r.pending_n }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
         <td>
-          <div class="wm-chart" style="width: 140px; height: 32px;"
+          <div class="wm-chart spark" style="width: 140px; height: 32px;"
                data-wm-chart="area"
                data-color="hsl(217, 91%, 60%)" data-label="Sessions" data-value-fmt="int"
                data-points='{{ r.sess_spark_data|tojson }}'></div>
