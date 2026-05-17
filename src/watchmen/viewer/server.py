@@ -20,6 +20,7 @@ from watchmen.util import (
     write_skill_list,
 )
 from watchmen.viewer import actions as wm_actions
+from watchmen.viewer import diagnostics as wm_diag
 
 ROOT = Path(__file__).parent.parent  # src/watchmen/
 ANALYSES = ANALYSES_DIR
@@ -462,6 +463,95 @@ def actions_run_view(request: Request, run_id: str):
     return TEMPLATES.TemplateResponse(request, "action_run.html", {
         "run": meta,
     })
+
+
+# ─── Doctor + settings (web UI for `watchmen doctor` / `settings`) ───────────
+
+
+@app.get("/doctor", response_class=HTMLResponse)
+def doctor_page(request: Request, check_openrouter: bool = True):
+    """Install-health diagnostic. Mirrors the CLI's `doctor` table — same
+    probes, same severity vocabulary. `?check_openrouter=0` skips the
+    HTTP probe (fastest path for an offline page load)."""
+    result = wm_diag.run_checks(check_openrouter=check_openrouter)
+    return TEMPLATES.TemplateResponse(request, "doctor.html", {
+        "rows": result["rows"],
+        "summary": result["summary"],
+        "check_openrouter": check_openrouter,
+    })
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, flash: str | None = None):
+    """Settings: API key, viewer port, per-project enabled + threshold.
+    Reads via wm_diag.get_settings(); writes go through the POST handlers
+    below. The `flash` query param surfaces the success/error message
+    from the previous POST→303 cycle."""
+    snap = wm_diag.get_settings()
+    return TEMPLATES.TemplateResponse(request, "settings.html", {
+        **snap,
+        "flash": flash,
+    })
+
+
+async def _form_fields(request: Request) -> dict[str, str]:
+    """Tiny urlencoded body parser. Matches the pattern in /actions/run so
+    the viewer stays python-multipart-free."""
+    from urllib.parse import parse_qs
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    fields = parse_qs(raw, keep_blank_values=True)
+    return {k: (v[0] if v else "") for k, v in fields.items()}
+
+
+def _settings_redirect(message: str, ok: bool = True) -> RedirectResponse:
+    prefix = "ok:" if ok else "err:"
+    from urllib.parse import quote
+    return RedirectResponse(
+        url=f"/settings?flash={prefix}{quote(message)}", status_code=303
+    )
+
+
+@app.post("/settings/api-key")
+async def settings_set_api_key(request: Request):
+    fields = await _form_fields(request)
+    try:
+        path = wm_diag.set_api_key(fields.get("value", ""))
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"API key updated · wrote → {path}")
+
+
+@app.post("/settings/port")
+async def settings_set_port(request: Request):
+    fields = await _form_fields(request)
+    try:
+        path, port = wm_diag.set_viewer_port(fields.get("value", ""))
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(
+        f"Viewer port set to {port} · wrote → {path} · "
+        f"reinstall the agent for the new port to take effect."
+    )
+
+
+@app.post("/settings/project/{project_key}")
+async def settings_update_project(request: Request, project_key: str):
+    fields = await _form_fields(request)
+    try:
+        enabled_raw = fields.get("enabled")
+        thr_raw = fields.get("threshold_new_prompts", "").strip()
+        enabled: bool | None
+        if enabled_raw is None:
+            enabled = None
+        else:
+            enabled = enabled_raw.lower() in ("1", "true", "on", "yes")
+        threshold = int(thr_raw) if thr_raw else None
+        wm_diag.update_project_settings(
+            project_key, enabled=enabled, threshold_new_prompts=threshold,
+        )
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"{project_key} updated")
 
 
 @app.get("/p/{project_key}/skills/{skill_slug}/files/{file_rel:path}", response_class=HTMLResponse)

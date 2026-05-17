@@ -725,6 +725,32 @@
       .wm-actions__item-right { justify-content: flex-start; flex-wrap: wrap; }
     }
 
+    /* ── Doctor verdict tile ──────────────────────────────────────── */
+    .wm-doctor-verdict {
+      border-radius: 12px;
+      padding: 16px 20px;
+      border: 1px solid;
+    }
+    .wm-doctor-verdict--ok   { background: hsl(142 60% 96%); border-color: hsl(142 60% 80%); color: hsl(142 60% 26%); }
+    .wm-doctor-verdict--warn { background: hsl(45 90% 95%);  border-color: hsl(45 90% 80%);  color: hsl(35 70% 32%); }
+    .wm-doctor-verdict--fail { background: hsl(0 75% 96%);   border-color: hsl(0 75% 80%);   color: hsl(0 75% 38%); }
+    .wm-doctor-verdict__icon {
+      font-size: 22px; font-weight: 700;
+      width: 36px; height: 36px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.6);
+    }
+    .wm-doctor-verdict__label {
+      font-size: 13px; font-weight: 700;
+      letter-spacing: 0.06em; text-transform: uppercase;
+    }
+    .wm-doctor-verdict__mood {
+      font-size: 12px; font-style: italic;
+      opacity: 0.85;
+      margin-top: 1px;
+    }
+
     /* ── Action run log viewer ────────────────────────────────────── */
     .wm-action-run-log {
       background: hsl(220 9% 12%);
@@ -753,6 +779,8 @@
         <a href="/insights" class="wm-nav-link text-sm {% if path.startswith('/insights') %}is-active{% endif %}">Insights</a>
         <a href="/metrics"  class="wm-nav-link text-sm {% if path.startswith('/metrics') %}is-active{% endif %}">Metrics</a>
         <a href="/runs"     class="wm-nav-link text-sm {% if path.startswith('/runs') %}is-active{% endif %}">Runs</a>
+        <a href="/doctor"   class="wm-nav-link text-sm {% if path.startswith('/doctor') %}is-active{% endif %}">Doctor</a>
+        <a href="/settings" class="wm-nav-link text-sm {% if path.startswith('/settings') %}is-active{% endif %}">Settings</a>
       </div>
       <div class="text-xs" style="color: hsl(var(--muted-foreground));">local viewer</div>
     </div>

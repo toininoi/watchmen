@@ -1741,6 +1741,95 @@ def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
             assert "Claude Code" in html
 
 
+def test_viewer_doctor_page_renders_structured_checks(monkeypatch):
+    """`/doctor` should run the same probes as the CLI and render each
+    row with a severity pill. Skipping the OpenRouter HTTP probe keeps
+    the test offline + deterministic; the key-set check still fires."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/doctor?check_openrouter=0")
+    assert r.status_code == 200, f"/doctor returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    # Page landmarks + at least the key + corpus + projects checks render.
+    assert "OpenRouter key" in html
+    assert "corpus.db" in html
+    assert "tracked projects" in html
+    # Verdict tile always renders (one of three classes).
+    assert "wm-doctor-verdict" in html
+    # CLI parity hint is present so users discover the parallel command.
+    assert "watchmen doctor" in html
+
+
+def test_viewer_settings_page_and_port_post_roundtrip(tmp_path, monkeypatch):
+    """`/settings` should render the form, and POST /settings/port should
+    write through `config.write_env_var` + 303 back with a flash. We
+    redirect the .env path to tmp_path so the real config stays untouched."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen import config as _config
+    from watchmen.viewer import diagnostics as wm_diag
+    from watchmen.viewer import server as viewer_server
+
+    # Redirect config writes to a tmp .env so we don't pollute the user's
+    # real ~/.config/watchmen/.env.
+    fake_env = tmp_path / "watchmen.env"
+    def _read(key, default=None):
+        if not fake_env.exists():
+            return default
+        for line in fake_env.read_text().splitlines():
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1]
+        return default
+    def _write(key, value):
+        lines = []
+        if fake_env.exists():
+            lines = [
+                line for line in fake_env.read_text().splitlines()
+                if not line.startswith(f"{key}=")
+            ]
+        lines.append(f"{key}={value}")
+        fake_env.write_text("\n".join(lines) + "\n")
+        return fake_env
+    monkeypatch.setattr(_config, "read_env_var", _read)
+    monkeypatch.setattr(_config, "write_env_var", _write)
+    monkeypatch.setattr(wm_diag.config, "read_env_var", _read)
+    monkeypatch.setattr(wm_diag.config, "write_env_var", _write)
+
+    client = TestClient(viewer_server.app)
+
+    # GET renders.
+    r = client.get("/settings")
+    assert r.status_code == 200
+    assert "OpenRouter API key" in r.text
+    assert "Viewer port" in r.text
+
+    # POST bad port → redirect with err: flash.
+    r = client.post(
+        "/settings/port",
+        content="value=99",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "flash=err" in r.headers["location"]
+
+    # POST valid port → redirect with ok: flash + env written.
+    r = client.post(
+        "/settings/port",
+        content="value=7777",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "flash=ok" in r.headers["location"]
+    assert "WATCHMEN_VIEWER_PORT=7777" in fake_env.read_text()
+
+
 def test_viewer_actions_run_dispatch_and_status(tmp_path, monkeypatch):
     """Web-triggered runs should spawn a real CLI subprocess, write a log
     file under WATCHMEN_HOME/web-runs/, redirect to a tail page, and flip
@@ -2186,12 +2275,19 @@ def test_cli_unknown_command_suggests_nearest_match():
     assert "invalid choice" not in body
 
 
-def test_cli_open_constructs_url_and_invokes_webbrowser():
+def test_cli_open_constructs_url_and_invokes_webbrowser(monkeypatch):
     """`watchmen open <project>` must build http://host:port/p/<project> and pass
     it to webbrowser.open. The viewer-down warning must not block the open
-    attempt — open is a 'best effort, give me the URL' command, not a gate."""
-    from watchmen import cli
+    attempt — open is a 'best effort, give me the URL' command, not a gate.
+
+    Monkeypatches `config.read_env_var` so the test's "no project, just base
+    URL" case sees VIEWER_DEFAULT_PORT instead of whatever the user has in
+    ~/.config/watchmen/.env. Otherwise this test fails on developer machines
+    that have customized WATCHMEN_VIEWER_PORT, which has nothing to do with
+    the URL-construction behavior under test."""
+    from watchmen import cli, config
     import webbrowser
+    monkeypatch.setattr(config, "read_env_var", lambda key, default=None: default)
     opened: list[str] = []
     orig = webbrowser.open
     webbrowser.open = lambda url, new=0: (opened.append(url), True)[1]
@@ -2203,7 +2299,6 @@ def test_cli_open_constructs_url_and_invokes_webbrowser():
         opened.clear()
         rc = cli.main(["open"])  # no project, just base URL
         assert rc == 0
-        from watchmen import config
         expected_base = f"http://127.0.0.1:{config.VIEWER_DEFAULT_PORT}"
         assert opened and opened[0].rstrip("/") == expected_base, f"unexpected base URL: {opened}"
     finally:
