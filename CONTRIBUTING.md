@@ -32,6 +32,7 @@ uv run pytest --cov=watchmen tests/    # coverage report
 src/watchmen/                 the package — every Python module lives here
 src/watchmen/hooks/           shell hooks the package ships
 plugin/                       separate Claude Code plugin (distributed via GitHub)
+plugin-codex/                 Codex plugin (distributed via GitHub)
 tests/test_smoke.py           cold-start + regression sweep (the original smoke suite)
 tests/test_adapter_*.py       per-adapter parser tests (claude_code, codex, pi)
 tests/test_agent.py           mocked OpenRouter retry/cost-ceiling tests
@@ -81,8 +82,9 @@ That's it. The tests:
 - Don't make network calls. `agent.call_openrouter` is exercised via
   `unittest.mock` stubs of `httpx.Client.post`.
 
-Phase 5 of the handover will port these to pytest with proper fixtures. For
-now: just one big script, one entry point.
+Add focused regression tests with the change. For packaging or plugin-layout
+changes, extend `tests/test_smoke.py`; for parser changes, prefer fixture-driven
+adapter tests.
 
 ## Branch + PR conventions
 
@@ -189,7 +191,7 @@ or email security@dria.co.
 
 ## Code of conduct
 
-This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md) v2.1.
+This project follows the project [Code of Conduct](CODE_OF_CONDUCT.md).
 Be kind, be technical, be specific. Disagreement is fine; rudeness isn't.
 
 ## License
