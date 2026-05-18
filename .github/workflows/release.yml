@@ -6,7 +6,7 @@ name: release
 # publishes to PyPI via OIDC trusted publishing — no API tokens stored.
 #
 # To enable PyPI publishing:
-#   1. Claim the `watchmen` project on PyPI (pending-publisher works for
+#   1. Claim the `dria-watchmen` project on PyPI (pending-publisher works for
 #      first publish — register at https://pypi.org/manage/account/publishing/).
 #   2. Add this repo as a trusted publisher: owner=firstbatchxyz,
 #      repo=watchmen, workflow=release.yml, environment=pypi.

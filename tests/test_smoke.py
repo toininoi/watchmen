@@ -1288,6 +1288,7 @@ def test_codex_plugin_dir_has_required_layout():
     assert manifest.is_file(), "plugin-codex/.codex-plugin/plugin.json missing"
     data = json.loads(manifest.read_text())
     assert data.get("name") == "watchmen", f"plugin name drifted: {data.get('name')!r}"
+    assert data.get("license") == "MIT", "Codex plugin license must match the repo/package license"
     iface = data.get("interface") or {}
     assert iface.get("displayName"), "plugin.json missing interface.displayName — Codex tile won't render the brand"
     assert iface.get("brandColor"), "plugin.json missing interface.brandColor"
@@ -1341,6 +1342,31 @@ def test_codex_marketplace_lists_plugin():
     assert "./plugin-codex" in sources, (
         f"marketplace.json doesn't point at plugin-codex/ (sources: {sources})"
     )
+
+
+def test_sdist_includes_launch_surface_files():
+    """The source distribution should contain every public launch surface,
+    including both plugins and community/security docs. PyPI users may inspect
+    the sdist even when plugin installation itself is GitHub-based."""
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text())
+    included = set(pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"])
+    expected = {
+        "plugin",
+        "plugin-codex",
+        ".agents/plugins/marketplace.json",
+        ".claude-plugin/marketplace.json",
+        "docs/images",
+        ".github/ISSUE_TEMPLATE",
+        ".github/pull_request_template.md",
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+    }
+    missing = sorted(expected - included)
+    assert not missing, f"sdist is missing launch surface files: {missing}"
 
 
 def test_harness_installed_skills_reads_skill_md_frontmatter():
@@ -3089,5 +3115,3 @@ def test_cli_bare_invocation_runs_smart_default():
     finally:
         cli._is_first_run = orig
     assert rc == 0, f"bare watchmen on first-run should exit 0, got {rc}"
-
-

@@ -5,7 +5,7 @@
 <h1 align="center">watchmen</h1>
 
 <p align="center">
-  <em>Use your coding agents more efficiently — without doing anything but running watchmen in the background.</em>
+  <em>Watchmen turns every coding session into the skill bundles you’d never sit down and write yourself.</em>
 </p>
 
 <p align="center">
@@ -18,11 +18,35 @@
 
 ---
 
-You don't change how you work. You install it once. It runs as a daemon.
+Reusable skills and workspace briefs, built from what you actually do, carried
+across Claude Code, Codex, and pi.dev. You install it once and never change how
+you work.
 
-watchmen sits behind **Claude Code**, **Codex**, and **pi.dev**. It silently watches your sessions, mines what you actually do, and writes skill bundles + workspace briefs (`CLAUDE.md` / `AGENTS.md`) so your next session is smarter than your last. Same skills follow you across agents — switch between Claude Code and Codex on the same repo and they pick up where the other left off.
+The manual fix is writing a `CLAUDE.md` or `AGENTS.md` by hand, but that's you
+doing the learning on behalf of the agent. That's backwards.
 
-It's the only agent-coordination tool that does this. **Local, cross-agent, continuous.**
+watchmen sits behind **Claude Code**, **Codex**, and **pi.dev**. It silently
+watches your sessions, mines what you actually do, and writes skill bundles +
+workspace briefs (`CLAUDE.md` / `AGENTS.md`) so your next session is smarter
+than your last. Same skills follow you across agents — switch between Claude
+Code and Codex on the same repo and they pick up where the other left off.
+
+## Why it matters
+
+- **Fewer tokens burned re-explaining yourself.** Your agent stops
+  rediscovering the same procedures every session. The skill is already on
+  disk, so context that used to be spent re-deriving it isn't.
+- **Fewer tool errors per session.** watchmen's own impact card tracks median
+  tool errors before and after a project's skills land, on a 16-week curve.
+- **Unified context layer across every agent.** Switch from Claude Code to
+  Codex in the middle of development and the skills you need will follow. No
+  need to re-onboard the new agent.
+
+**Local storage, cross-agent, continuous.**
+
+watchmen stores transcripts, metrics, analyses, and generated bundles on your
+machine. Analysis runs send selected session excerpts to OpenRouter using your
+API key; nothing is uploaded outside those explicit LLM calls.
 
 ## What watchmen actually does
 
@@ -50,7 +74,8 @@ Six steps. Most run in seconds; the LLM passes (analyze + curate) are the only s
 
 ## Mission control
 
-A local web dashboard at `http://127.0.0.1:8979` — no cloud, no account. Top-of-page tells you:
+A local web dashboard at `http://127.0.0.1:8979` — no hosted account or remote
+dashboard. Top-of-page tells you:
 
 - **Skill calls this week vs last week** — are your curated skills being invoked?
 - **Tool errors per session** — is friction going up or down?
@@ -258,7 +283,7 @@ Claude Code shipped `/insights` in v2.1.117 (Apr 2026) — LLM-narrated HTML rep
 | **Scope** | Global, flat aggregate | Per-project bundles + cross-repo digest |
 | **Cadence** | On-demand, manual | Continuous via daemon |
 | **Provenance** | No traceable source | `watchmen why <skill>` → source sessions with adapter tags |
-| **Privacy** | LLM call on full corpus | Local-only by default |
+| **Privacy** | LLM call on full corpus | Local storage; selected excerpts sent to OpenRouter for analysis |
 
 Both are useful. Run both.
 
@@ -320,7 +345,12 @@ watchmen {hooks,daemon,viewer,statusline} uninstall
 
 **Cost.** Per project, a full curator run (analyst + 6-8 skill bundles + CLAUDE.md) is `$3-8` in deepseek-v4-flash. Incremental daemon cycles are `$0.10-0.50` since they only process new days. `watchmen insights` cross-repo digest: ~$0.05-0.10 per regeneration.
 
-**Privacy.** Everything lives locally. Your session transcripts already live in `~/.claude/projects/` / `~/.codex/sessions/` — Anthropic and OpenAI put them there. watchmen reads them, builds a SQLite corpus on your disk, and ships only the chunks needed for analysis to OpenRouter (your chosen LLM provider). The artifacts it generates (`bundles/`, `analyses/`) stay on your disk. Nothing leaves your machine except outbound LLM calls during scheduled curator runs.
+**Privacy.** Runtime state lives locally. Your session transcripts already live
+in `~/.claude/projects/` / `~/.codex/sessions/` — Anthropic and OpenAI put them
+there. watchmen reads them, builds a SQLite corpus on your disk, and sends only
+the chunks needed for analysis to OpenRouter (your chosen LLM provider) during
+analyst, curator, and insights runs. The artifacts it generates (`bundles/`,
+`analyses/`) stay on your disk.
 
 If you don't want certain repos analyzed, just don't track them — auto-detect only suggests, `watchmen track` is opt-in.
 
@@ -359,7 +389,10 @@ watchmen/
 │   ├── viewer/               # FastAPI mission control + impact card
 │   ├── adapters/             # cc / cd / pi adapters
 │   └── hooks/                # observe.sh → POSTs hook stdin → localhost:8765
-├── plugin/                   # Claude Code plugin (separate distribution)
+├── plugin/                   # Claude Code plugin
+├── plugin-codex/             # Codex plugin
+├── .agents/plugins/          # Codex marketplace manifest
+├── .claude-plugin/           # Claude Code marketplace manifest
 ├── tests/                    # pytest smoke + regression suite
 ├── docs/images/              # screenshots + hero
 └── pyproject.toml
