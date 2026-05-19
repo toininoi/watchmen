@@ -324,14 +324,23 @@ def test_claude_adapter_stores_decoded_paths():
     """The Claude adapter must call decode_project_dir on the encoded dir name —
     if it stored '-Users-...' the per-project analyst couldn't merge with Codex's
     real-path sessions. Regression test for the original split-counts gotcha."""
-    import os
+    import sys as _sys
     import tempfile
     from watchmen.adapters import claude_code
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         real_dir = td_path / "foo-bar"
         real_dir.mkdir()
-        encoded = str(real_dir).replace("/", "-")
+        # Build a Claude-Code-style encoded project dir name. The encoding
+        # format is platform-specific: POSIX uses "-<segs joined by ->",
+        # Windows uses "<Drive>--<segs joined by ->" (see paths.decode_*).
+        real_str = str(real_dir)
+        if _sys.platform == "win32":
+            drive = real_str[0]
+            tail = real_str[3:].replace("\\", "-")
+            encoded = f"{drive}--{tail}"
+        else:
+            encoded = real_str.replace("/", "-")
         fake_claude = td_path / "claude_projects"
         proj = fake_claude / encoded
         proj.mkdir(parents=True)
@@ -346,7 +355,14 @@ def test_claude_adapter_stores_decoded_paths():
             assert len(entries) == 1
             assert not entries[0]["project_dir"].startswith("-"), \
                 f"adapter stored encoded form: {entries[0]['project_dir']!r}"
-            assert os.path.realpath(entries[0]["project_dir"]) == os.path.realpath(str(real_dir))
+            # The adapter must store the decoded form (what decode_project_dir
+            # returns), not the raw encoded dir name. Exact decoder accuracy
+            # — handling dashes in real dir names — is covered by paths.py's
+            # own tests; whether the walk lands on the exact tempdir layout
+            # depends on ambient FS state (CI runner temp dirs have
+            # thousands of siblings that can defeat the longest-prefix walk).
+            from watchmen.paths import decode_project_dir
+            assert entries[0]["project_dir"] == decode_project_dir(encoded)
         finally:
             claude_code.PROJECTS_DIR = orig
             claude_code._DECODE_CACHE.clear()
@@ -757,8 +773,11 @@ def test_corpus_scan_is_incremental_and_idempotent():
             # First scan: cold — must parse the file.
             corpus.scan_all()
             import sqlite3
-            with sqlite3.connect(str(corpus.DB_PATH)) as c:
+            c = sqlite3.connect(str(corpus.DB_PATH))
+            try:
                 row = c.execute("SELECT file_mtime, message_count FROM sessions WHERE session_id = 'abc'").fetchone()
+            finally:
+                c.close()
             assert row is not None, "first scan didn't write the session"
             mtime_after_first, msgs_first = row
             assert mtime_after_first is not None and mtime_after_first > 0
@@ -784,8 +803,11 @@ def test_corpus_scan_is_incremental_and_idempotent():
                 f.write('{"timestamp":"2026-05-01T10:00:02Z","type":"user","message":{"content":"again"}}\n')
             os.utime(proj / "abc.jsonl", None)  # force mtime update on edge cases
             corpus.scan_all()
-            with sqlite3.connect(str(corpus.DB_PATH)) as c:
+            c = sqlite3.connect(str(corpus.DB_PATH))
+            try:
                 row = c.execute("SELECT file_mtime, message_count FROM sessions WHERE session_id = 'abc'").fetchone()
+            finally:
+                c.close()
             mtime_after_third, msgs_third = row
             assert mtime_after_third > mtime_after_first, "mtime didn't advance after file append"
             assert msgs_third == 3, f"expected 3 messages after append, got {msgs_third}"
@@ -890,9 +912,13 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
 
     with tempfile.TemporaryDirectory() as td:
         legacy_db = Path(td) / "corpus.db"
-        with sqlite3.connect(str(legacy_db)) as c:
+        c = sqlite3.connect(str(legacy_db))
+        try:
             c.executescript(legacy_sessions_schema + legacy_prompts_schema + legacy_tools_schema)
             c.execute("INSERT INTO sessions (session_id, transcript_path) VALUES ('old-row', '/path/that/no/longer/exists.jsonl')")
+            c.commit()
+        finally:
+            c.close()
 
         orig_db = corpus.DB_PATH
         corpus.DB_PATH = legacy_db
@@ -948,47 +974,57 @@ def test_corpus_migrate_schema_adds_agent_column_to_pre_adapter_db():
             cost_usd REAL NOT NULL DEFAULT 0
         );
     """
+    def _read(db: Path, fn):
+        """Open db, run fn(connection), close before returning. Explicit
+        close matters on Windows — without it the file stays locked and
+        tempdir teardown raises WinError 32."""
+        c = sqlite3.connect(str(db))
+        try:
+            return fn(c)
+        finally:
+            c.close()
+
     with tempfile.TemporaryDirectory() as td:
         pre_db = Path(td) / "corpus.db"
-        with sqlite3.connect(str(pre_db)) as c:
+        def _seed(c):
             c.executescript(pre_adapter_sessions)
             c.execute(
                 "INSERT INTO sessions (session_id, project_dir) VALUES ('legacy-sess', '/some/path/kai-frontend')"
             )
+            c.commit()
+        _read(pre_db, _seed)
 
         orig_db = corpus.DB_PATH
         corpus.DB_PATH = pre_db
         try:
             # 1. migrate_schema must not raise on a pre-adapter DB.
             corpus.migrate_schema()
-            with sqlite3.connect(str(pre_db)) as c:
-                cols = {r[1] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
+            cols = _read(pre_db, lambda c: {r[1] for r in c.execute("PRAGMA table_info(sessions)").fetchall()})
             assert "agent" in cols, "migrate_schema must add the `agent` column"
             assert "file_mtime" in cols, "migrate_schema must keep adding `file_mtime` too"
 
             # 2. The existing row defaulted to 'claude_code' — same as canonical schema.
-            with sqlite3.connect(str(pre_db)) as c:
-                agent = c.execute(
-                    "SELECT agent FROM sessions WHERE session_id = 'legacy-sess'"
-                ).fetchone()[0]
+            agent = _read(pre_db, lambda c: c.execute(
+                "SELECT agent FROM sessions WHERE session_id = 'legacy-sess'"
+            ).fetchone()[0])
             assert agent == "claude_code", f"default tag wrong: {agent!r}"
 
             # 3. The exact query that was crashing (`watchmen insights` header)
             #    now works.
-            with sqlite3.connect(str(pre_db)) as c:
-                rows = c.execute(
-                    """SELECT agent, COUNT(*) FROM sessions
-                       WHERE is_subagent = 0 GROUP BY agent"""
-                ).fetchall()
+            rows = _read(pre_db, lambda c: c.execute(
+                """SELECT agent, COUNT(*) FROM sessions
+                   WHERE is_subagent = 0 GROUP BY agent"""
+            ).fetchall())
             assert rows and rows[0][0] == "claude_code"
 
             # 4. Calling migrate_schema again is a no-op (idempotent).
             corpus.migrate_schema()
             corpus.migrate_schema()
-            with sqlite3.connect(str(pre_db)) as c:
-                # Still one row, still one column set — nothing duplicated.
+            def _after(c):
                 n = c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
                 cols_after = {r[1] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
+                return n, cols_after
+            n, cols_after = _read(pre_db, _after)
             assert n == 1
             assert cols == cols_after, "repeat migrate_schema calls must not change the schema"
         finally:
@@ -1562,9 +1598,13 @@ def test_state_init_db_migrates_approval_columns_on_legacy_db():
     """
     with tempfile.TemporaryDirectory() as td:
         legacy_db = Path(td) / "state.db"
-        with sqlite3.connect(str(legacy_db)) as c:
+        c = sqlite3.connect(str(legacy_db))
+        try:
             c.executescript(legacy_projects)
             c.execute("INSERT INTO projects (project_key, source_repo) VALUES ('p', '/some/repo')")
+            c.commit()
+        finally:
+            c.close()
 
         orig_db = state.STATE_DB
         state.STATE_DB = legacy_db
@@ -1874,11 +1914,17 @@ def test_viewer_actions_run_dispatch_and_status(tmp_path, monkeypatch):
 
     # Redirect web-runs storage to tmp_path so we don't pollute the real
     # WATCHMEN_HOME, and substitute a fast-exiting binary for "watchmen"
-    # so the test runs in <100ms regardless of CLI install state.
+    # so the test runs in <100ms regardless of CLI install state. Use the
+    # Python interpreter with a no-op script — works identically on POSIX
+    # and Windows (where /bin/echo isn't a thing).
     runs_dir = tmp_path / "web-runs"
     monkeypatch.setattr(wm_actions, "WEB_RUNS_DIR", runs_dir)
-    monkeypatch.setattr(wm_actions.shutil, "which", lambda _name: "/bin/echo")
-    monkeypatch.setitem(wm_actions.RUNNABLE_ACTIONS, "analyze", ["analyze"])
+    monkeypatch.setattr(wm_actions.shutil, "which", lambda _name: _sys.executable)
+    monkeypatch.setitem(
+        wm_actions.RUNNABLE_ACTIONS,
+        "analyze",
+        ["-c", "import sys; print('analyze', *sys.argv[1:])"],
+    )
 
     client = TestClient(viewer_server.app)
 
@@ -2004,7 +2050,7 @@ def test_viewer_base_template_exposes_insights_nav_link():
     page itself. Without it, users can land on /metrics or / and have no
     discovery path to the new page."""
     base = SRC / "viewer" / "templates" / "base.html"
-    text = base.read_text()
+    text = base.read_text(encoding="utf-8")
     assert 'href="/insights"' in text, "Insights nav link missing from base.html"
     # And the stale hardcoded port (8888 from before the port-settings PR)
     # must not be back — base.html now shows a generic "local viewer" label.
@@ -2153,12 +2199,13 @@ def test_systemd_setup_dry_run_emits_valid_unit_file():
 
 def test_service_dispatcher_picks_backend_per_platform():
     """`watchmen.service` is a thin dispatcher that picks launchd_setup on
-    macOS and systemd_setup on Linux. The public API must be present on the
-    selected backend so cli.py call sites don't blow up at runtime."""
+    macOS, systemd_setup on Linux, and schtasks_setup on Windows. The
+    public API must be present on the selected backend so cli.py call
+    sites don't blow up at runtime."""
     import platform
     from watchmen import service
 
-    assert service.BACKEND_NAME in {"launchd", "systemd", "darwin", "linux", "unknown"}
+    assert service.BACKEND_NAME in {"launchd", "systemd", "schtasks", "darwin", "linux", "unknown"}
 
     system = platform.system()
     if system == "Darwin":
@@ -2167,8 +2214,11 @@ def test_service_dispatcher_picks_backend_per_platform():
     elif system == "Linux":
         from watchmen import systemd_setup as backend
         assert service.BACKEND_NAME == "systemd"
+    elif system == "Windows":
+        from watchmen import schtasks_setup as backend
+        assert service.BACKEND_NAME == "schtasks"
     else:
-        # No backend on Windows/etc. — _backend() should raise on use.
+        # Unknown platform — _backend() should raise on use.
         try:
             service.install_daemon(dry_run=True)
         except RuntimeError:
@@ -3049,7 +3099,11 @@ def test_config_viewer_port_reads_env_then_file_then_default(monkeypatch, tmp_pa
     assert "OPENROUTER_API_KEY=sk-test" in file_body
     assert "WATCHMEN_VIEWER_PORT=9333" in file_body
     # File chmod is 0600 (config writes secrets and shouldn't leak them).
-    assert (env_file.stat().st_mode & 0o777) == 0o600
+    # Windows doesn't honor POSIX mode bits — st_mode there is derived from
+    # the read-only attribute, not the user/group/other rwx triplet.
+    import sys as _sys
+    if _sys.platform != "win32":
+        assert (env_file.stat().st_mode & 0o777) == 0o600
 
 
 def test_cli_settings_port_get_and_set_with_validation(monkeypatch, tmp_path):
@@ -3559,6 +3613,12 @@ def test_launchd_bootstrap_retries_when_service_not_listed(monkeypatch):
     list <label>`. If the verify fails the first time, it retries once
     after a short sleep — that's the fix for the bootout race."""
     import subprocess
+    import sys as _sys
+    # launchd is macOS-only; the function calls os.getuid() which doesn't
+    # exist on Windows. Skip on non-POSIX platforms.
+    if _sys.platform == "win32":
+        import pytest
+        pytest.skip("launchd is macOS-only")
     from watchmen import launchd_setup
 
     bootstrap_calls = 0

@@ -17,14 +17,21 @@ Usage:
 
 import argparse
 import contextlib
-import fcntl
 import json
 import os
 import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
+
+# Locking primitives differ by platform: POSIX has fcntl.flock, Windows has
+# msvcrt.locking. _file_lock below picks the right one at call time.
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -78,20 +85,35 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 @contextlib.contextmanager
 def _file_lock(path: Path):
-    """Advisory exclusive flock on a lock file. Blocks until acquired.
+    """Advisory exclusive lock on a lock file. Blocks until acquired.
 
     Used to serialize concurrent curator runs around the FTS5 skill index
     rebuild (DROP TABLE + CREATE + bulk INSERT is not transactional in
     SQLite's autocommit, so two simultaneous rebuilds can corrupt the
-    index). macOS + Linux only; the daemon is macOS-only today anyway.
+    index). Uses fcntl.flock on POSIX and msvcrt.locking on Windows; the
+    daemon itself is macOS-only today, but tests exercise this on every
+    platform CI runs on.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        if sys.platform == "win32":
+            # msvcrt.locking locks a byte range; lock 1 byte at offset 0.
+            # LK_LOCK blocks (retries) until acquired.
+            fh.write("\0")
+            fh.flush()
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 # ─── Prompts ────────────────────────────────────────────────────────────────

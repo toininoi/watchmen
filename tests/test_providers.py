@@ -579,8 +579,10 @@ def test_reset_clears_artifacts_and_state(monkeypatch, tmp_path):
     assert proj["last_analyst_run"] is None
     assert proj["last_curator_run"] is None
     assert (proj["last_curator_skill_count"] or 0) == 0
-    # Config preserved
-    assert proj["source_repo"].endswith("/repo")
+    # Config preserved. Use os.sep so the assertion holds on Windows
+    # (path ends with `\repo`) as well as POSIX (`/repo`).
+    import os as _os
+    assert proj["source_repo"].endswith(_os.sep + "repo")
     assert proj["threshold_new_prompts"] == 30
 
 
