@@ -74,6 +74,15 @@ from watchmen.commands.inspect import (
 )
 # Cross-repo digest — the largest single command, lives in its own module.
 from watchmen.commands.insights import cmd_insights
+
+
+def _run_settings_menu() -> int:
+    """Lazy import wrapper for the interactive settings menu. Kept lazy so
+    `watchmen --help` doesn't pay the questionary/prompt_toolkit import cost,
+    and so a missing questionary dep degrades gracefully (the menu module
+    handles that internally)."""
+    from watchmen.commands.settings_menu import run_interactive_settings
+    return run_interactive_settings()
 # Pipeline commands — status / ingest / analyze / curate / runs / learn /
 # metrics. Re-exported here so the argparse dispatch in main() doesn't move.
 from watchmen.commands.pipeline import (
@@ -826,6 +835,60 @@ def cmd_settings_provider(args) -> int:
     return 0
 
 
+def cmd_settings_model(args) -> int:
+    """Get / set the default model used by analyst + curator + insights.
+
+    `watchmen settings model`             prints current + each provider's default
+    `watchmen settings model gpt-5`       persists WATCHMEN_DEFAULT_MODEL=gpt-5
+    `watchmen settings model --clear`     removes the override → falls back to
+                                          the active provider's default model
+    """
+    from rich.console import Console
+    from rich.table import Table
+    from watchmen import providers as _providers
+    console = Console()
+
+    override = config.read_env_var("WATCHMEN_DEFAULT_MODEL")
+    active = config.active_provider()
+    provider_default = _providers.get_provider(active).default_model
+
+    if getattr(args, "clear", False):
+        if config.clear_env_var("WATCHMEN_DEFAULT_MODEL"):
+            console.print(f"[green]✓[/] override cleared — now using {active} default: [bold]{provider_default}[/]")
+        else:
+            console.print("[dim]no override was set[/]")
+        return 0
+
+    new_value = getattr(args, "value", None)
+    if new_value:
+        new_value = new_value.strip()
+        if not new_value:
+            console.print("[red]✗[/] model name cannot be empty")
+            return 1
+        path = config.write_env_var("WATCHMEN_DEFAULT_MODEL", new_value)
+        console.print(f"[green]✓[/] default model → [bold]{new_value}[/]")
+        console.print(f"  wrote → {path}")
+        return 0
+
+    # Status view: current + per-provider defaults
+    if override:
+        console.print(f"default model: [bold cyan]{override}[/] [dim](WATCHMEN_DEFAULT_MODEL override)[/]")
+    else:
+        console.print(f"default model: [bold cyan]{provider_default}[/] [dim](from {active} provider default)[/]")
+    console.print()
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2, 0, 0))
+    table.add_column("provider")
+    table.add_column("default model")
+    for name in config.PROVIDER_KEY_VARS:
+        marker = "[bold cyan]→[/] " if name == active else "  "
+        table.add_row(f"{marker}{name}", _providers.get_provider(name).default_model)
+    console.print(table)
+    console.print()
+    console.print(f"[dim]override with: watchmen settings model <name>[/]")
+    console.print(f"[dim]clear with:    watchmen settings model --clear[/]")
+    return 0
+
+
 # ─── Round 1: inspection + provenance commands ─────────────────────────────
 
 
@@ -1379,10 +1442,17 @@ def main(argv: list[str] | None = None) -> int:
     p_provider = settings_sub.add_parser("provider", help="get or set the active LLM provider (openrouter/openai/anthropic)")
     p_provider.add_argument("value", nargs="?", help="provider name to activate; omit to print current status")
     p_provider.set_defaults(func=cmd_settings_provider)
+    p_model = settings_sub.add_parser("model", help="get or set the default LLM model (overrides provider default)")
+    p_model.add_argument("value", nargs="?", help="model identifier to use (omit to print current)")
+    p_model.add_argument("--clear", action="store_true", help="remove the override and fall back to provider default")
+    p_model.set_defaults(func=cmd_settings_model)
     p_port = settings_sub.add_parser("port", help="get or set the viewer port (writes to ~/.config/watchmen/.env)")
     p_port.add_argument("value", nargs="?", help="new port (omit to print current)")
     p_port.set_defaults(func=cmd_settings_port)
-    p_settings.set_defaults(func=lambda a: (p_settings.print_help() or 1))
+    # No subcommand → open the interactive menu (arrow-key navigation,
+    # back/quit at each level). Power users / scripts can still hit the
+    # flat subcommands directly.
+    p_settings.set_defaults(func=lambda a: _run_settings_menu())
 
     p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (no project = global rollup)")
     p_metrics.add_argument("project", nargs="?", help="project key (omit for global rollup across all projects)")

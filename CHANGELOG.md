@@ -6,6 +6,25 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — Interactive `watchmen settings` menu
+- `watchmen settings` (no subcommand) now opens an arrow-key navigable menu
+  with breadcrumb headers — pick "Provider & API key", "Default model",
+  "Viewer port", or "Per-project settings", drill in, edit, and bounce back
+  with Enter / Esc / a "Back" entry at every level. Built on `questionary`
+  (pulls in `prompt_toolkit`, which Rich already depended on transitively).
+- Per-project page exposes Enabled toggle, threshold, approval_required,
+  skip_overlapping_skills, and free-text notes — same surface as
+  `watchmen settings set` but discoverable.
+- Falls back to a non-interactive cheatsheet when stdin/stdout aren't TTYs
+  (CI, piped invocations) so the command never blocks. Flat subcommands
+  remain available for scripting.
+
+### Added — `watchmen settings model` subcommand
+- `watchmen settings model`            — show current default + each provider's default
+- `watchmen settings model <name>`     — persist `WATCHMEN_DEFAULT_MODEL=<name>` (lets you pin gpt-5 etc. across daemon restarts)
+- `watchmen settings model --clear`    — remove the override, fall back to the active provider's default
+- New `config.clear_env_var()` helper backs the clear flow; returns True/False so callers can distinguish a no-op from a real rollback.
+
 ### Added — Multi-provider auth (OpenRouter / OpenAI / Anthropic)
 - watchmen no longer requires an OpenRouter account. Native API key support
   for OpenAI direct (`OPENAI_API_KEY`) and Anthropic direct (`ANTHROPIC_API_KEY`)

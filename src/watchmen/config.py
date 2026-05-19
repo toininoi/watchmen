@@ -74,6 +74,23 @@ def write_env_var(key: str, value: str) -> Path:
     return p
 
 
+def clear_env_var(key: str) -> bool:
+    """Remove a `key=...` line from the env file. Returns True if a line was
+    removed, False if the key wasn't present. Used by the settings menu's
+    "clear override" flow so callers can distinguish a no-op from a real
+    rollback."""
+    p = _env_path()
+    if not p.exists():
+        return False
+    lines = p.read_text().splitlines()
+    new_lines = [ln for ln in lines if not ln.startswith(f"{key}=")]
+    if len(new_lines) == len(lines):
+        return False
+    p.write_text("\n".join(new_lines) + ("\n" if new_lines else ""))
+    p.chmod(0o600)
+    return True
+
+
 def viewer_port() -> int:
     """Current viewer port — WATCHMEN_VIEWER_PORT env / config file / default."""
     raw = read_env_var("WATCHMEN_VIEWER_PORT")

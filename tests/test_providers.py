@@ -21,6 +21,7 @@ actually works end-to-end:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -357,6 +358,68 @@ def test_chat_call_uses_anthropic_endpoint_when_provider_anthropic(monkeypatch):
     assert "Authorization" not in kwargs["headers"]
     # Response went through Anthropic translator → OpenAI shape
     assert out["choices"][0]["message"]["content"] == "hello"
+
+
+# ─── settings model command ───────────────────────────────────────────────
+
+
+def test_settings_model_persists_and_clears(monkeypatch, tmp_path, capsys):
+    """`watchmen settings model <name>` should persist the override and
+    `--clear` should remove it. This is the menu-driven equivalent of
+    `export WATCHMEN_DEFAULT_MODEL=...` — if the persistence breaks,
+    daemon-scheduled runs silently revert to the provider default."""
+    from watchmen import cli
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("WATCHMEN_DEFAULT_MODEL", raising=False)
+    monkeypatch.setenv("WATCHMEN_PROVIDER", "openrouter")
+
+    # Set
+    rc = cli.main(["settings", "model", "gpt-5"])
+    assert rc == 0
+    assert config.read_env_var("WATCHMEN_DEFAULT_MODEL") == "gpt-5"
+    assert config.default_model() == "gpt-5"
+
+    # Clear
+    rc = cli.main(["settings", "model", "--clear"])
+    assert rc == 0
+    assert config.read_env_var("WATCHMEN_DEFAULT_MODEL") is None
+    # Falls back to the active provider's default
+    assert config.default_model() == providers.get_provider("openrouter").default_model
+
+
+def test_clear_env_var_returns_false_for_missing_key(tmp_path, monkeypatch):
+    """`clear_env_var` should distinguish "nothing to clear" from "cleared".
+    The settings menu uses this to print "no override was set" vs the
+    success message — getting this confused would mislead users."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # No .env file at all
+    assert config.clear_env_var("NOT_THERE") is False
+    # File exists but key isn't in it
+    config.write_env_var("OTHER", "x")
+    assert config.clear_env_var("NOT_THERE") is False
+    # Key present → returns True
+    assert config.clear_env_var("OTHER") is True
+    assert config.read_env_var("OTHER") is None
+
+
+def test_interactive_settings_falls_back_in_non_tty(monkeypatch, capsys):
+    """Running `watchmen settings` with stdin/stdout piped (CI, scripts)
+    must NOT block on questionary — instead print the flat-subcommand
+    cheatsheet so users aren't stuck."""
+    from watchmen.commands import settings_menu
+    # Force the non-TTY branch
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    rc = settings_menu.run_interactive_settings()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "non-interactive shell detected" in out
+    # Must surface every flat subcommand, otherwise the fallback is useless
+    for sub in ("list", "show", "set ", "api-key", "provider", "model", "port"):
+        assert sub in out, f"fallback missing `settings {sub}`"
+
+
+# ─── original chat_call test (kept below the new ones) ────────────────────
 
 
 def test_chat_call_extra_payload_overrides_get_merged(monkeypatch):
