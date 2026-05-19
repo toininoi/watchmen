@@ -5,7 +5,7 @@
 # ...`) are unaffected — only the `pip install` / `uv tool install`
 # string changes. See CONTRIBUTING.md "Releasing" for details.
 name = "dria-watchmen"
-version = "0.6.2"
+version = "0.6.3"
 description = "Local coding-agent session intelligence: observe, analyze, and generate skills plus workspace briefs per project"
 readme = "README.md"
 license = { text = "MIT" }

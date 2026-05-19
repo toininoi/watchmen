@@ -60,6 +60,13 @@ def cmd_up(args) -> int:
             )
             if rc != 0:
                 failures.append(f"daemon ({rc})")
+            # Post-install verify: install can return 0 but the service
+            # can still be missing if launchctl's load was no-op'd by a
+            # bootout race (see launchd_setup._bootstrap). Honest signal
+            # beats optimistic one.
+            elif not service.is_daemon_loaded():
+                failures.append("daemon (install succeeded but service is not loaded — try `watchmen up` again)")
+                print(yellow("  ✗ install returned 0 but service is not loaded"))
         except Exception as e:
             failures.append(f"daemon ({type(e).__name__}: {e})")
             print(yellow(f"  ✗ {e}"))
@@ -71,6 +78,9 @@ def cmd_up(args) -> int:
             rc = service.install_viewer(host=None, port=None, dry_run=False)
             if rc != 0:
                 failures.append(f"viewer ({rc})")
+            elif not service.is_viewer_loaded():
+                failures.append("viewer (install succeeded but service is not loaded — try `watchmen up` again)")
+                print(yellow("  ✗ install returned 0 but service is not loaded"))
         except Exception as e:
             failures.append(f"viewer ({type(e).__name__}: {e})")
             print(yellow(f"  ✗ {e}"))
