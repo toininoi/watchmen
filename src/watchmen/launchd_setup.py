@@ -83,14 +83,50 @@ def is_viewer_loaded() -> bool:
 
 
 def _bootstrap(label: str, plist_path: Path) -> int:
-    """Use launchctl bootstrap if available (modern), fall back to load (older)."""
+    """Use launchctl bootstrap if available (modern), fall back to load (older).
+
+    Bootstrap can return 0 even when the service didn't actually register
+    — the previous `bootout` is asynchronous from launchd's perspective,
+    so a bootstrap that lands during the unload window can be silently
+    no-op'd. Verify with `launchctl list` after the call and retry once
+    with a short sleep if the service isn't actually present. Cheap
+    insurance against the race that left users with "✓ watchmen is up"
+    but no running viewer.
+    """
+    import time
+
     uid = os.getuid()
-    r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
-                       capture_output=True, text=True)
-    if r.returncode == 0:
-        return 0
-    # Fall back
-    return subprocess.run(["launchctl", "load", "-w", str(plist_path)]).returncode
+    for attempt in range(2):
+        if attempt > 0:
+            # Give launchd a moment to settle the prior bootout before
+            # retrying. 500ms is empirically enough on modern macOS and
+            # short enough that the user doesn't feel the delay.
+            time.sleep(0.5)
+
+        r = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            # Verify: launchctl list <label> should now succeed.
+            if _is_loaded(label):
+                return 0
+            # Otherwise drop through to retry.
+            continue
+        # Modern bootstrap failed — try the legacy load path. `load -w`
+        # has a more forgiving contract; if it succeeds we still verify.
+        rc = subprocess.run(
+            ["launchctl", "load", "-w", str(plist_path)],
+        ).returncode
+        if rc == 0 and _is_loaded(label):
+            return 0
+        if rc != 0 and attempt == 1:
+            # Last attempt failed outright — surface launchctl's stderr
+            # so the calling install path can include it in its warning.
+            return rc
+
+    # Exhausted retries; the plist is on disk but launchd didn't pick it up.
+    return 1
 
 
 def _bootout(label: str, plist_path: Path) -> int:

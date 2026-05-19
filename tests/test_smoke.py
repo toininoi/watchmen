@@ -3495,3 +3495,90 @@ def test_notify_settings_changed_no_op_when_daemon_not_loaded(monkeypatch, capsy
     assert out_was is False
     captured = capsys.readouterr()
     assert "reinstall" not in captured.out.lower()
+
+
+def test_cmd_up_reports_failure_when_install_returns_0_but_service_not_loaded(monkeypatch, capsys):
+    """`install_viewer` can return 0 while launchctl silently no-op'd the
+    load (bootout-then-bootstrap race). `cmd_up` should now verify with
+    `is_viewer_loaded()` and surface a real failure instead of falsely
+    declaring success — that exact bug bit us in v0.6.2."""
+    import argparse
+    from watchmen.commands import lifecycle
+    from watchmen import service as _service, hooks_setup as _hooks
+    from watchmen import agent as _agent
+
+    monkeypatch.setattr(_agent, "provider_banner", lambda **kw: "stub")
+    monkeypatch.setattr(_hooks,   "install",         lambda: 0)
+    monkeypatch.setattr(_service, "install_daemon",  lambda **kw: 0)
+    monkeypatch.setattr(_service, "install_viewer",  lambda **kw: 0)
+    # Both probes return False — install path lied; verification should catch it.
+    monkeypatch.setattr(_service, "is_daemon_loaded", lambda: False)
+    monkeypatch.setattr(_service, "is_viewer_loaded", lambda: False)
+
+    rc = lifecycle.cmd_up(argparse.Namespace(
+        skip_hooks=False, skip_daemon=False, skip_viewer=False,
+    ))
+    out = capsys.readouterr().out
+    assert rc != 0, "verify-fail should propagate to non-zero exit code"
+    assert "not loaded" in out, "the user-facing message should explain why up failed"
+    assert "watchmen is up" not in out, "must not falsely declare success"
+
+
+def test_cmd_up_succeeds_when_install_and_verify_both_succeed(monkeypatch, capsys):
+    """Happy-path: install returns 0 AND the service is actually loaded.
+    The post-install verify should let cmd_up complete cleanly without
+    adding spurious noise to the output."""
+    import argparse
+    from watchmen.commands import lifecycle
+    from watchmen import service as _service, hooks_setup as _hooks
+    from watchmen import agent as _agent
+
+    monkeypatch.setattr(_agent, "provider_banner", lambda **kw: "stub")
+    monkeypatch.setattr(_hooks,   "install",         lambda: 0)
+    monkeypatch.setattr(_service, "install_daemon",  lambda **kw: 0)
+    monkeypatch.setattr(_service, "install_viewer",  lambda **kw: 0)
+    monkeypatch.setattr(_service, "is_daemon_loaded", lambda: True)
+    monkeypatch.setattr(_service, "is_viewer_loaded", lambda: True)
+
+    rc = lifecycle.cmd_up(argparse.Namespace(
+        skip_hooks=False, skip_daemon=False, skip_viewer=False,
+    ))
+    assert rc == 0
+    assert "watchmen is up" in capsys.readouterr().out
+
+
+def test_launchd_bootstrap_retries_when_service_not_listed(monkeypatch):
+    """_bootstrap calls `launchctl bootstrap` then verifies with `launchctl
+    list <label>`. If the verify fails the first time, it retries once
+    after a short sleep — that's the fix for the bootout race."""
+    import subprocess
+    from watchmen import launchd_setup
+
+    bootstrap_calls = 0
+    list_calls = 0
+
+    class _CP:
+        def __init__(self, rc): self.returncode = rc
+
+    def fake_run(cmd, **kw):
+        nonlocal bootstrap_calls, list_calls
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            bootstrap_calls += 1
+            return _CP(0)
+        if cmd[:2] == ["launchctl", "list"]:
+            list_calls += 1
+            # First verify fails (simulating the race), second succeeds.
+            return _CP(0 if list_calls >= 2 else 1)
+        return _CP(0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # Avoid sleeping in the test.
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+
+    from pathlib import Path as _Path
+    rc = launchd_setup._bootstrap("co.firstbatch.watchmen.viewer",
+                                  _Path("/tmp/fake.plist"))
+    assert rc == 0
+    assert bootstrap_calls == 2, f"expected one retry, got {bootstrap_calls} bootstraps"
+    assert list_calls >= 2, "verify should have been attempted after each bootstrap"

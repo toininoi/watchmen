@@ -6,6 +6,25 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-05-19
+
+Hotfix for the false-success scenario in `watchmen up` discovered during
+v0.6.2 testing — `install_viewer` could return 0 while launchctl had
+silently no-op'd the load, leaving "✓ watchmen is up" lying about the
+actual state.
+
+### Fixed — `watchmen up` no longer falsely declares success
+- `launchd_setup._bootstrap` now verifies the load actually took by
+  calling `launchctl list <label>` after `launchctl bootstrap`. The
+  race between the prior `bootout` (asynchronous from launchd's
+  perspective) and the new `bootstrap` could leave bootstrap reporting
+  success with no live unit; we now retry once with a 500ms sleep when
+  the verify fails, which is enough on every macOS I've tested.
+- `watchmen up` does its own post-install verify via
+  `service.is_daemon_loaded()` / `is_viewer_loaded()` — belt-and-
+  suspenders, so a future race in any backend gets surfaced honestly
+  instead of swallowed into the success summary.
+
 ## [0.6.2] — 2026-05-19
 
 Daemon lifecycle simplification. Three quick wins that turn the
