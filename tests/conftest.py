@@ -14,7 +14,6 @@ developer last configured. Pinning here means tests behave the same in
 CI, on a fresh checkout, and on a machine with multiple keys configured.
 """
 
-import os
 import sys
 from pathlib import Path
 

@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import sys
 from enum import Enum
-from typing import Callable
 
 from rich.console import Console
 
@@ -329,7 +328,7 @@ def _set_api_key(console: Console) -> None:
     ).ask()
     if save_anyway:
         config.set_provider_key(target, new_key)
-        console.print(f"[yellow]![/] saved despite rejection")
+        console.print("[yellow]![/] saved despite rejection")
 
 
 # ─── Default model ─────────────────────────────────────────────────────────
@@ -419,8 +418,8 @@ def _port_page(console: Console, breadcrumb: list[str]) -> _Nav:
                     from watchmen import service
                     if service.is_viewer_loaded():
                         console.print(
-                            f"  [yellow]![/] viewer is loaded on the old port — "
-                            f"run [bold]watchmen viewer install[/] to move it"
+                            "  [yellow]![/] viewer is loaded on the old port — "
+                            "run [bold]watchmen viewer install[/] to move it"
                         )
                 except Exception:
                     pass
@@ -541,7 +540,7 @@ def _project_page(console: Console, breadcrumb: list[str], project_key: str) -> 
             ).ask()
             if new_notes is not None:
                 state.update_project(project_key, notes=new_notes.strip() or None)
-                console.print(f"[green]✓[/] notes updated")
+                console.print("[green]✓[/] notes updated")
 
 
 # ─── Header rendering ──────────────────────────────────────────────────────

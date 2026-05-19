@@ -847,7 +847,7 @@ def cmd_settings_provider(args) -> int:
         console.print(table)
         console.print()
         console.print(f"[dim]set with: watchmen settings provider <{'/'.join(config.ALL_PROVIDERS)}>[/]")
-        console.print(f"[dim]set a key: watchmen settings api-key --provider <name> (OAuth providers don't need this)[/]")
+        console.print("[dim]set a key: watchmen settings api-key --provider <name> (OAuth providers don't need this)[/]")
         return 0
 
     new_provider = args.value.lower().strip()
@@ -922,8 +922,8 @@ def cmd_settings_model(args) -> int:
         table.add_row(f"{marker}{name}", _providers.get_provider(name).default_model)
     console.print(table)
     console.print()
-    console.print(f"[dim]override with: watchmen settings model <name>[/]")
-    console.print(f"[dim]clear with:    watchmen settings model --clear[/]")
+    console.print("[dim]override with: watchmen settings model <name>[/]")
+    console.print("[dim]clear with:    watchmen settings model --clear[/]")
     return 0
 
 

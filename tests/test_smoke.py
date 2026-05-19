@@ -2060,7 +2060,6 @@ def test_api_key_helpers_roundtrip(monkeypatch, tmp_path):
     preserving any other lines in ~/.config/watchmen/.env (e.g. LANGFUSE_KEY,
     custom OPENROUTER_API_BASE). If write clobbers unrelated lines, teammates
     rotating their key would lose other config silently."""
-    import os
 
     from watchmen import cli
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
