@@ -100,5 +100,4 @@ def test_api_fetch_uses_short_timeout_for_cold_cache_path(monkeypatch):
     monkeypatch.setattr(model_prices.httpx, "Client", SlowClient)
 
     assert model_prices._fetch_from_api() is None
-    assert timeouts
-    assert timeouts[0] < 30.0
+    assert timeouts == [5.0]
