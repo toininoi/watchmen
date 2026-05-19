@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from watchmen.adapters._shared import extract_skill_from_args
 from watchmen.metrics import turn_cost_usd
 
 NAME = "opencode"
@@ -206,7 +207,7 @@ def scan(entry: dict):
                         "timestamp": tc_ts,
                         "tool_name": p.get("tool") or "?",
                         "is_error": 1 if p.get("status") == "error" else 0,
-                        "skill_name": None,
+                        "skill_name": extract_skill_from_args(p.get("args")),
                     })
                     if p.get("status") == "error":
                         session["tool_error_count"] += 1
