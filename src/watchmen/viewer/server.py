@@ -10,6 +10,7 @@ import bleach
 import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, STATE_DB
 from watchmen.util import (
@@ -267,6 +268,13 @@ def get_skill_status(project_key: str, skill_slug: str) -> dict:
 # ─── App ────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="watchmen viewer")
+
+# Static assets — brand mark, future icons. Mounted under /static.
+# `check_dir=False` makes dev installs that haven't built the package yet
+# (no static/ on disk) start cleanly instead of crashing on import.
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
