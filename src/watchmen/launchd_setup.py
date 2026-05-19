@@ -105,7 +105,10 @@ def _bootout(label: str, plist_path: Path) -> int:
 # ─── Public commands (called by cli.py) ─────────────────────────────────────
 
 
-def install_daemon(model: str = "deepseek/deepseek-v4-flash", interval: int = 7200, dry_run: bool = False) -> int:
+def install_daemon(model: str | None = None, interval: int = 7200, dry_run: bool = False) -> int:
+    if model is None:
+        from watchmen import config
+        model = config.default_model()
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     uv = _check_uv()

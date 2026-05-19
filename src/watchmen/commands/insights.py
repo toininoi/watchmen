@@ -19,10 +19,17 @@ from datetime import datetime
 from pathlib import Path
 
 from watchmen import state
-# Default model for the LLM pipeline. Mirrored from cli.DEFAULT_MODEL so
-# the argparse default and the in-function fallback stay aligned. Phase 3
-# follow-up will centralize this in watchmen.config.
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+from watchmen import config as _config
+
+
+def _default_model() -> str:
+    """Per-invocation default model — resolves through the active provider."""
+    return _config.default_model()
+
+
+# Module-level alias for any caller still importing `insights.DEFAULT_MODEL`.
+# Resolved at import time against the current active provider.
+DEFAULT_MODEL = _default_model()
 # Helpers moved out of cli.py during the earlier Phase 3 slices. Aliased
 # under the `_name` convention so the verbatim cmd_insights body below
 # doesn't churn — the entire function block + 13 helpers were extracted
@@ -802,27 +809,22 @@ def _one_shot_llm(
     try:
         from watchmen import agent as _ag
         import httpx
-        api_key = _ag.load_api_key()
     except Exception:
         return None
     try:
         with httpx.Client(timeout=180.0) as client:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/firstbatchxyz/watchmen",
-                "X-Title": "watchmen-insights",
-            }
-            payload = {
-                "model": model,
-                "messages": [
+            data = _ag.chat_call(
+                client,
+                [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.3,
-                "max_tokens": max_tokens,
-            }
-            data = _ag.call_openrouter(client, headers, payload, max_retries=2)
+                model=model,
+                agent_name="insights",
+                max_retries=2,
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
             content = data["choices"][0]["message"]["content"]
             return content.strip() if content else None
     except Exception:

@@ -6,6 +6,40 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — Multi-provider auth (OpenRouter / OpenAI / Anthropic)
+- watchmen no longer requires an OpenRouter account. Native API key support
+  for OpenAI direct (`OPENAI_API_KEY`) and Anthropic direct (`ANTHROPIC_API_KEY`)
+  alongside the existing OpenRouter path. Switch via
+  `watchmen settings provider <name>`; the wizard prompts for choice on first
+  run. Existing OpenRouter-only installs upgrade transparently — the auto-detect
+  prefers OpenRouter when its key is present, so `watchmen <anything>` keeps
+  working without re-onboarding.
+- New module `watchmen.providers` houses the per-provider abstraction
+  (endpoint, auth headers, request/response translator). Adding a fourth
+  provider is one subclass, not a refactor of the agent loop.
+- Anthropic provider includes a full **Messages API ↔ chat-completions
+  translator** so the existing agent.run loop (which speaks the OpenAI
+  wire format) routes through Anthropic without touching tool dispatch
+  internals. System messages get lifted to the top-level `system` field,
+  OpenAI-style `tool_calls` translate to Anthropic `tool_use` content blocks,
+  tool result messages wrap into user messages with `tool_result` blocks,
+  responses fold back into `choices[0].message.content/tool_calls` shape.
+- New CLI: `watchmen settings provider [name]` (get / set the active provider
+  + show per-provider key status), `watchmen settings api-key --provider <name>`
+  (set or check a specific provider's key, live-validated). Bare
+  `watchmen settings api-key` defaults to the active provider.
+- `watchmen doctor` and the web `/doctor` panel now probe whichever provider
+  is active. The viewer `/settings` JSON snapshot exposes a `providers` table
+  for the UI to render per-provider key status.
+- Default model is now provider-aware: `deepseek/deepseek-v4-flash` on
+  OpenRouter, `gpt-5-mini` on OpenAI, `claude-haiku-4-5-20251001` on Anthropic.
+  `WATCHMEN_DEFAULT_MODEL` still overrides if set.
+- 22 new tests in `tests/test_providers.py` covering provider selection
+  priority, the Anthropic Messages API translator (request + response, system
+  field lifting, tool schema rename, content-block round-tripping), and
+  end-to-end `agent.chat_call` dispatch through each provider with stubbed
+  httpx.
+
 ### Fixed — plugin layout + viewer rendering bugs caught during E2E
 - `_latest_digest_path()` returned the cross-agent narrative file instead
   of the newest deep-digest when both lived in `~/.watchmen/insights/` —

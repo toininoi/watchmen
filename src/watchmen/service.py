@@ -42,7 +42,13 @@ def _backend_name() -> str:
 BACKEND_NAME = _backend_name()
 
 
-def install_daemon(model: str = "deepseek/deepseek-v4-flash", interval: int = 7200, dry_run: bool = False) -> int:
+def install_daemon(model: str | None = None, interval: int = 7200, dry_run: bool = False) -> int:
+    # Provider-aware default — the daemon plist bakes whatever model is
+    # current for the user's active provider at install time. Reinstall
+    # after switching provider to refresh.
+    if model is None:
+        from watchmen import config
+        model = config.default_model()
     return _backend().install_daemon(model=model, interval=interval, dry_run=dry_run)
 
 

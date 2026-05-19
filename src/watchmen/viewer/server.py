@@ -525,11 +525,33 @@ def _settings_redirect(message: str, ok: bool = True) -> RedirectResponse:
 @app.post("/settings/api-key")
 async def settings_set_api_key(request: Request):
     fields = await _form_fields(request)
+    # `provider` is optional in the POST body: omitting it targets the
+    # active provider (matches `watchmen settings api-key` no-arg behavior).
+    # Template can render a per-provider <select> when the user has more
+    # than one provider configured.
+    provider = (fields.get("provider") or "").strip() or None
     try:
-        path = wm_diag.set_api_key(fields.get("value", ""))
+        path = wm_diag.set_api_key(fields.get("value", ""), provider=provider)
     except ValueError as e:
         return _settings_redirect(str(e), ok=False)
-    return _settings_redirect(f"API key updated · wrote → {path}")
+    label = provider or "active provider"
+    return _settings_redirect(f"API key for {label} updated · wrote → {path}")
+
+
+@app.post("/settings/provider")
+async def settings_set_provider(request: Request):
+    """Switch the active LLM provider. The new provider must already have a
+    key configured — the redirect surfaces a flash if not, so the user has
+    one clear next action."""
+    fields = await _form_fields(request)
+    new_provider = (fields.get("value") or "").strip()
+    if not new_provider:
+        return _settings_redirect("provider value required", ok=False)
+    try:
+        path = wm_diag.set_active_provider(new_provider)
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"active provider → {new_provider} · wrote → {path}")
 
 
 @app.post("/settings/port")
