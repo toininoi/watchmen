@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -245,16 +246,22 @@ def start_run(action: str, project_key: str) -> dict:
         f"# pid: (pending)\n\n"
     )
     log_fh.flush()
-    # start_new_session detaches the child so the viewer process can be
-    # restarted (or crash) without orphaning or killing the run.
-    proc = subprocess.Popen(
-        argv,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        cwd=str(Path.home()),
-        env={**os.environ},
-    )
+    # Detach the child so the viewer process can be restarted (or crash)
+    # without orphaning or killing the run. POSIX → setsid via
+    # start_new_session; Windows → DETACHED_PROCESS creation flag.
+    popen_kwargs: dict = {
+        "stdout": log_fh,
+        "stderr": subprocess.STDOUT,
+        "cwd": str(Path.home()),
+        "env": {**os.environ},
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(argv, **popen_kwargs)
     meta = {
         "id": rid,
         "action": action,
@@ -270,12 +277,16 @@ def start_run(action: str, project_key: str) -> dict:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Is the subprocess still alive? Reaps zombies via waitpid(WNOHANG)
-    before falling back to kill(0). A zombie counts as kill(0)-alive on
-    Unix until reaped, which would otherwise leave the viewer's
-    "running" pill stuck forever after a fast-exiting subprocess."""
+    """Is the subprocess still alive? On POSIX, reaps zombies via
+    waitpid(WNOHANG) before falling back to kill(0) — a zombie counts as
+    kill(0)-alive until reaped, which would otherwise leave the viewer's
+    "running" pill stuck forever after a fast-exiting subprocess. On
+    Windows, queries the process via OpenProcess + GetExitCodeProcess
+    (waitpid + WNOHANG + kill(0) are POSIX-only)."""
     if not pid:
         return False
+    if sys.platform == "win32":
+        return _pid_alive_windows(pid)
     try:
         wpid, _status = os.waitpid(pid, os.WNOHANG)
         if wpid == pid:
@@ -293,6 +304,35 @@ def _pid_alive(pid: int) -> bool:
         return False
     except OSError:
         return False
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    """Windows pid liveness via Win32 API. Returns False when the process
+    has exited or can't be opened (assume dead — same semantics as the
+    POSIX path treating ProcessLookupError as "gone")."""
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def get_run(run_id: str) -> dict | None:
