@@ -554,6 +554,33 @@ async def settings_set_provider(request: Request):
     return _settings_redirect(f"active provider → {new_provider} · wrote → {path}")
 
 
+@app.post("/settings/model")
+async def settings_set_model(request: Request):
+    """Set or clear WATCHMEN_DEFAULT_MODEL. The form has two submit buttons:
+    one carries `action=set` + a `value` (override the model), the other
+    carries `action=clear` (revert to the active provider's default).
+
+    Splitting the action by submit button keeps the UI single-form (no
+    JS) while letting one HTML element drive both transitions."""
+    fields = await _form_fields(request)
+    action = (fields.get("action") or "set").strip().lower()
+
+    if action == "clear":
+        cleared = wm_diag.clear_default_model()
+        if cleared:
+            from watchmen import config as _config
+            return _settings_redirect(
+                f"model override cleared · using provider default ({_config.default_model()})"
+            )
+        return _settings_redirect("no model override was set", ok=False)
+
+    try:
+        path = wm_diag.set_default_model(fields.get("value", ""))
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"default model updated · wrote → {path}")
+
+
 @app.post("/settings/port")
 async def settings_set_port(request: Request):
     fields = await _form_fields(request)

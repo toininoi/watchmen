@@ -250,7 +250,11 @@ def get_settings() -> dict:
 
     Returns both the active-provider key (for the headline status) and a
     per-provider table so the UI can render which providers have keys
-    saved without exposing the values."""
+    saved without exposing the values. Model resolution surfaces three
+    pieces: the active resolved default, whether an override is in play,
+    and each provider's own default — enough for the template to render
+    a "Default model" panel with status + override field + clear button."""
+    from watchmen import providers as _providers
     active = config.active_provider()
     active_key = config.provider_key(active) or ""
     port = config.viewer_port()
@@ -269,18 +273,28 @@ def get_settings() -> dict:
         key = config.provider_key(name) or ""
         providers_view.append({
             "name": name,
+            "display_name": _providers.display_name(name),
             "env_var": env_var,
             "active": name == active,
             "set": bool(key),
             "masked": _mask(key),
+            "default_model": _providers.get_provider(name).default_model,
         })
+    model_override = config.read_env_var("WATCHMEN_DEFAULT_MODEL")
     return {
         # Backward-compat: existing templates reference api_key_* directly.
         "api_key_set": bool(active_key),
         "api_key_masked": _mask(active_key),
         # New: active provider + per-provider key status table.
         "active_provider": active,
+        "active_provider_display": _providers.display_name(active),
         "providers": providers_view,
+        # Default-model state for the new "Default model" panel.
+        "model": {
+            "resolved": config.default_model(),
+            "override": model_override,
+            "active_provider_default": _providers.get_provider(active).default_model,
+        },
         "viewer_port": port,
         "viewer_port_source": port_source,
         "viewer_port_default": config.VIEWER_DEFAULT_PORT,
@@ -303,6 +317,25 @@ def set_active_provider(provider: str) -> Path:
     if provider not in config.PROVIDER_KEY_VARS:
         raise ValueError(f"unknown provider: {provider!r}")
     return config.set_active_provider(provider)
+
+
+def set_default_model(value: str) -> Path:
+    """Persist WATCHMEN_DEFAULT_MODEL. Used by the /settings/model route.
+
+    Empty strings (form left blank) raise ValueError so the redirect
+    flashes a useful error instead of silently no-oping."""
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("model name cannot be empty")
+    return config.write_env_var("WATCHMEN_DEFAULT_MODEL", value)
+
+
+def clear_default_model() -> bool:
+    """Remove the WATCHMEN_DEFAULT_MODEL override. Returns True if a value
+    was actually cleared, False if there was nothing to clear — used by
+    the redirect flash so we report 'reverted to <X>' vs 'no override was
+    active' accurately."""
+    return config.clear_env_var("WATCHMEN_DEFAULT_MODEL")
 
 
 def set_viewer_port(value: str) -> tuple[Path, int]:

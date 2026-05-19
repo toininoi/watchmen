@@ -443,6 +443,71 @@ def test_interactive_settings_falls_back_in_non_tty(monkeypatch, capsys):
 # ─── original chat_call test (kept below the new ones) ────────────────────
 
 
+def test_viewer_settings_page_exposes_provider_and_model_sections(monkeypatch, tmp_path):
+    """The /settings page renders one card per provider, a provider switch
+    form, and a default-model panel with set/clear actions. Catches template
+    regressions and missing context fields exposed by `get_settings()`."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("WATCHMEN_PROVIDER", "openrouter")
+    from watchmen.viewer.server import app
+    r = TestClient(app).get("/settings")
+    assert r.status_code == 200
+    html = r.text
+    for needle in (
+        'name="provider"',                # per-provider key forms carry hidden provider field
+        'OpenRouter API key',
+        'OpenAI API key',
+        'Anthropic API key',
+        'action="/settings/provider"',
+        'action="/settings/model"',
+        'name="action" value="set"',      # model form's two submit buttons
+        'name="action" value="clear"',
+    ):
+        assert needle in html, f"settings page missing: {needle}"
+
+
+def test_viewer_settings_model_post_set_and_clear(monkeypatch, tmp_path):
+    """POST /settings/model with action=set persists the override; action=clear
+    removes it. Regression guard against the form's two-submit-button
+    pattern silently degrading (e.g. if a template change drops the
+    action input names)."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("WATCHMEN_PROVIDER", "openrouter")
+    monkeypatch.delenv("WATCHMEN_DEFAULT_MODEL", raising=False)
+    from watchmen.viewer.server import app
+    client = TestClient(app)
+
+    # Set
+    r = client.post(
+        "/settings/model",
+        data={"value": "gpt-5", "action": "set"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "ok:" in r.headers["location"]
+    assert config.read_env_var("WATCHMEN_DEFAULT_MODEL") == "gpt-5"
+
+    # Clear
+    r = client.post(
+        "/settings/model",
+        data={"action": "clear"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "ok:" in r.headers["location"]
+    assert config.read_env_var("WATCHMEN_DEFAULT_MODEL") is None
+
+    # Clear with nothing to clear — should err
+    r = client.post(
+        "/settings/model",
+        data={"action": "clear"},
+        follow_redirects=False,
+    )
+    assert "err:" in r.headers["location"]
+
+
 def test_chat_call_extra_payload_overrides_get_merged(monkeypatch):
     """Caller-supplied kwargs (temperature, max_tokens) flow into the request
     body for both shapes — insights.py relies on this to pin temperature=0.3
