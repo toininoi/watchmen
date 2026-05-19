@@ -3410,6 +3410,11 @@ def test_cmd_up_dispatches_to_install_helpers_and_prints_summary(monkeypatch, ca
     monkeypatch.setattr(_hooks, "install",   lambda: calls.append("hooks") or 0)
     monkeypatch.setattr(_service, "install_daemon", lambda **kw: calls.append("daemon") or 0)
     monkeypatch.setattr(_service, "install_viewer", lambda **kw: calls.append("viewer") or 0)
+    # v0.6.3 added a post-install verify — stub the loaded probes to True
+    # so the happy-path test doesn't accidentally exercise the failure
+    # branch on CI runners that don't have launchd.
+    monkeypatch.setattr(_service, "is_daemon_loaded", lambda: True)
+    monkeypatch.setattr(_service, "is_viewer_loaded", lambda: True)
     # Stub provider banner so the test doesn't depend on global env state.
     from watchmen import agent as _agent
     monkeypatch.setattr(_agent, "provider_banner", lambda **kw: "provider=stub · stub · model=stub")
@@ -3437,6 +3442,8 @@ def test_cmd_up_skip_flags_omit_subsystems(monkeypatch):
     monkeypatch.setattr(_hooks, "install",   lambda: calls.append("hooks") or 0)
     monkeypatch.setattr(_service, "install_daemon", lambda **kw: calls.append("daemon") or 0)
     monkeypatch.setattr(_service, "install_viewer", lambda **kw: calls.append("viewer") or 0)
+    monkeypatch.setattr(_service, "is_daemon_loaded", lambda: True)
+    monkeypatch.setattr(_service, "is_viewer_loaded", lambda: True)
 
     lifecycle.cmd_up(argparse.Namespace(skip_hooks=True, skip_daemon=False, skip_viewer=True))
     assert calls == ["daemon"], f"only daemon should have run: {calls}"
