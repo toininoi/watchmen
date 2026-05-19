@@ -108,7 +108,7 @@ uv sync && uv tool install --editable .
 watchmen init
 ```
 
-The wizard handles everything: asks which LLM provider you'd like to use (OpenRouter / OpenAI / Anthropic), prompts for that provider's API key (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the launchd/systemd daemon + viewer for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
+The wizard handles everything: asks which LLM provider you'd like to use (OpenRouter / OpenAI / Anthropic), prompts for that provider's API key (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the daemon + viewer into the host's scheduler (launchd / systemd --user / Task Scheduler) for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
 
 Runtime data lives under `~/.watchmen/` (`state.db`, `corpus.db`, `analyses/`, `bundles/`, event logs). Set `WATCHMEN_HOME=/path/to/dir` for an alternate location.
 
@@ -141,7 +141,7 @@ You then get `/skills brief` (or `$brief`) inside Codex with the same workspace 
 
 ## Requirements
 
-- macOS or Linux (Windows: WSL works; native untested)
+- macOS, Linux, or Windows 10/11
 - [`uv`](https://github.com/astral-sh/uv) (Python toolchain) — Python 3.11+
 - A credential for **one** of the providers below
 - At least one supported coding agent in active use
@@ -275,10 +275,10 @@ Once installed via `watchmen init` (or by hand):
 ```bash
 watchmen daemon install                      # autostart on login
 watchmen viewer install                      # autostart the viewer at :8979
-watchmen launchd status                      # verify (Linux: checks systemd --user)
+watchmen launchd status                      # verify (also reports systemd --user / Task Scheduler state)
 ```
 
-Launchd on macOS, systemd `--user` on Linux. On Linux run `sudo loginctl enable-linger $USER` once if you want the daemon to outlive your login session.
+Same CLI on every platform; under the hood it installs a launchd agent on macOS, a systemd `--user` unit on Linux, or a Task Scheduler task on Windows. On Linux, run `sudo loginctl enable-linger $USER` once if you want the daemon to outlive your login session.
 
 Default cadence:
 
@@ -298,6 +298,25 @@ Autonomous by default. When you want override:
 - **`watchmen review <project>`** — interactive walk over every skill: keep / drop / pin / skip / view / quit. Audit trail at `bundles/<project>/review.md`.
 
 State lives in `bundles/<project>/_pinned.json` and `_blocklist.json`. Git-tracked, so pin/drop state syncs across machines if you sync the bundle.
+
+### Logs
+
+```
+# macOS (launchd)
+~/Library/Logs/watchmen.log                          # primary daemon log
+~/Library/Logs/watchmen.daemon.{out,err}.log         # launchd stdout/stderr
+~/Library/Logs/watchmen.viewer.{out,err}.log         # viewer logs
+
+# Linux (systemd --user)
+~/.watchmen/logs/daemon.{out,err}.log                # systemd stdout/stderr
+~/.watchmen/logs/viewer.{out,err}.log                # viewer logs
+# also: `journalctl --user -u watchmen-daemon.service`
+
+# Windows (Task Scheduler)
+%LOCALAPPDATA%\watchmen\logs\watchmen.log            # primary daemon log
+%LOCALAPPDATA%\watchmen\logs\daemon.{out,err}.log    # scheduler stdout/stderr
+%LOCALAPPDATA%\watchmen\logs\viewer.{out,err}.log    # viewer logs
+```
 
 ### Approval mode
 
@@ -367,8 +386,8 @@ watchmen show <key> <skill>      Dump a single SKILL.md
 watchmen why <key> <skill>       Provenance: source sessions with adapter tags
 watchmen recent [<key>]          Git log of curator runs
 watchmen insights                Cross-repo digest — pairs with Anthropic's /insights
-watchmen open [<key>]            Open viewer in browser
-watchmen logs [daemon|viewer]    Tail logs (-f to follow)
+watchmen open [<key>]            Open viewer in browser (jumps to project page)
+watchmen logs [daemon|viewer]    Tail scheduler logs (-f to follow)
 
 # Control
 watchmen pin <key> <skill>       Freeze a skill — next curator run skips it
@@ -414,10 +433,9 @@ If you don't want certain repos analyzed, just don't track them — auto-detect 
 
 ## Limitations + caveats
 
-- **Hook server must run in a separate terminal.** It's a Python+FastAPI process; killing the terminal stops hook capture. Run via `tmux`, `screen`, or `watchmen daemon install`.
+- **Hook server must run in a separate terminal.** It's a Python+FastAPI process; killing the terminal stops hook capture. Run via `tmux`/`screen`, a launchd job, a systemd `--user` unit, a Task Scheduler task, or `watchmen daemon install`.
 - **Some skill curators occasionally run long (20+ min)** without calling the `finish_skill` terminal tool. Bundle still lands on disk; just no clean signal. ~15-20% hit this.
 - **Project-key auto-detection is heuristic.** Some path-encoded names (e.g., `my-business/marketing` vs `my-business-marketing`) can resolve ambiguously. Use `watchmen track <key> --repo <abs-path>` to be explicit.
-- **macOS + Linux supported; Windows untested.** WSL should work.
 
 ## Layout
 
@@ -434,7 +452,11 @@ watchmen/
 │   ├── daemon.py             # scheduling loop
 │   ├── viewer/               # FastAPI mission control + impact card
 │   ├── adapters/             # cc / cd / pi adapters
-│   └── hooks/                # observe.sh → POSTs hook stdin → localhost:8765
+│   ├── hooks/                # observe.sh / observe.ps1 → POSTs hook stdin → localhost:8765
+│   ├── service.py            # platform-dispatched install/uninstall (launchd ↔ systemd ↔ schtasks)
+│   ├── launchd_setup.py      # macOS backend: ~/Library/LaunchAgents/*.plist
+│   ├── systemd_setup.py      # Linux backend: ~/.config/systemd/user/*.service
+│   └── schtasks_setup.py     # Windows backend: Task Scheduler XML via schtasks
 ├── plugin/                   # Claude Code plugin
 ├── plugin-codex/             # Codex plugin
 ├── .agents/plugins/          # Codex marketplace manifest

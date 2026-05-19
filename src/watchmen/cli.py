@@ -11,12 +11,12 @@ Subcommands:
   onboard                   Interactive setup wizard (fresh install)
   reonboard                 Re-run the wizard (existing projects survive, new ones added)
   settings list|show|set    View / update per-project settings (threshold, enabled, repo, notes)
-  daemon run|install|uninstall      Foreground run / launchd agent lifecycle
-  viewer run|install|uninstall      Foreground run / launchd agent lifecycle (default :8979)
+  daemon run|install|uninstall      Foreground run / scheduler unit lifecycle
+  viewer run|install|uninstall      Foreground run / scheduler unit lifecycle (default :8979)
   hooks install|uninstall|status    Wire hooks into Claude Code + Codex (auto-detected) + inspect
   statusline install|uninstall      💡 watchmen indicator in ~/.claude/settings.json
   plugin update|status              Marketplace clone management
-  launchd status                    Inspect installed launchd agents
+  launchd status                    Inspect installed scheduler units (alias: see below)
 
 Old verb-noun-hyphen forms (install-daemon, hooks-status, …) still work but
 print a soft deprecation hint to stderr — will be removed in a future release.
@@ -716,7 +716,7 @@ def cmd_settings_port(args) -> int:
     path = config.write_env_var("WATCHMEN_VIEWER_PORT", str(port))
     console.print(f"[green]✓[/] viewer port set to [bold]{port}[/]")
     console.print(f"  [dim]wrote → {path}[/]")
-    # The launchd plist is baked at install time — port changes don't propagate
+    # The scheduler unit is baked at install time — port changes don't propagate
     # until reinstall. Make the next step obvious.
     try:
         from watchmen import service
@@ -1018,7 +1018,7 @@ def cmd_doctor(args) -> int:
     else:
         row("tracked projects", True, f"{len(projects)} project(s)")
 
-    # 4. daemon/viewer service state (launchd on macOS, systemd --user on Linux)
+    # 4. daemon/viewer service state — service.py dispatches to the host scheduler
     from watchmen import service
     daemon_loaded = service.is_daemon_loaded()
     viewer_loaded = service.is_viewer_loaded()
@@ -1128,7 +1128,8 @@ def _add_daemon_run_args(p) -> None:
     p.add_argument("--curator-hours", default="2,14", help="local-time hours when full curator runs (default '2,14' = 2am + 2pm)")
     p.add_argument("--full-curator-min-age", type=int, default=28800, help="min seconds between full curator runs per project (default 8h)")
     p.add_argument("--model", default=DEFAULT_MODEL())
-    p.add_argument("--log-file", default=str(Path.home() / "Library" / "Logs" / "watchmen.log"))
+    from watchmen.daemon import DEFAULT_LOG as _DAEMON_DEFAULT_LOG
+    p.add_argument("--log-file", default=str(_DAEMON_DEFAULT_LOG))
 
 
 def _add_daemon_install_args(p) -> None:
@@ -1179,7 +1180,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("hooks",      "install / uninstall / inspect Claude Code hooks"),
         ("statusline", "install / uninstall the 💡 watchmen indicator"),
         ("plugin",     "manage the Claude Code plugin marketplace clone"),
-        ("launchd",    "inspect installed launchd agents"),
+        ("launchd",    "inspect installed scheduler units (launchd / systemd / Task Scheduler)"),
     ]),
     ("Inspect", [
         ("show",       "list / view curated bundles (project, skill, file)"),
@@ -1188,7 +1189,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("insights",   "cross-repo digest — sessions, skills, patterns, friction"),
         ("changelog",  "render the watchmen CHANGELOG.md"),
         ("open",       "open the viewer in your browser"),
-        ("logs",       "tail launchd logs (daemon | viewer | all)"),
+        ("logs",       "tail scheduler logs (daemon | viewer | all)"),
     ]),
     ("Control", [
         ("pin",        "freeze a skill from regeneration (curator skips it)"),
@@ -1265,6 +1266,15 @@ def _bare_default() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Pin stdout/stderr to UTF-8 so the emoji in our help text (💡, ✓, ✗) and
+    # status output render the same everywhere. Most consoles already are
+    # UTF-8; this only changes behavior where the default codec can't encode
+    # those code points (e.g. cp1252).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+        except (AttributeError, OSError):
+            pass
     parser = WatchmenParser(prog="watchmen", description=__doc__.split("\n")[0], add_help=False)
     # Override the argparse-generated help with our grouped renderer.
     parser.format_help = lambda: ""  # type: ignore[method-assign]
@@ -1284,7 +1294,7 @@ def main(argv: list[str] | None = None) -> int:
     p_open.add_argument("--port", type=int, default=config.viewer_port())
     p_open.set_defaults(func=cmd_open)
 
-    p_logs = sub.add_parser("logs", help="tail launchd logs (daemon | viewer | all)")
+    p_logs = sub.add_parser("logs", help="tail scheduler logs (daemon | viewer | all)")
     p_logs.add_argument("name", choices=("daemon", "viewer", "all"), nargs="?", default="all")
     p_logs.add_argument("-f", "--follow", action="store_true", help="tail -F (follow appended lines)")
     p_logs.add_argument("-n", "--lines", type=int, default=50, help="initial lines to print (default 50)")
@@ -1418,10 +1428,10 @@ def main(argv: list[str] | None = None) -> int:
     p_drun = daemon_sub.add_parser("run", help="run scheduling loop in the foreground")
     _add_daemon_run_args(p_drun)
     p_drun.set_defaults(func=cmd_daemon)
-    p_dins = daemon_sub.add_parser("install", help="install launchd agent for autostart on login")
+    p_dins = daemon_sub.add_parser("install", help="install scheduler unit for autostart on login")
     _add_daemon_install_args(p_dins)
     p_dins.set_defaults(func=cmd_install_daemon)
-    daemon_sub.add_parser("uninstall", help="remove the launchd agent").set_defaults(func=cmd_uninstall_daemon)
+    daemon_sub.add_parser("uninstall", help="remove the scheduler unit").set_defaults(func=cmd_uninstall_daemon)
     p_daemon.set_defaults(func=lambda a: (p_daemon.print_help() or 1))
 
     # ── viewer (noun) ──────────────────────────────────────────────────────
@@ -1430,10 +1440,10 @@ def main(argv: list[str] | None = None) -> int:
     p_vrun = viewer_sub.add_parser("run", help=f"start the viewer in the foreground ({config.viewer_base_url()})")
     _add_viewer_run_args(p_vrun)
     p_vrun.set_defaults(func=cmd_viewer)
-    p_vins = viewer_sub.add_parser("install", help="install launchd agent for autostart on login")
+    p_vins = viewer_sub.add_parser("install", help="install scheduler unit for autostart on login")
     _add_viewer_install_args(p_vins)
     p_vins.set_defaults(func=cmd_install_viewer)
-    viewer_sub.add_parser("uninstall", help="remove the launchd agent").set_defaults(func=cmd_uninstall_viewer)
+    viewer_sub.add_parser("uninstall", help="remove the scheduler unit").set_defaults(func=cmd_uninstall_viewer)
     p_viewer.set_defaults(func=lambda a: (p_viewer.print_help() or 1))
 
     # ── hooks (noun) ───────────────────────────────────────────────────────
@@ -1461,9 +1471,10 @@ def main(argv: list[str] | None = None) -> int:
     p_plug.set_defaults(func=lambda a: (p_plug.print_help() or 1))
 
     # ── launchd (noun) ─────────────────────────────────────────────────────
-    p_ld = sub.add_parser("launchd", help="inspect the watchmen launchd agents")
+    # Name predates Linux/Windows support; dispatcher works on every backend.
+    p_ld = sub.add_parser("launchd", help="inspect installed scheduler units (launchd / systemd / Task Scheduler)")
     ld_sub = p_ld.add_subparsers(dest="launchd_cmd")
-    ld_sub.add_parser("status", help="show installed/loaded launchd agents").set_defaults(func=cmd_launchd_status)
+    ld_sub.add_parser("status", help="show installed/loaded scheduler units").set_defaults(func=cmd_launchd_status)
     p_ld.set_defaults(func=lambda a: (p_ld.print_help() or 1))
 
     # ── deprecated aliases ─────────────────────────────────────────────────

@@ -10,8 +10,9 @@ Cycle (default 30 min):
 Stage 1+2 (skill bundles) is intentionally NOT periodic — too expensive to run unattended,
 needs human review. Run manually via `watchmen curate <project>`.
 
-Logs to a file (default ~/Library/Logs/watchmen.log) so launchd output survives across runs.
-Graceful shutdown on SIGTERM/SIGINT.
+Logs to the platform-conventional location (~/Library/Logs on macOS,
+%LOCALAPPDATA%\\watchmen\\logs on Windows, ~/.watchmen/logs on Linux) so
+scheduler output survives across runs. Graceful shutdown on SIGTERM/SIGINT.
 
 Usage:
   uv run watchmen daemon                  # run forever
@@ -49,7 +50,24 @@ def _default_model() -> str:
 # so the value is fixed for the life of the process — restart the daemon
 # after switching provider.
 DEFAULT_MODEL = _default_model()
-DEFAULT_LOG = Path.home() / "Library" / "Logs" / "watchmen.log"
+
+
+def _default_log_path() -> Path:
+    """Platform-conventional location for the daemon's primary log file.
+
+    macOS: ~/Library/Logs/watchmen.log (where `Console.app` looks).
+    Windows: %LOCALAPPDATA%\\watchmen\\logs\\watchmen.log.
+    Linux + everything else: ~/.watchmen/logs/watchmen.log.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "watchmen.log"
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        return base / "watchmen" / "logs" / "watchmen.log"
+    return Path.home() / ".watchmen" / "logs" / "watchmen.log"
+
+
+DEFAULT_LOG = _default_log_path()
 
 _shutdown = False
 

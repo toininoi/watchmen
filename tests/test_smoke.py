@@ -1184,7 +1184,11 @@ def test_hooks_install_self_heals_stale_paths(tmp_path, monkeypatch):
         for h in e.get("hooks", [])
     ]
     assert stale not in all_cmds, "stale path survived install — self-heal broken"
-    assert str(hooks_setup.HOOK_SCRIPT) in all_cmds, "canonical path missing"
+    # On POSIX the canonical command is the script path verbatim; on Windows
+    # it's the powershell -File wrapper. _settings_command_for produces
+    # whichever form the host shell needs.
+    canonical = hooks_setup._settings_command_for(hooks_setup.HOOK_SCRIPT)
+    assert canonical in all_cmds, "canonical command missing"
 
 
 def test_hooks_install_writes_to_codex_with_event_subset(tmp_path, monkeypatch):
@@ -1213,7 +1217,9 @@ def test_hooks_install_writes_to_codex_with_event_subset(tmp_path, monkeypatch):
         f"Codex hooks.json got unexpected event set {codex_events} (expected {supported})"
     )
     # Every Codex entry must point at the canonical observe script.
-    canonical = str(hooks_setup.HOOK_SCRIPT)
+    # On Windows the canonical form is the powershell -File wrapper, on
+    # POSIX it's the bare path. _settings_command_for resolves that.
+    canonical = hooks_setup._settings_command_for(hooks_setup.HOOK_SCRIPT)
     cmds = [
         h.get("command", "")
         for entries in codex["hooks"].values() for e in entries for h in e.get("hooks", [])
