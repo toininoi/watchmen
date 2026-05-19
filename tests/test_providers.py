@@ -508,6 +508,140 @@ def test_viewer_settings_model_post_set_and_clear(monkeypatch, tmp_path):
     assert "err:" in r.headers["location"]
 
 
+# ─── reset command ────────────────────────────────────────────────────────
+
+
+def _build_fake_project(root: Path, project_key: str, *, with_pins: bool = True) -> dict:
+    """Plant the files cmd_reset would clear so we can exercise the wipe
+    logic against a realistic on-disk layout. Returns a paths dict so
+    tests can assert presence/absence later."""
+    bdir = root / "bundles" / project_key
+    adir = root / "analyses" / project_key
+    (bdir / "skills" / "ship-pr").mkdir(parents=True)
+    (bdir / "skills" / "ship-pr" / "SKILL.md").write_text("# ship-pr\n")
+    (bdir / "_pending").mkdir()
+    (bdir / "_pending" / "marker").write_text("x")
+    (bdir / "CLAUDE.md").write_text("# CLAUDE\n")
+    (bdir / "AGENTS.md").write_text("# AGENTS\n")
+    (bdir / "_candidates.json").write_text("[]")
+    (bdir / "_curation_log.md").write_text("log\n")
+    (bdir / "_index.md").write_text("idx\n")
+    adir.mkdir(parents=True)
+    (adir / "_running.md").write_text("thesis\n")
+    (adir / "2026-05-19.md").write_text("day\n")
+    if with_pins:
+        (bdir / "_pinned.json").write_text('["ship-pr"]')
+        (bdir / "_blocklist.json").write_text('["bad-skill"]')
+    return {"bdir": bdir, "adir": adir}
+
+
+def test_reset_clears_artifacts_and_state(monkeypatch, tmp_path):
+    """`watchmen reset <project>` must remove analyses + bundles (except
+    pins/blocklist) and clear the state.db last-ran markers. End-to-end
+    test against a real on-disk layout — regression catches a half-finished
+    reset that leaves stale CLAUDE.md or stale `last_curator_run`
+    timestamps behind."""
+    from watchmen import cli, state
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+
+    # Init state with a tracked project that has run markers populated
+    state.init_db()
+    state.track_project("kai", str(tmp_path / "repo"), threshold=30)
+    state.update_project(
+        "kai",
+        last_analyst_day="2026-05-18",
+        last_analyst_run="2026-05-18T12:00:00",
+        last_curator_run="2026-05-18T13:00:00",
+        last_curator_skill_count=7,
+    )
+
+    paths = _build_fake_project(tmp_path, "kai")
+
+    rc = cli.main(["reset", "kai", "--yes"])
+    assert rc == 0
+
+    # Artifacts removed
+    assert not paths["bdir"].joinpath("skills").exists()
+    assert not paths["bdir"].joinpath("_pending").exists()
+    assert not paths["bdir"].joinpath("CLAUDE.md").exists()
+    assert not paths["bdir"].joinpath("_candidates.json").exists()
+    assert not paths["adir"].exists()
+
+    # Pins / blocklist preserved by default
+    assert paths["bdir"].joinpath("_pinned.json").exists()
+    assert paths["bdir"].joinpath("_blocklist.json").exists()
+
+    # State markers reset
+    proj = state.get_project("kai")
+    assert proj["last_analyst_day"] is None
+    assert proj["last_analyst_run"] is None
+    assert proj["last_curator_run"] is None
+    assert (proj["last_curator_skill_count"] or 0) == 0
+    # Config preserved
+    assert proj["source_repo"].endswith("/repo")
+    assert proj["threshold_new_prompts"] == 30
+
+
+def test_reset_wipe_all_removes_pins_and_blocklist(monkeypatch, tmp_path):
+    """`--wipe-all` is the full-nuke escape hatch — it must also clear the
+    user-steering files. Without this flag those survive (covered by the
+    test above); regression here catches the inverse: wipe-all silently
+    leaving them behind."""
+    from watchmen import cli, state
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    state.init_db()
+    state.track_project("kai", str(tmp_path / "repo"))
+    paths = _build_fake_project(tmp_path, "kai")
+
+    rc = cli.main(["reset", "kai", "--yes", "--wipe-all"])
+    assert rc == 0
+    assert not paths["bdir"].joinpath("_pinned.json").exists()
+    assert not paths["bdir"].joinpath("_blocklist.json").exists()
+
+
+def test_reset_dry_run_touches_nothing(monkeypatch, tmp_path):
+    """`--dry-run` must list the same target set the real run would touch
+    but never delete anything. Critical guard — users will reach for this
+    flag when they're nervous, and a silent destructive behavior here
+    would be a trust-breaker."""
+    from watchmen import cli, state
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    state.init_db()
+    state.track_project("kai", str(tmp_path / "repo"))
+    state.update_project("kai", last_analyst_day="2026-05-18")
+    paths = _build_fake_project(tmp_path, "kai")
+
+    rc = cli.main(["reset", "kai", "--dry-run"])
+    assert rc == 0
+
+    # Everything still on disk after dry-run
+    assert paths["bdir"].joinpath("skills").exists()
+    assert paths["bdir"].joinpath("CLAUDE.md").exists()
+    assert paths["adir"].joinpath("_running.md").exists()
+    # State markers still in place
+    assert state.get_project("kai")["last_analyst_day"] == "2026-05-18"
+
+
+def test_reset_rejects_untracked_project(monkeypatch, tmp_path, capsys):
+    """A typo in the project key shouldn't silently succeed with a
+    'nothing to do' message — we want a clear error so users don't think
+    their data got wiped when nothing was actually targeted."""
+    from watchmen import cli, state
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    state.init_db()
+    rc = cli.main(["reset", "not-a-real-project", "--yes"])
+    assert rc == 1
+    assert "not tracked" in capsys.readouterr().out
+
+
 def test_chat_call_extra_payload_overrides_get_merged(monkeypatch):
     """Caller-supplied kwargs (temperature, max_tokens) flow into the request
     body for both shapes — insights.py relies on this to pin temperature=0.3

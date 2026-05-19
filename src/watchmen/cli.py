@@ -59,6 +59,7 @@ from watchmen.util import (
 from watchmen.commands.control import (
     cmd_drop,
     cmd_pin,
+    cmd_reset,
     cmd_restore,
     cmd_review,
     cmd_unpin,
@@ -1290,6 +1291,23 @@ def main(argv: list[str] | None = None) -> int:
     p_review = sub.add_parser("review", help="interactive walk: keep/drop/pin every skill")
     p_review.add_argument("project")
     p_review.set_defaults(func=cmd_review)
+
+    p_reset = sub.add_parser(
+        "reset",
+        help="wipe a project's analyses + curated bundle, reset state.db markers (fresh re-curate)",
+    )
+    p_reset.add_argument("project")
+    p_reset.add_argument("--yes", action="store_true",
+                         help="skip the type-the-project-key confirmation prompt")
+    p_reset.add_argument("--dry-run", action="store_true",
+                         help="show what would be removed without touching anything")
+    p_reset.add_argument("--wipe-all", action="store_true",
+                         help="also remove _pinned.json + _blocklist.json (your steering)")
+    p_reset.add_argument("--then-learn", action="store_true",
+                         help="chain into `watchmen learn --full` immediately after the reset")
+    p_reset.add_argument("--model", default=None,
+                         help="override default model for the chained learn (only with --then-learn)")
+    p_reset.set_defaults(func=cmd_reset)
 
     sub.add_parser("status", help="dashboard view").set_defaults(func=cmd_status)
     sub.add_parser("list", help="auto-detect projects from corpus").set_defaults(func=cmd_list)

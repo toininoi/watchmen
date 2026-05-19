@@ -6,6 +6,24 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — `watchmen reset <project>` for from-scratch re-curates
+- New command wipes a project's analyses + curated bundle (CLAUDE.md,
+  AGENTS.md, skills/, _candidates.json, _curation_log.md, _index.md,
+  _pending/, _run.log) and resets state.db's `last_analyst_*` /
+  `last_curator_*` markers — so the next `watchmen learn` (or analyst +
+  curator pair) treats the project as a fresh install.
+- Preserves `_pinned.json` + `_blocklist.json` by default (your steering
+  intent); `--wipe-all` removes those too.
+- Safety: `--dry-run` lists what would be removed without touching
+  anything; the default destructive path requires typing the project key
+  back to confirm; `--yes` skips that prompt for CI / scripting.
+- `--then-learn` chains directly into `watchmen learn --full` after the
+  reset so "wipe and rerun from scratch" is a single command. `--model`
+  flag passes through to the chained learn for one-off model overrides.
+- Corpus.db, raw transcripts, and the project row config (`source_repo`,
+  `threshold`, `notes`, `enabled`, `approval_required`,
+  `skip_overlapping_skills`) are never touched.
+
 ### Added — Interactive `watchmen settings` menu
 - `watchmen settings` (no subcommand) now opens an arrow-key navigable menu
   with breadcrumb headers — pick "Provider & API key", "Default model",
