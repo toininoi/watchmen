@@ -36,7 +36,7 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 CACHE_DIR = WATCHMEN_HOME / "cache"
 CACHE_FILE = CACHE_DIR / "model_prices.json"
 CACHE_TTL = 24 * 60 * 60  # 24 hours
-API_TIMEOUT = 2.0
+API_TIMEOUT = 5.0
 
 # ─── Data structures ───────────────────────────────────────────────────────
 
