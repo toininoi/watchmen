@@ -1454,7 +1454,7 @@ def test_curate_finder_schema_accepts_enhancement_of_field():
     # Stub load_api_key so CI (no OPENROUTER_API_KEY) doesn't raise during
     # Agent.__init__.
     _orig_load = _agent.load_api_key
-    _agent.load_api_key = lambda: "stub-test-key"
+    _agent.load_api_key = lambda *a, **k: "stub-test-key"
     try:
         with httpx.Client() as client:
             finder = curate.build_finder_agent(
@@ -1487,7 +1487,7 @@ def test_curate_build_skill_curator_respects_out_subdir():
         "when_to_use": "y", "source_files": [], "session_ids": [],
     }
     _orig_load = _agent.load_api_key
-    _agent.load_api_key = lambda: "stub-test-key"
+    _agent.load_api_key = lambda *a, **k: "stub-test-key"
     try:
         with httpx.Client() as client:
             curator = curate.build_skill_curator(
@@ -1524,7 +1524,7 @@ def test_curate_build_skill_curator_enhancement_mode_prepends_context():
         "enhancement_of": "craft-plan",
     }
     _orig_load = _agent.load_api_key
-    _agent.load_api_key = lambda: "stub-test-key"
+    _agent.load_api_key = lambda *a, **k: "stub-test-key"
     try:
         with httpx.Client() as client:
             curator = curate.build_skill_curator(
@@ -2061,35 +2061,30 @@ def test_onboard_runs_projects_in_parallel():
 # ─── API key management ─────────────────────────────────────────────────────
 
 
-def test_api_key_helpers_roundtrip():
+def test_api_key_helpers_roundtrip(monkeypatch, tmp_path):
     """_read_current_api_key / _write_api_key must roundtrip cleanly while
     preserving any other lines in ~/.config/watchmen/.env (e.g. LANGFUSE_KEY,
     custom OPENROUTER_API_BASE). If write clobbers unrelated lines, teammates
     rotating their key would lose other config silently."""
-    import os
-    import tempfile
 
     from watchmen import cli
-    from watchmen import config
-    with tempfile.TemporaryDirectory() as td:
-        env_path = Path(td) / ".env"
-        env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    env_dir = tmp_path / ".config" / "watchmen"
+    env_dir.mkdir(parents=True)
+    env_path = env_dir / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
 
-        orig_env_path = config.ENV_PATH
-        orig_env_key = os.environ.pop("OPENROUTER_API_KEY", None)
-        config.ENV_PATH = env_path
-        try:
-            assert cli._read_current_api_key() == "sk-old"
-            cli._write_api_key("sk-new")
-            assert cli._read_current_api_key() == "sk-new"
-            # Critically: OTHER_VAR must survive the rotation.
-            content = env_path.read_text()
-            assert "OTHER_VAR=keep-me" in content, "rotation clobbered an unrelated env line"
-            assert content.count("OPENROUTER_API_KEY=") == 1, "duplicate OPENROUTER_API_KEY line after rotation"
-        finally:
-            config.ENV_PATH = orig_env_path
-            if orig_env_key is not None:
-                os.environ["OPENROUTER_API_KEY"] = orig_env_key
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Force openrouter as the active provider regardless of test-runner env.
+    monkeypatch.setenv("WATCHMEN_PROVIDER", "openrouter")
+
+    assert cli._read_current_api_key() == "sk-old"
+    cli._write_api_key("sk-new")
+    assert cli._read_current_api_key() == "sk-new"
+    # Critically: OTHER_VAR must survive the rotation.
+    content = env_path.read_text()
+    assert "OTHER_VAR=keep-me" in content, "rotation clobbered an unrelated env line"
+    assert content.count("OPENROUTER_API_KEY=") == 1, "duplicate OPENROUTER_API_KEY line after rotation"
 
 
 # ─── Launchd plist sanity ───────────────────────────────────────────────────
@@ -3021,89 +3016,77 @@ def test_rorschach_inkblots_are_mirror_symmetric():
     assert inspect._rorschach_inkblot() in inspect._RORSCHACH_BLOTS
 
 
-def test_config_viewer_port_reads_env_then_file_then_default():
+def test_config_viewer_port_reads_env_then_file_then_default(monkeypatch, tmp_path):
     """`config.viewer_port()` resolves in priority order: process env var,
     then the global config file, then the hardcoded default. Regression:
     if the precedence flips, a user who sets WATCHMEN_VIEWER_PORT=9999 in
     their shell will get their saved file value instead — surprising."""
     import os
     from watchmen import config
-    # Isolate to a temp env file so we don't clobber the user's real one.
-    with tempfile.TemporaryDirectory() as td:
-        orig_env_path = config.ENV_PATH
-        config.ENV_PATH = Path(td) / ".env"
-        orig_env = os.environ.pop("WATCHMEN_VIEWER_PORT", None)
-        try:
-            # 1. nothing set → default
-            assert config.viewer_port() == config.VIEWER_DEFAULT_PORT
 
-            # 2. file only
-            config.write_env_var("WATCHMEN_VIEWER_PORT", "9111")
-            assert config.viewer_port() == 9111
+    # Isolate to a temp $HOME so write_env_var doesn't clobber the user's real
+    # ~/.config/watchmen/.env. config resolves the env-file path from
+    # Path.home() on every read, so monkeypatching home is sufficient.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("WATCHMEN_VIEWER_PORT", raising=False)
+    env_file = tmp_path / ".config" / "watchmen" / ".env"
 
-            # 3. env beats file
-            os.environ["WATCHMEN_VIEWER_PORT"] = "9222"
-            assert config.viewer_port() == 9222
+    # 1. nothing set → default
+    assert config.viewer_port() == config.VIEWER_DEFAULT_PORT
 
-            # 4. unrelated keys preserved across writes
-            config.write_env_var("OPENROUTER_API_KEY", "sk-test")
-            config.write_env_var("WATCHMEN_VIEWER_PORT", "9333")
-            file_body = config.ENV_PATH.read_text()
-            assert "OPENROUTER_API_KEY=sk-test" in file_body
-            assert "WATCHMEN_VIEWER_PORT=9333" in file_body
-            # File chmod is 0600 (config writes secrets and shouldn't leak them).
-            assert (config.ENV_PATH.stat().st_mode & 0o777) == 0o600
-        finally:
-            config.ENV_PATH = orig_env_path
-            if orig_env is None:
-                os.environ.pop("WATCHMEN_VIEWER_PORT", None)
-            else:
-                os.environ["WATCHMEN_VIEWER_PORT"] = orig_env
+    # 2. file only
+    config.write_env_var("WATCHMEN_VIEWER_PORT", "9111")
+    assert config.viewer_port() == 9111
+
+    # 3. env beats file
+    os.environ["WATCHMEN_VIEWER_PORT"] = "9222"
+    assert config.viewer_port() == 9222
+
+    # 4. unrelated keys preserved across writes
+    config.write_env_var("OPENROUTER_API_KEY", "sk-test")
+    config.write_env_var("WATCHMEN_VIEWER_PORT", "9333")
+    file_body = env_file.read_text()
+    assert "OPENROUTER_API_KEY=sk-test" in file_body
+    assert "WATCHMEN_VIEWER_PORT=9333" in file_body
+    # File chmod is 0600 (config writes secrets and shouldn't leak them).
+    assert (env_file.stat().st_mode & 0o777) == 0o600
 
 
-def test_cli_settings_port_get_and_set_with_validation():
+def test_cli_settings_port_get_and_set_with_validation(monkeypatch, tmp_path):
     """`watchmen settings port` prints the current value; `watchmen settings port N`
     persists it. Invalid ports (non-numeric, out of 1024–65535) get rejected with
     exit 1 — they'd otherwise crash uvicorn confusingly later."""
     import io
-    import os
     from watchmen import cli
     from watchmen import config
-    with tempfile.TemporaryDirectory() as td:
-        orig_env_path = config.ENV_PATH
-        config.ENV_PATH = Path(td) / ".env"
-        orig_env = os.environ.pop("WATCHMEN_VIEWER_PORT", None)
-        buf = io.StringIO()
-        orig_stdout = cli.sys.stdout
-        cli.sys.stdout = buf
-        try:
-            # Get (no value): shows default
-            rc = cli.main(["settings", "port"])
-            assert rc == 0
-            out = buf.getvalue()
-            assert str(config.VIEWER_DEFAULT_PORT) in out, f"expected default port in: {out!r}"
 
-            # Set valid
-            buf.truncate(0); buf.seek(0)
-            rc = cli.main(["settings", "port", "9543"])
-            assert rc == 0
-            assert config.viewer_port() == 9543, "value not persisted"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("WATCHMEN_VIEWER_PORT", raising=False)
+    buf = io.StringIO()
+    monkeypatch.setattr(cli.sys, "stdout", buf)
 
-            # Set invalid (string)
-            buf.truncate(0); buf.seek(0)
-            rc = cli.main(["settings", "port", "notaport"])
-            assert rc == 1, f"non-numeric port should exit 1, got {rc}"
+    # Get (no value): shows default
+    rc = cli.main(["settings", "port"])
+    assert rc == 0
+    out = buf.getvalue()
+    assert str(config.VIEWER_DEFAULT_PORT) in out, f"expected default port in: {out!r}"
 
-            # Set out-of-range
-            buf.truncate(0); buf.seek(0)
-            rc = cli.main(["settings", "port", "70000"])
-            assert rc == 1, f"out-of-range port should exit 1, got {rc}"
-            assert config.viewer_port() == 9543, "invalid set must not clobber valid prior value"
-        finally:
-            cli.sys.stdout = orig_stdout
-            config.ENV_PATH = orig_env_path
-            if orig_env is not None:
-                os.environ["WATCHMEN_VIEWER_PORT"] = orig_env
+    # Set valid
+    buf.truncate(0); buf.seek(0)
+    rc = cli.main(["settings", "port", "9543"])
+    assert rc == 0
+    assert config.viewer_port() == 9543, "value not persisted"
+
+    # Set invalid (string)
+    buf.truncate(0); buf.seek(0)
+    rc = cli.main(["settings", "port", "notaport"])
+    assert rc == 1, f"non-numeric port should exit 1, got {rc}"
+
+    # Set out-of-range
+    buf.truncate(0); buf.seek(0)
+    rc = cli.main(["settings", "port", "70000"])
+    assert rc == 1, f"out-of-range port should exit 1, got {rc}"
+    assert config.viewer_port() == 9543, "invalid set must not clobber valid prior value"
 
 
 def test_cli_bare_invocation_runs_smart_default():

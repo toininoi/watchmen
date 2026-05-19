@@ -223,7 +223,13 @@ def _uninstall_task(label: str) -> int:
 # ─── Public commands (called via watchmen.service) ─────────────────────────
 
 
-def install_daemon(model: str = "deepseek/deepseek-v4-flash", interval: int = 7200, dry_run: bool = False) -> int:
+def install_daemon(model: str | None = None, interval: int = 7200, dry_run: bool = False) -> int:
+    # Provider-aware default — the Task Scheduler XML bakes whichever model
+    # the active provider points at. Reinstall after switching provider
+    # to refresh, matching launchd/systemd behavior.
+    if model is None:
+        from watchmen import config
+        model = config.default_model()
     uv = _which_uv() or "uv.exe"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 

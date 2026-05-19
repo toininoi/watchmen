@@ -1,8 +1,12 @@
-"""Shared OpenRouter tool-calling agent. Used by analyze.py, curate.py, etc.
+"""Shared tool-calling agent. Used by analyze.py, curate.py, etc.
 
 An Agent is configured with a system prompt + tool specs + tool handlers + a terminal-tool
 name. .run(user_msg) runs the multi-turn loop and returns the args of the terminal tool call
 (or empty dict if the model gave up without calling it), plus the full message history for logging.
+
+The provider abstraction lives in `providers.py`. This module dispatches
+requests through the active provider's URL + auth headers + request/response
+translator, so adding a new provider doesn't touch the loop here.
 """
 
 import json
@@ -15,7 +19,7 @@ from typing import Callable
 
 import httpx
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+from watchmen import providers as _providers
 
 # Retry on these HTTP status codes — 429 (rate limit) and 5xx (server-side
 # blips, gateway timeouts, etc.). 408 (request timeout) is treated as
@@ -23,20 +27,95 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # worth retrying.
 _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 524}
 
+# Kept for backward compat with any external imports — pre-0.7 callers
+# referenced `agent.OPENROUTER_URL` directly. The dispatch path no longer
+# uses this constant; the Provider owns the endpoint now.
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-def load_api_key() -> str:
-    if k := os.environ.get("OPENROUTER_API_KEY"):
-        return k
-    # Canonical location written by `watchmen settings api-key set` and read
-    # by every agent in the pipeline. The wizard chmods this 0600.
-    env_path = Path.home() / ".config" / "watchmen" / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
+
+def load_api_key(provider: str | None = None) -> str:
+    """Resolve the API key (or OAuth access token) for the active (or
+    named) provider.
+
+    Resolution differs by provider type:
+    - **Env-var-based** (openrouter/openai/anthropic): process env →
+      ~/.config/watchmen/.env. The wizard writes the file with chmod 0600.
+    - **OAuth-based** (claude-pro/chatgpt): delegates to the provider's
+      `resolve_api_key()` hook, which reads the macOS keychain entry /
+      Codex auth.json on demand. The user never pastes anything.
+
+    Raises RuntimeError with an actionable message rather than returning
+    empty — every call site eventually hits an HTTP 401 if we return
+    None, and the error trail is harder to follow.
+    """
+    # Lazy local import to avoid a config↔agent cycle: agent is imported
+    # eagerly by several modules; config imports providers; providers
+    # imports nothing.
+    from watchmen import config
+
+    name = provider or config.active_provider()
+
+    # OAuth providers: defer entirely to the provider's discovery hook.
+    if name in config.OAUTH_PROVIDERS:
+        from watchmen import providers as _providers
+        prov = _providers.get_provider(name)
+        token = prov.resolve_api_key(None)
+        if token:
+            return token
+        # Provider-specific actionable hint — knowing what to do next is
+        # the difference between a tractable error and a silent failure.
+        hint = {
+            "claude-pro": (
+                "Claude Code OAuth credential not found. Sign in via the "
+                "`claude` CLI (or Claude Code desktop) on this machine, "
+                "then retry."
+            ),
+            "chatgpt":    (
+                "Codex ChatGPT OAuth credential not found. Run `codex login` "
+                "and pick ChatGPT-account auth, then retry."
+            ),
+        }.get(name, f"OAuth credential not available for {name}")
+        raise RuntimeError(hint)
+
+    if name not in config.PROVIDER_KEY_VARS:
+        raise RuntimeError(
+            f"unknown provider {name!r}; valid: {', '.join(config.ALL_PROVIDERS)}"
+        )
+    key_var = config.PROVIDER_KEY_VARS[name]
+
+    # Standard resolution: process env → .env file
+    found: str | None = None
+    if k := os.environ.get(key_var):
+        found = k
+    else:
+        env_path = Path.home() / ".config" / "watchmen" / ".env"
+        if env_path.exists():
+            prefix = f"{key_var}="
+            for line in env_path.read_text().splitlines():
+                if line.startswith(prefix):
+                    found = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+
+    # Give the provider a chance to override or discover the credential
+    # from a non-env source — OpenAIProvider uses this to read Codex's
+    # stored api-key when OPENAI_API_KEY isn't set, so existing Codex
+    # users get credential reuse without an extra paste step.
+    from watchmen import providers as _providers
+    try:
+        prov = _providers.get_provider(name)
+        resolved = prov.resolve_api_key(found)
+        if resolved:
+            return resolved
+    except (ValueError, Exception):
+        # If the provider hook itself fails, fall back to the env-var
+        # value we already found (or raise the standard error below).
+        if found:
+            return found
+
     raise RuntimeError(
-        "OPENROUTER_API_KEY not set. Either `export OPENROUTER_API_KEY=...` or "
-        "run `watchmen settings api-key set <key>` (writes ~/.config/watchmen/.env)."
+        f"{key_var} not set. Either `export {key_var}=...` or run "
+        f"`watchmen settings api-key --provider {name}` "
+        f"(writes ~/.config/watchmen/.env)."
     )
 
 
@@ -57,13 +136,15 @@ def _backoff_seconds(attempt: int, retry_after: str | None) -> float:
     return max(backoff, server_hint)
 
 
-def call_openrouter(
+def call_chat(
     client: httpx.Client,
+    url: str,
     headers: dict,
     payload: dict,
     *,
     max_retries: int = 4,
     log: Callable[[str], None] | None = None,
+    provider_label: str = "llm",
 ) -> dict:
     """Single chat-completion call with retry on transient failures.
 
@@ -71,15 +152,19 @@ def call_openrouter(
     HTTP 408 / 429 / 5xx status codes. Non-retryable errors (4xx other than
     408/429) raise immediately. Exhausting retries raises HTTPStatusError
     for status failures or the last RequestError for network failures.
+
+    `url` and `headers` come from the configured Provider; `payload` is the
+    already-translated request body. `provider_label` is used for retry
+    logging so multi-provider deployments can tell which backend was slow.
     """
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
-            r = client.post(OPENROUTER_URL, headers=headers, json=payload, timeout=300.0)
+            r = client.post(url, headers=headers, json=payload, timeout=300.0)
             if r.status_code in _RETRYABLE_STATUS and attempt < max_retries - 1:
                 delay = _backoff_seconds(attempt, r.headers.get("Retry-After"))
                 if log:
-                    log(f"openrouter: HTTP {r.status_code}, retry in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                    log(f"{provider_label}: HTTP {r.status_code}, retry in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
                 continue
             r.raise_for_status()
@@ -90,11 +175,87 @@ def call_openrouter(
                 raise
             delay = _backoff_seconds(attempt, None)
             if log:
-                log(f"openrouter: {type(e).__name__} ({e}), retry in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                log(f"{provider_label}: {type(e).__name__} ({e}), retry in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
             time.sleep(delay)
     # All retries exhausted on a retryable status — surface the last response
     # by letting the loop raise via raise_for_status above; this is unreachable.
     raise RuntimeError(f"exhausted retries; last error: {last_exc}")
+
+
+def call_openrouter(
+    client: httpx.Client,
+    headers: dict,
+    payload: dict,
+    *,
+    max_retries: int = 4,
+    log: Callable[[str], None] | None = None,
+) -> dict:
+    """Legacy entry point kept for tests / external callers that import this
+    symbol directly. Posts to OpenRouter's chat-completions endpoint with
+    whatever headers + payload were assembled by the caller. New code should
+    use `chat_call()` which handles provider routing + translation."""
+    return call_chat(
+        client, OPENROUTER_URL, headers, payload,
+        max_retries=max_retries, log=log, provider_label="openrouter",
+    )
+
+
+def chat_call(
+    client: httpx.Client,
+    messages: list[dict],
+    *,
+    model: str,
+    tools: list[dict] | None = None,
+    provider: str | None = None,
+    api_key: str | None = None,
+    agent_name: str = "watchmen",
+    max_retries: int = 4,
+    log: Callable[[str], None] | None = None,
+    **extra_payload,
+) -> dict:
+    """One-shot chat-completions call with provider routing baked in.
+
+    Resolves the active provider (or uses `provider` override), pulls the
+    matching API key, translates the OpenAI chat-completions request into
+    the provider's wire format, retries on transient failures, and
+    translates the response back into the canonical OpenAI shape so callers
+    can read `data["choices"][0]["message"]["content"]` regardless of which
+    backend served the request.
+
+    Use this for non-Agent callsites (analyze.py per-day loop, insights
+    digest, one-off LLM helpers). The Agent class handles the multi-turn
+    tool-dispatch loop on top of the same plumbing.
+
+    `extra_payload` is merged into the request body AFTER translation, so
+    callers can pass `temperature=0.3`, `max_tokens=2000`, etc. for both
+    OpenAI-shape providers and Anthropic (which accepts the same top-level
+    keys).
+    """
+    from watchmen import config
+
+    name = provider or config.active_provider()
+    prov = _providers.get_provider(name)
+    key = api_key or load_api_key(name)
+
+    headers = prov.headers(key, agent_name=agent_name)
+    body = prov.translate_request(model=model, messages=messages, tools=tools or [])
+    for k, v in extra_payload.items():
+        if v is not None:
+            body[k] = v
+
+    # Providers with non-chat-completions transports (e.g. streaming-only
+    # Responses API for ChatGPT OAuth) override `call()`. We let them own
+    # the HTTP round-trip + protocol handling; everything else still goes
+    # through the standard call_chat path.
+    if getattr(prov, "custom_transport", False):
+        raw = prov.call(client, prov.endpoint, headers, body,
+                        max_retries=max_retries, log=log, label=name)
+    else:
+        raw = call_chat(
+            client, prov.endpoint, headers, body,
+            max_retries=max_retries, log=log, provider_label=name,
+        )
+    return prov.translate_response(raw)
 
 
 def _turn_cost(model: str, usage: dict) -> float:
@@ -139,6 +300,7 @@ class Agent:
         log_path: Path | None = None,
         result_max_chars: int = 30000,
         max_cost_usd: float | None = None,
+        provider: str | None = None,
     ):
         self.name = name
         self.model = model
@@ -147,15 +309,18 @@ class Agent:
         self.tool_handlers = tool_handlers
         self.terminal_tool = terminal_tool
         self.client = client or httpx.Client(timeout=300.0)
-        self.api_key = api_key or load_api_key()
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            # OpenRouter app attribution: app=watchmen, sub-agent=name.
-            # https://openrouter.ai/docs/api-reference/overview#headers
-            "HTTP-Referer": "https://github.com/firstbatchxyz/watchmen",
-            "X-Title": f"watchmen:{name}",
-        }
+
+        # Lazy import — agent.py is imported eagerly in many places and
+        # config.py imports providers.py; keeping this off the module-level
+        # import path stops a circular import in some test orderings.
+        from watchmen import config
+
+        self.provider_name = provider or config.active_provider()
+        self.provider = _providers.get_provider(self.provider_name)
+        self.api_key = api_key or load_api_key(self.provider_name)
+        self.headers = self.provider.headers(self.api_key, agent_name=name)
+        self.endpoint = self.provider.endpoint
+
         self.log_path = log_path
         self.result_max_chars = result_max_chars
         # Per-run cumulative cost ceiling. None = unlimited (the historical
@@ -177,16 +342,29 @@ class Agent:
         ]
         terminal_args: dict = {}
         for it in range(max_iter):
-            data = call_openrouter(
-                self.client,
-                self.headers,
-                {
-                    "model": self.model,
-                    "messages": messages,
-                    "tools": self.tool_specs,
-                },
-                log=self._log,
+            payload = self.provider.translate_request(
+                model=self.model,
+                messages=messages,
+                tools=self.tool_specs,
             )
+            # See comment in chat_call() — providers with streaming
+            # transports (ChatGPT/Codex Responses API) own the HTTP round
+            # trip themselves. Others go through the standard chat_call.
+            if getattr(self.provider, "custom_transport", False):
+                raw = self.provider.call(
+                    self.client, self.endpoint, self.headers, payload,
+                    log=self._log, label=self.provider_name,
+                )
+            else:
+                raw = call_chat(
+                    self.client,
+                    self.endpoint,
+                    self.headers,
+                    payload,
+                    log=self._log,
+                    provider_label=self.provider_name,
+                )
+            data = self.provider.translate_response(raw)
 
             # Track per-turn cost; honor the budget ceiling before doing
             # any tool dispatch so we don't burn another iteration.

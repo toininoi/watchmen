@@ -59,6 +59,7 @@ from watchmen.util import (
 from watchmen.commands.control import (
     cmd_drop,
     cmd_pin,
+    cmd_reset,
     cmd_restore,
     cmd_review,
     cmd_unpin,
@@ -74,6 +75,15 @@ from watchmen.commands.inspect import (
 )
 # Cross-repo digest — the largest single command, lives in its own module.
 from watchmen.commands.insights import cmd_insights
+
+
+def _run_settings_menu() -> int:
+    """Lazy import wrapper for the interactive settings menu. Kept lazy so
+    `watchmen --help` doesn't pay the questionary/prompt_toolkit import cost,
+    and so a missing questionary dep degrades gracefully (the menu module
+    handles that internally)."""
+    from watchmen.commands.settings_menu import run_interactive_settings
+    return run_interactive_settings()
 # Pipeline commands — status / ingest / analyze / curate / runs / learn /
 # metrics. Re-exported here so the argparse dispatch in main() doesn't move.
 from watchmen.commands.pipeline import (
@@ -95,7 +105,11 @@ def _print_runtime_state_error(exc: BaseException, *, stderr: bool = True) -> No
 
 ROOT = Path(__file__).parent
 SOURCE_ROOT = Path(__file__).parent
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+# Resolved per-invocation against the active provider — see config.default_model().
+# Kept as a callable indirection (not just `DEFAULT_MODEL = config.default_model()`)
+# so argparse `default=DEFAULT_MODEL()` evaluates after env/file loads complete.
+def DEFAULT_MODEL() -> str:  # noqa: N802  — capitalized for callsite continuity
+    return config.default_model()
 VIEWER_DEFAULT_HOST = config.VIEWER_DEFAULT_HOST
 VIEWER_DEFAULT_PORT = config.VIEWER_DEFAULT_PORT
 
@@ -643,49 +657,35 @@ def cmd_settings_set(args) -> int:
     return 0
 
 
-def _check_openrouter_key(key: str) -> tuple[bool, str]:
-    """Probe OpenRouter's /auth/key endpoint with the given key. Returns
-    (ok, human_message). Used by `watchmen settings api-key [--check]` to
-    surface bad keys BEFORE they reach the analyst/curator and turn into
-    silent 401s halfway through a run."""
-    import httpx
+def _check_provider_key(provider_name: str, key: str) -> tuple[bool, str]:
+    """Probe `provider_name`'s auth-check endpoint with `key`. Returns
+    (ok, human_message). Used by `watchmen settings api-key [--check]` and
+    `watchmen doctor` to surface bad keys BEFORE they reach the
+    analyst/curator and turn into silent 401s halfway through a run."""
+    from watchmen import providers
     try:
-        r = httpx.get(
-            "https://openrouter.ai/api/v1/auth/key",
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=10.0,
-        )
-    except httpx.RequestError as e:
-        return False, f"connection error: {type(e).__name__}"
-    if r.status_code == 200:
-        try:
-            info = (r.json() or {}).get("data") or {}
-        except ValueError:
-            info = {}
-        usage = info.get("usage")
-        limit = info.get("limit")
-        if usage is not None and limit is not None and limit > 0:
-            return True, f"valid — credits used ${float(usage):.2f} of ${float(limit):.2f}"
-        if usage is not None and limit is None:
-            return True, f"valid — credits used ${float(usage):.2f} (no hard limit)"
-        return True, "valid"
-    if r.status_code == 401:
-        try:
-            msg = (r.json().get("error") or {}).get("message", "")
-        except (ValueError, AttributeError):
-            msg = ""
-        return False, f"401 — {msg or 'unauthorized'}"
-    return False, f"HTTP {r.status_code} — {r.text[:120]}"
+        prov = providers.get_provider(provider_name)
+    except ValueError as e:
+        return False, str(e)
+    res = prov.probe(key)
+    return res.ok, res.detail
 
 
-def _read_current_api_key() -> str | None:
-    """Return the OpenRouter API key from env or ~/.config/watchmen/.env."""
-    return config.read_env_var("OPENROUTER_API_KEY")
+# Legacy alias kept for any external import that referenced this name —
+# delegates to the multi-provider helper above. The diagnostics module
+# duplicates the same body locally to avoid a viewer→cli cycle.
+def _check_openrouter_key(key: str) -> tuple[bool, str]:
+    return _check_provider_key("openrouter", key)
 
 
-def _write_api_key(key: str) -> Path:
-    """Persist the OpenRouter key to ~/.config/watchmen/.env, preserving unrelated lines."""
-    return config.write_env_var("OPENROUTER_API_KEY", key)
+def _read_current_api_key(provider: str | None = None) -> str | None:
+    """API key for the active (or named) provider from env or .env file."""
+    return config.provider_key(provider or config.active_provider())
+
+
+def _write_api_key(key: str, provider: str | None = None) -> Path:
+    """Persist `key` for the active (or named) provider to .env (chmod 600)."""
+    return config.set_provider_key(provider or config.active_provider(), key)
 
 
 def cmd_settings_port(args) -> int:
@@ -727,20 +727,58 @@ def cmd_settings_port(args) -> int:
 
 
 def cmd_settings_api_key(args) -> int:
-    """Set or check the OpenRouter API key. Live-validates against OpenRouter's
-    /auth/key endpoint so a bad key gets caught BEFORE the analyst/curator
-    silently 401s halfway through a run."""
+    """Set or check the API key for a provider. Live-validates the key against
+    the provider's auth endpoint so failures surface BEFORE a long analyst or
+    curator run hits a silent 401.
+
+    `--provider` selects which provider to set/check (default: active provider).
+    `--set <key>` writes a key non-interactively; without it, the command
+    prompts for a key. `--check` validates the existing key and exits.
+    """
     from rich.console import Console
     from rich.prompt import Confirm, Prompt
     console = Console()
 
-    current = _read_current_api_key()
+    provider_name = (getattr(args, "provider", None) or config.active_provider()).lower()
+    if provider_name not in config.ALL_PROVIDERS:
+        console.print(f"[red]✗[/] unknown provider: {provider_name!r}  "
+                      f"[dim](valid: {', '.join(config.ALL_PROVIDERS)})[/]")
+        return 1
+
+    # OAuth providers source credentials from Claude Code's keychain / Codex
+    # auth.json — there's nothing to paste. Surface the live status from the
+    # provider's probe + an actionable hint instead of falling through to
+    # the "enter key" prompt.
+    if provider_name in config.OAUTH_PROVIDERS:
+        from watchmen import providers as _providers
+        prov = _providers.get_provider(provider_name)
+        token = prov.resolve_api_key(None)
+        if not token:
+            login_cmd = "claude" if provider_name == "claude-pro" else "codex login"
+            console.print(f"[red]✗[/] [{provider_name}] no OAuth credential found")
+            console.print(f"  [dim]sign in with `{login_cmd}` on this machine, then re-run[/]")
+            return 1
+        res = prov.probe(token)
+        marker = "[green]✓[/]" if res.ok else "[red]✗[/]"
+        console.print(f"{marker} [{provider_name}] {res.detail}")
+        if args.check or args.set:
+            # --set is meaningless for OAuth (no key to set); surface the
+            # mismatch directly so users don't think they typed something wrong.
+            if args.set:
+                console.print(f"[dim]note: {provider_name} uses OAuth — there is no key to paste. "
+                              f"Use `claude` / `codex login` to manage the credential.[/]")
+            return 0 if res.ok else 1
+        return 0 if res.ok else 1
+
+    current = _read_current_api_key(provider_name)
+    ok = False
     if current:
-        ok, info = _check_openrouter_key(current)
+        ok, info = _check_provider_key(provider_name, current)
         marker = "[green]✓[/]" if ok else "[red]✗[/]"
-        console.print(f"{marker} current key: {info}  [dim]({current[:8]}…{current[-4:]})[/]")
+        suffix = f"  [dim]({current[:8]}…{current[-4:]})[/]" if len(current) > 12 else ""
+        console.print(f"{marker} [{provider_name}] current key: {info}{suffix}")
     else:
-        console.print("[dim]no key currently set[/]")
+        console.print(f"[dim][{provider_name}] no key currently set[/]")
 
     if args.check:
         return 0 if (current and ok) else 1
@@ -750,24 +788,142 @@ def cmd_settings_api_key(args) -> int:
     else:
         console.print()
         new_key = Prompt.ask(
-            "Paste new OpenRouter API key (enter to keep current)",
+            f"Paste new {provider_name} API key (enter to keep current)",
             password=True, default="", show_default=False,
         ).strip()
     if not new_key:
         console.print("[dim]no change.[/]")
         return 0
 
-    ok, info = _check_openrouter_key(new_key)
+    ok, info = _check_provider_key(provider_name, new_key)
     if ok:
-        path = _write_api_key(new_key)
+        path = _write_api_key(new_key, provider_name)
         console.print(f"[green]✓[/] {info}")
         console.print(f"  wrote → {path} [dim](chmod 600)[/]")
         return 0
     console.print(f"[red]✗[/] new key rejected: {info}")
     if not Confirm.ask("Save anyway?", default=False):
         return 1
-    path = _write_api_key(new_key)
+    path = _write_api_key(new_key, provider_name)
     console.print(f"[yellow]![/] saved despite rejection → {path}")
+    return 0
+
+
+def cmd_settings_provider(args) -> int:
+    """Get or set the active LLM provider.
+
+    `watchmen settings provider`           prints current provider + key status for each
+    `watchmen settings provider openai`    switches the active provider
+
+    Switching only changes which provider's key is used on the next call —
+    pre-set keys for other providers stay on disk so you can flip back without
+    re-pasting."""
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+
+    if not getattr(args, "value", None):
+        # Status view: show current active + per-provider credential status.
+        active = config.active_provider()
+        console.print(f"active provider: [bold cyan]{active}[/]")
+        console.print()
+        table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2, 0, 0))
+        table.add_column("provider")
+        table.add_column("credential")
+        table.add_column("source", style="dim")
+        # Env-var-based providers first
+        for name, env_var in config.PROVIDER_KEY_VARS.items():
+            key = config.provider_key(name)
+            marker = "[green]set[/]" if key else "[dim]—[/]"
+            active_marker = "[bold cyan]→[/] " if name == active else "  "
+            table.add_row(f"{active_marker}{name}", marker, env_var)
+        # OAuth providers — credential comes from elsewhere on disk
+        for name in config.OAUTH_PROVIDERS:
+            available = config.provider_key(name) is not None
+            marker = "[green]OAuth[/]" if available else "[dim]not signed in[/]"
+            source = "Claude Code keychain" if name == "claude-pro" else "Codex auth.json"
+            active_marker = "[bold cyan]→[/] " if name == active else "  "
+            table.add_row(f"{active_marker}{name}", marker, source)
+        console.print(table)
+        console.print()
+        console.print(f"[dim]set with: watchmen settings provider <{'/'.join(config.ALL_PROVIDERS)}>[/]")
+        console.print("[dim]set a key: watchmen settings api-key --provider <name> (OAuth providers don't need this)[/]")
+        return 0
+
+    new_provider = args.value.lower().strip()
+    if new_provider not in config.ALL_PROVIDERS:
+        console.print(f"[red]✗[/] unknown provider: {new_provider!r}  "
+                      f"[dim](valid: {', '.join(config.ALL_PROVIDERS)})[/]")
+        return 1
+
+    # Warn if switching to a provider with no credential available — the
+    # next analyst/curator run will fail with a clear error, but flagging
+    # here saves the user one round trip.
+    if not config.provider_key(new_provider):
+        console.print(f"[yellow]![/] no {new_provider} credential available yet")
+        if new_provider in config.OAUTH_PROVIDERS:
+            login_cmd = "claude" if new_provider == "claude-pro" else "codex login"
+            console.print(f"  sign in with [bold]{login_cmd}[/], then re-run")
+        else:
+            console.print(f"  set one with: [bold]watchmen settings api-key --provider {new_provider}[/]")
+
+    path = config.set_active_provider(new_provider)
+    console.print(f"[green]✓[/] active provider → [bold]{new_provider}[/]")
+    console.print(f"  wrote → {path}")
+    return 0
+
+
+def cmd_settings_model(args) -> int:
+    """Get / set the default model used by analyst + curator + insights.
+
+    `watchmen settings model`             prints current + each provider's default
+    `watchmen settings model gpt-5`       persists WATCHMEN_DEFAULT_MODEL=gpt-5
+    `watchmen settings model --clear`     removes the override → falls back to
+                                          the active provider's default model
+    """
+    from rich.console import Console
+    from rich.table import Table
+    from watchmen import providers as _providers
+    console = Console()
+
+    override = config.read_env_var("WATCHMEN_DEFAULT_MODEL")
+    active = config.active_provider()
+    provider_default = _providers.get_provider(active).default_model
+
+    if getattr(args, "clear", False):
+        if config.clear_env_var("WATCHMEN_DEFAULT_MODEL"):
+            console.print(f"[green]✓[/] override cleared — now using {active} default: [bold]{provider_default}[/]")
+        else:
+            console.print("[dim]no override was set[/]")
+        return 0
+
+    new_value = getattr(args, "value", None)
+    if new_value:
+        new_value = new_value.strip()
+        if not new_value:
+            console.print("[red]✗[/] model name cannot be empty")
+            return 1
+        path = config.write_env_var("WATCHMEN_DEFAULT_MODEL", new_value)
+        console.print(f"[green]✓[/] default model → [bold]{new_value}[/]")
+        console.print(f"  wrote → {path}")
+        return 0
+
+    # Status view: current + per-provider defaults
+    if override:
+        console.print(f"default model: [bold cyan]{override}[/] [dim](WATCHMEN_DEFAULT_MODEL override)[/]")
+    else:
+        console.print(f"default model: [bold cyan]{provider_default}[/] [dim](from {active} provider default)[/]")
+    console.print()
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2, 0, 0))
+    table.add_column("provider")
+    table.add_column("default model")
+    for name in config.PROVIDER_KEY_VARS:
+        marker = "[bold cyan]→[/] " if name == active else "  "
+        table.add_row(f"{marker}{name}", _providers.get_provider(name).default_model)
+    console.print(table)
+    console.print()
+    console.print("[dim]override with: watchmen settings model <name>[/]")
+    console.print("[dim]clear with:    watchmen settings model --clear[/]")
     return 0
 
 
@@ -821,13 +977,22 @@ def cmd_doctor(args) -> int:
             fails += 1
         table.add_row(label, mark, detail)
 
-    # 1. OpenRouter API key
-    current = _read_current_api_key()
+    # 1. Active provider's credential
+    from watchmen import providers as _providers
+    active_provider = config.active_provider()
+    is_oauth = active_provider in config.OAUTH_PROVIDERS
+    provider_label = f"{_providers.display_name(active_provider)} {'OAuth' if is_oauth else 'key'}"
+    current = config.provider_key(active_provider)
     if not current:
-        row("OpenRouter key", False, "not set — run `watchmen settings api-key`")
+        if is_oauth:
+            login_cmd = "claude" if active_provider == "claude-pro" else "codex login"
+            row(provider_label, False, f"no credential — run `{login_cmd}` to sign in")
+        else:
+            fix_hint = f"run `watchmen settings api-key --provider {active_provider}`"
+            row(provider_label, False, f"not set — {fix_hint}")
     else:
-        ok, info = _check_openrouter_key(current)
-        row("OpenRouter key", ok, info)
+        ok, info = _check_provider_key(active_provider, current)
+        row(provider_label, ok, info)
 
     # 2. corpus.db
     corpus_db = _corpus_db_path()
@@ -961,13 +1126,13 @@ def _add_daemon_run_args(p) -> None:
     p.add_argument("--curator-age", type=int, default=86400)
     p.add_argument("--curator-hours", default="2,14", help="local-time hours when full curator runs (default '2,14' = 2am + 2pm)")
     p.add_argument("--full-curator-min-age", type=int, default=28800, help="min seconds between full curator runs per project (default 8h)")
-    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--model", default=DEFAULT_MODEL())
     from watchmen.daemon import DEFAULT_LOG as _DAEMON_DEFAULT_LOG
     p.add_argument("--log-file", default=str(_DAEMON_DEFAULT_LOG))
 
 
 def _add_daemon_install_args(p) -> None:
-    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--model", default=DEFAULT_MODEL())
     p.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
     p.add_argument("--dry-run", action="store_true", help="print plist without installing")
 
@@ -1172,12 +1337,29 @@ def main(argv: list[str] | None = None) -> int:
     p_learn = sub.add_parser("learn", help="fast feedback loop: analyze + light curator")
     p_learn.add_argument("project")
     p_learn.add_argument("--full", action="store_true", help="run full curator (Stage 1+2+3) instead of just CLAUDE.md refresh")
-    p_learn.add_argument("--model", default=DEFAULT_MODEL)
+    p_learn.add_argument("--model", default=DEFAULT_MODEL())
     p_learn.set_defaults(func=cmd_learn)
 
     p_review = sub.add_parser("review", help="interactive walk: keep/drop/pin every skill")
     p_review.add_argument("project")
     p_review.set_defaults(func=cmd_review)
+
+    p_reset = sub.add_parser(
+        "reset",
+        help="wipe a project's analyses + curated bundle, reset state.db markers (fresh re-curate)",
+    )
+    p_reset.add_argument("project")
+    p_reset.add_argument("--yes", action="store_true",
+                         help="skip the type-the-project-key confirmation prompt")
+    p_reset.add_argument("--dry-run", action="store_true",
+                         help="show what would be removed without touching anything")
+    p_reset.add_argument("--wipe-all", action="store_true",
+                         help="also remove _pinned.json + _blocklist.json (your steering)")
+    p_reset.add_argument("--then-learn", action="store_true",
+                         help="chain into `watchmen learn --full` immediately after the reset")
+    p_reset.add_argument("--model", default=None,
+                         help="override default model for the chained learn (only with --then-learn)")
+    p_reset.set_defaults(func=cmd_reset)
 
     sub.add_parser("status", help="dashboard view").set_defaults(func=cmd_status)
     sub.add_parser("list", help="auto-detect projects from corpus").set_defaults(func=cmd_list)
@@ -1198,13 +1380,13 @@ def main(argv: list[str] | None = None) -> int:
     p_an.add_argument("project")
     p_an.add_argument("--full", action="store_true", help="full re-run (ignore prior thesis)")
     p_an.add_argument("--repo", help="override repo path (only needed if not tracked)")
-    p_an.add_argument("--model", default=DEFAULT_MODEL)
+    p_an.add_argument("--model", default=DEFAULT_MODEL())
     p_an.set_defaults(func=cmd_analyze)
 
     p_cu = sub.add_parser("curate", help="run curator (skill bundles + CLAUDE.md)")
     p_cu.add_argument("project")
     p_cu.add_argument("--regen-claude", action="store_true", help="rerun stage 3 only (use existing skills)")
-    p_cu.add_argument("--model", default=DEFAULT_MODEL)
+    p_cu.add_argument("--model", default=DEFAULT_MODEL())
     p_cu.add_argument("--skip-overlap", action="store_true",
         help="drop candidates that duplicate installed harness skills entirely "
              "(default: propose them as enhancements). Per-project alternative: "
@@ -1322,14 +1504,28 @@ def main(argv: list[str] | None = None) -> int:
     p_set.add_argument("key", choices=_SETTABLE_KEYS)
     p_set.add_argument("value")
     p_set.set_defaults(func=cmd_settings_set)
-    p_apikey = settings_sub.add_parser("api-key", help="set or check the OpenRouter API key (live-validated against /auth/key)")
+    p_apikey = settings_sub.add_parser("api-key", help="set or check the API key for an LLM provider (live-validated)")
+    p_apikey.add_argument("--provider", choices=config.ALL_PROVIDERS,
+                          help="which provider's credential to set or check (default: active provider). "
+                               "OAuth providers (claude-pro, chatgpt) are check-only — their credential "
+                               "comes from `claude` / `codex login`.")
     p_apikey.add_argument("--check", action="store_true", help="check current key without changing it")
     p_apikey.add_argument("--set", metavar="KEY", help="set a key non-interactively (for scripting)")
     p_apikey.set_defaults(func=cmd_settings_api_key)
+    p_provider = settings_sub.add_parser("provider", help="get or set the active LLM provider (openrouter/openai/anthropic)")
+    p_provider.add_argument("value", nargs="?", help="provider name to activate; omit to print current status")
+    p_provider.set_defaults(func=cmd_settings_provider)
+    p_model = settings_sub.add_parser("model", help="get or set the default LLM model (overrides provider default)")
+    p_model.add_argument("value", nargs="?", help="model identifier to use (omit to print current)")
+    p_model.add_argument("--clear", action="store_true", help="remove the override and fall back to provider default")
+    p_model.set_defaults(func=cmd_settings_model)
     p_port = settings_sub.add_parser("port", help="get or set the viewer port (writes to ~/.config/watchmen/.env)")
     p_port.add_argument("value", nargs="?", help="new port (omit to print current)")
     p_port.set_defaults(func=cmd_settings_port)
-    p_settings.set_defaults(func=lambda a: (p_settings.print_help() or 1))
+    # No subcommand → open the interactive menu (arrow-key navigation,
+    # back/quit at each level). Power users / scripts can still hit the
+    # flat subcommands directly.
+    p_settings.set_defaults(func=lambda a: _run_settings_menu())
 
     p_metrics = sub.add_parser("metrics", help="daily efficiency rollup (no project = global rollup)")
     p_metrics.add_argument("project", nargs="?", help="project key (omit for global rollup across all projects)")
@@ -1348,8 +1544,8 @@ def main(argv: list[str] | None = None) -> int:
         help="render the latest saved digest, skipping the prompt")
     p_insights.add_argument("--list", dest="list_digests", action="store_true",
         help="list all saved digests in ~/.watchmen/insights/ and exit")
-    p_insights.add_argument("--model", default=DEFAULT_MODEL,
-        help=f"OpenRouter model for the digest (default: {DEFAULT_MODEL})")
+    p_insights.add_argument("--model", default=DEFAULT_MODEL(),
+        help=f"LLM model for the digest (default: {DEFAULT_MODEL()})")
     p_insights.set_defaults(func=cmd_insights)
 
     sub.add_parser(

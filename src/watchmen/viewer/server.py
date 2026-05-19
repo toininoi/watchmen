@@ -10,6 +10,7 @@ import bleach
 import markdown as md
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, STATE_DB
 from watchmen.util import (
@@ -268,6 +269,13 @@ def get_skill_status(project_key: str, skill_slug: str) -> dict:
 
 app = FastAPI(title="watchmen viewer")
 
+# Static assets — brand mark, future icons. Mounted under /static.
+# `check_dir=False` makes dev installs that haven't built the package yet
+# (no static/ on disk) start cleanly instead of crashing on import.
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
 
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthz() -> str:
@@ -525,11 +533,60 @@ def _settings_redirect(message: str, ok: bool = True) -> RedirectResponse:
 @app.post("/settings/api-key")
 async def settings_set_api_key(request: Request):
     fields = await _form_fields(request)
+    # `provider` is optional in the POST body: omitting it targets the
+    # active provider (matches `watchmen settings api-key` no-arg behavior).
+    # Template can render a per-provider <select> when the user has more
+    # than one provider configured.
+    provider = (fields.get("provider") or "").strip() or None
     try:
-        path = wm_diag.set_api_key(fields.get("value", ""))
+        path = wm_diag.set_api_key(fields.get("value", ""), provider=provider)
     except ValueError as e:
         return _settings_redirect(str(e), ok=False)
-    return _settings_redirect(f"API key updated · wrote → {path}")
+    label = provider or "active provider"
+    return _settings_redirect(f"API key for {label} updated · wrote → {path}")
+
+
+@app.post("/settings/provider")
+async def settings_set_provider(request: Request):
+    """Switch the active LLM provider. The new provider must already have a
+    key configured — the redirect surfaces a flash if not, so the user has
+    one clear next action."""
+    fields = await _form_fields(request)
+    new_provider = (fields.get("value") or "").strip()
+    if not new_provider:
+        return _settings_redirect("provider value required", ok=False)
+    try:
+        path = wm_diag.set_active_provider(new_provider)
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"active provider → {new_provider} · wrote → {path}")
+
+
+@app.post("/settings/model")
+async def settings_set_model(request: Request):
+    """Set or clear WATCHMEN_DEFAULT_MODEL. The form has two submit buttons:
+    one carries `action=set` + a `value` (override the model), the other
+    carries `action=clear` (revert to the active provider's default).
+
+    Splitting the action by submit button keeps the UI single-form (no
+    JS) while letting one HTML element drive both transitions."""
+    fields = await _form_fields(request)
+    action = (fields.get("action") or "set").strip().lower()
+
+    if action == "clear":
+        cleared = wm_diag.clear_default_model()
+        if cleared:
+            from watchmen import config as _config
+            return _settings_redirect(
+                f"model override cleared · using provider default ({_config.default_model()})"
+            )
+        return _settings_redirect("no model override was set", ok=False)
+
+    try:
+        path = wm_diag.set_default_model(fields.get("value", ""))
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"default model updated · wrote → {path}")
 
 
 @app.post("/settings/port")

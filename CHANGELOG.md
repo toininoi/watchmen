@@ -6,6 +6,112 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — OAuth credential reuse: Claude Pro + ChatGPT subscriptions
+- **Claude Pro / Team / Max via Claude Code OAuth** — new `claude-pro`
+  provider reads the OAuth token Claude Code stores in the macOS keychain
+  (`Claude Code-credentials` entry) and posts to `api.anthropic.com/v1/messages`
+  with the `anthropic-beta: oauth-2025-04-20` header. **Calls are billed
+  against your Claude subscription quota, not per-token API credit.**
+  No paste step — token rotation handled by Claude Code itself.
+- **ChatGPT subscription via Codex OAuth (experimental)** — new `chatgpt`
+  provider reads `~/.codex/auth.json`'s ChatGPT-account OAuth token and
+  posts to the Codex Responses API at `chatgpt.com/backend-api/codex/responses`.
+  Full Responses API ↔ chat-completions translator + SSE event stream
+  aggregator so the agent loop stays provider-agnostic. Models: `gpt-5.5`,
+  `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`. Marked
+  experimental because the model whitelist is undocumented and may
+  change without notice.
+- **Codex api-key reuse** — when the `openai` provider has no
+  `OPENAI_API_KEY` set in env / .env, it falls back to reading the
+  `OPENAI_API_KEY` field from `~/.codex/auth.json` (api-key mode users).
+  No re-pasting needed if you already configured Codex.
+- New `watchmen.credentials` package with `claude_code` + `codex` readers.
+  Both are macOS-aware and degrade gracefully (return None) on Linux /
+  fresh installs without the upstream CLI.
+- Provider abstraction extended with `resolve_api_key()` (credential
+  discovery hook) and `custom_transport`/`call()` (lets streaming
+  providers own their HTTP round trip). Adding a fourth OAuth-flavored
+  provider is one subclass + the credential reader.
+- Settings surface across CLI / interactive menu / web UI now distinguishes
+  env-var-based providers (key form) from OAuth providers (read-only
+  status + login hint). `watchmen doctor` probes OAuth credentials via
+  local metadata (expiry, scopes) rather than burning subscription
+  quota on a network probe.
+- Onboard wizard auto-detects local Claude Code / Codex installations
+  and surfaces the OAuth options when present, defaulting to
+  `claude-pro` if available (zero-paste setup).
+
+### Added — `watchmen reset <project>` for from-scratch re-curates
+- New command wipes a project's analyses + curated bundle (CLAUDE.md,
+  AGENTS.md, skills/, _candidates.json, _curation_log.md, _index.md,
+  _pending/, _run.log) and resets state.db's `last_analyst_*` /
+  `last_curator_*` markers — so the next `watchmen learn` (or analyst +
+  curator pair) treats the project as a fresh install.
+- Preserves `_pinned.json` + `_blocklist.json` by default (your steering
+  intent); `--wipe-all` removes those too.
+- Safety: `--dry-run` lists what would be removed without touching
+  anything; the default destructive path requires typing the project key
+  back to confirm; `--yes` skips that prompt for CI / scripting.
+- `--then-learn` chains directly into `watchmen learn --full` after the
+  reset so "wipe and rerun from scratch" is a single command. `--model`
+  flag passes through to the chained learn for one-off model overrides.
+- Corpus.db, raw transcripts, and the project row config (`source_repo`,
+  `threshold`, `notes`, `enabled`, `approval_required`,
+  `skip_overlapping_skills`) are never touched.
+
+### Added — Interactive `watchmen settings` menu
+- `watchmen settings` (no subcommand) now opens an arrow-key navigable menu
+  with breadcrumb headers — pick "Provider & API key", "Default model",
+  "Viewer port", or "Per-project settings", drill in, edit, and bounce back
+  with Enter / Esc / a "Back" entry at every level. Built on `questionary`
+  (pulls in `prompt_toolkit`, which Rich already depended on transitively).
+- Per-project page exposes Enabled toggle, threshold, approval_required,
+  skip_overlapping_skills, and free-text notes — same surface as
+  `watchmen settings set` but discoverable.
+- Falls back to a non-interactive cheatsheet when stdin/stdout aren't TTYs
+  (CI, piped invocations) so the command never blocks. Flat subcommands
+  remain available for scripting.
+
+### Added — `watchmen settings model` subcommand
+- `watchmen settings model`            — show current default + each provider's default
+- `watchmen settings model <name>`     — persist `WATCHMEN_DEFAULT_MODEL=<name>` (lets you pin gpt-5 etc. across daemon restarts)
+- `watchmen settings model --clear`    — remove the override, fall back to the active provider's default
+- New `config.clear_env_var()` helper backs the clear flow; returns True/False so callers can distinguish a no-op from a real rollback.
+
+### Added — Multi-provider auth (OpenRouter / OpenAI / Anthropic)
+- watchmen no longer requires an OpenRouter account. Native API key support
+  for OpenAI direct (`OPENAI_API_KEY`) and Anthropic direct (`ANTHROPIC_API_KEY`)
+  alongside the existing OpenRouter path. Switch via
+  `watchmen settings provider <name>`; the wizard prompts for choice on first
+  run. Existing OpenRouter-only installs upgrade transparently — the auto-detect
+  prefers OpenRouter when its key is present, so `watchmen <anything>` keeps
+  working without re-onboarding.
+- New module `watchmen.providers` houses the per-provider abstraction
+  (endpoint, auth headers, request/response translator). Adding a fourth
+  provider is one subclass, not a refactor of the agent loop.
+- Anthropic provider includes a full **Messages API ↔ chat-completions
+  translator** so the existing agent.run loop (which speaks the OpenAI
+  wire format) routes through Anthropic without touching tool dispatch
+  internals. System messages get lifted to the top-level `system` field,
+  OpenAI-style `tool_calls` translate to Anthropic `tool_use` content blocks,
+  tool result messages wrap into user messages with `tool_result` blocks,
+  responses fold back into `choices[0].message.content/tool_calls` shape.
+- New CLI: `watchmen settings provider [name]` (get / set the active provider
+  + show per-provider key status), `watchmen settings api-key --provider <name>`
+  (set or check a specific provider's key, live-validated). Bare
+  `watchmen settings api-key` defaults to the active provider.
+- `watchmen doctor` and the web `/doctor` panel now probe whichever provider
+  is active. The viewer `/settings` JSON snapshot exposes a `providers` table
+  for the UI to render per-provider key status.
+- Default model is now provider-aware: `deepseek/deepseek-v4-flash` on
+  OpenRouter, `gpt-5-mini` on OpenAI, `claude-haiku-4-5-20251001` on Anthropic.
+  `WATCHMEN_DEFAULT_MODEL` still overrides if set.
+- 22 new tests in `tests/test_providers.py` covering provider selection
+  priority, the Anthropic Messages API translator (request + response, system
+  field lifting, tool schema rename, content-block round-tripping), and
+  end-to-end `agent.chat_call` dispatch through each provider with stubbed
+  httpx.
+
 ### Fixed — plugin layout + viewer rendering bugs caught during E2E
 - `_latest_digest_path()` returned the cross-agent narrative file instead
   of the newest deep-digest when both lived in `~/.watchmen/insights/` —

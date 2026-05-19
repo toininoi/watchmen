@@ -45,8 +45,9 @@ Code and Codex on the same repo and they pick up where the other left off.
 **Local storage, cross-agent, continuous.**
 
 watchmen stores transcripts, metrics, analyses, and generated bundles on your
-machine. Analysis runs send selected session excerpts to OpenRouter using your
-API key; nothing is uploaded outside those explicit LLM calls.
+machine. Analysis runs send selected session excerpts to your chosen LLM
+provider (OpenRouter, OpenAI, or Anthropic) using your own API key; nothing
+is uploaded outside those explicit LLM calls.
 
 ## What watchmen actually does
 
@@ -107,7 +108,7 @@ uv sync && uv tool install --editable .
 watchmen init
 ```
 
-The wizard handles everything: prompts for your `OPENROUTER_API_KEY` (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the daemon + viewer into the host's scheduler for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
+The wizard handles everything: asks which LLM provider you'd like to use (OpenRouter / OpenAI / Anthropic), prompts for that provider's API key (saves to `~/.config/watchmen/.env`, chmod 600), ingests your `~/.claude/projects/` history, lets you pick which projects to analyze, previews the cost, runs analyze + curate with live progress, installs the daemon + viewer into the host's scheduler (launchd / systemd --user / Task Scheduler) for autostart, and shows you the exact `/plugin` commands to paste inside Claude Code.
 
 Runtime data lives under `~/.watchmen/` (`state.db`, `corpus.db`, `analyses/`, `bundles/`, event logs). Set `WATCHMEN_HOME=/path/to/dir` for an alternate location.
 
@@ -142,10 +143,54 @@ You then get `/skills brief` (or `$brief`) inside Codex with the same workspace 
 
 - macOS, Linux, or Windows 10/11
 - [`uv`](https://github.com/astral-sh/uv) (Python toolchain) — Python 3.11+
-- An OpenRouter API key (`OPENROUTER_API_KEY`)
+- A credential for **one** of the providers below
 - At least one supported coding agent in active use
 
-Default model: `deepseek/deepseek-v4-flash`. Configurable per command.
+Default model per provider: `deepseek/deepseek-v4-flash` (OpenRouter) ·
+`gpt-5-mini` (OpenAI) · `claude-haiku-4-5-20251001` (Anthropic). Configurable
+per command via `--model`, globally via `WATCHMEN_DEFAULT_MODEL`.
+
+### Provider auth
+
+Pick whichever account you already pay for — `watchmen init` walks you through
+it on first run. Switch anytime without losing other credentials:
+
+```bash
+watchmen settings provider                            # status: active provider + per-provider credential state
+watchmen settings provider claude-pro                 # switch active provider (incl. OAuth ones)
+watchmen settings api-key --provider anthropic        # set an API key (live-validated against the provider's API)
+```
+
+**API-key providers** — paste a key once, lives in `~/.config/watchmen/.env`
+(chmod 0600):
+
+| Provider | Where to get a key | Default model |
+|---|---|---|
+| **OpenRouter** | [openrouter.ai/keys](https://openrouter.ai/keys) — one key, many models, cheapest curator runs | `deepseek/deepseek-v4-flash` |
+| **OpenAI** | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — billed per-token against your org | `gpt-5-mini` |
+| **Anthropic** | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) — billed per-token against your org | `claude-haiku-4-5-20251001` |
+
+**OAuth providers (macOS, subscription-quota)** — no paste step. If you're
+already signed in via the upstream CLI, watchmen reuses that credential
+directly and bills against your existing subscription instead of your API
+credit:
+
+| Provider | How | Default model |
+|---|---|---|
+| **Claude Pro / Team / Max** (`claude-pro`) | Sign in to Claude Code (`claude` CLI). watchmen reads the OAuth token from the macOS keychain. **Billed against your Claude subscription quota.** | `claude-haiku-4-5-20251001` |
+| **ChatGPT** (`chatgpt`, experimental) | Sign in to Codex (`codex login`) with your ChatGPT account. watchmen reads the OAuth token from `~/.codex/auth.json` and calls the Codex Responses API. Restricted model whitelist. | `gpt-5.4-mini` |
+
+OAuth on Linux / Windows isn't yet supported (Claude Code stores
+credentials differently outside macOS); the OAuth providers don't appear
+in the picker there.
+
+Codex api-key bonus: if you've previously run `codex login --api-key
+sk-...`, the `openai` provider falls back to reusing that key — you don't
+need to paste it into watchmen separately.
+
+`WATCHMEN_PROVIDER` controls which provider is active. Shell env wins
+over the on-disk file, so CI runs that set `OPENROUTER_API_KEY=...`
+inline still just work.
 
 ## How it works
 
@@ -302,7 +347,7 @@ Claude Code shipped `/insights` in v2.1.117 (Apr 2026) — LLM-narrated HTML rep
 | **Scope** | Global, flat aggregate | Per-project bundles + cross-repo digest |
 | **Cadence** | On-demand, manual | Continuous via daemon |
 | **Provenance** | No traceable source | `watchmen why <skill>` → source sessions with adapter tags |
-| **Privacy** | LLM call on full corpus | Local storage; selected excerpts sent to OpenRouter for analysis |
+| **Privacy** | LLM call on full corpus | Local storage; selected excerpts sent to your chosen LLM provider (OpenRouter / OpenAI / Anthropic) for analysis |
 
 Both are useful. Run both.
 
@@ -314,7 +359,8 @@ Run `watchmen --help` for the grouped overview; `watchmen <command> -h` for per-
 # Get started
 watchmen init                    Interactive setup wizard
 watchmen doctor                  ✓/✗ check of API key, corpus, services
-watchmen settings api-key        Set or check the OpenRouter key
+watchmen settings api-key        Set or check the active provider's key (--provider <name> to target another)
+watchmen settings provider       Get or set the active LLM provider (openrouter/openai/anthropic)
 watchmen settings port [N]       Get or set the viewer port (default 8979)
 
 # Pipeline
@@ -367,7 +413,7 @@ watchmen {hooks,daemon,viewer,statusline} uninstall
 **Privacy.** Runtime state lives locally. Your session transcripts already live
 in `~/.claude/projects/` / `~/.codex/sessions/` — Anthropic and OpenAI put them
 there. watchmen reads them, builds a SQLite corpus on your disk, and sends only
-the chunks needed for analysis to OpenRouter (your chosen LLM provider) during
+the chunks needed for analysis to your chosen LLM provider (OpenRouter, OpenAI, or Anthropic) during
 analyst, curator, and insights runs. The artifacts it generates (`bundles/`,
 `analyses/`) stay on your disk.
 

@@ -141,7 +141,10 @@ def _linger_hint() -> str:
 # ─── Public commands (called via watchmen.service) ─────────────────────────
 
 
-def install_daemon(model: str = "deepseek/deepseek-v4-flash", interval: int = 7200, dry_run: bool = False) -> int:
+def install_daemon(model: str | None = None, interval: int = 7200, dry_run: bool = False) -> int:
+    if model is None:
+        from watchmen import config
+        model = config.default_model()
     uv = _which_uv() or "uv" if dry_run else _check_uv()
 
     unit_text = _unit(

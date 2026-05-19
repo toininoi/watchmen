@@ -39,7 +39,19 @@ DEFAULT_INTERVAL = 7200       # 2 hours between analyst checks
 DEFAULT_CURATOR_AGE = 86400   # 24 h — minimum age before stage 3 regen is allowed
 DEFAULT_FULL_CURATOR_HOURS = "2,14"  # full curator runs at 02:00 and 14:00 daily
 DEFAULT_FULL_CURATOR_MIN_AGE = 28800  # min 8 h between full curator runs per project
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+def _default_model() -> str:
+    """Daemon default model — pulled from active provider so the scheduled
+    runs follow whichever auth the user configured."""
+    from watchmen import config
+    return config.default_model()
+
+
+# Resolved at import time. The daemon binary boots once and stays running,
+# so the value is fixed for the life of the process — restart the daemon
+# after switching provider.
+DEFAULT_MODEL = _default_model()
+
+
 def _default_log_path() -> Path:
     """Platform-conventional location for the daemon's primary log file.
 
