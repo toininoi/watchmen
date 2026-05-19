@@ -33,6 +33,39 @@ _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 524}
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+def provider_banner(provider_name: str | None = None, model: str | None = None) -> str:
+    """One-line summary of the active provider — printed at analyst /
+    curator startup so the user can verify which endpoint and billing
+    mode the run will use. Important enough to be prominent: pre-OAuth
+    users assumed they were on subscription quota when they weren't, and
+    vice versa. Making the resolved provider + endpoint visible at
+    startup is the cheapest way to remove that ambiguity.
+
+    Example outputs:
+        provider=chatgpt · ChatGPT subscription · model=gpt-5.4-mini
+                · endpoint=chatgpt.com/backend-api/codex/responses
+        provider=openrouter · OpenRouter API credits · model=deepseek-v4-flash
+                · endpoint=openrouter.ai/api/v1/chat/completions
+
+    Returned plain (no Rich markup) so it works equally well via
+    `print()` and Rich's `console.print()`.
+    """
+    from watchmen import config
+
+    name = provider_name or config.active_provider()
+    try:
+        prov = _providers.get_provider(name)
+    except ValueError:
+        return f"provider={name} · model={model or '?'}"
+
+    model_str = model or config.default_model()
+    # Strip the scheme so it's compact + readable in terminals.
+    endpoint = prov.endpoint.replace("https://", "").replace("http://", "")
+    return (
+        f"provider={name} · {prov.quota_label} · model={model_str} · endpoint={endpoint}"
+    )
+
+
 def load_api_key(provider: str | None = None) -> str:
     """Resolve the API key (or OAuth access token) for the active (or
     named) provider.

@@ -422,6 +422,8 @@ def main() -> None:
     running_path = out_dir / "_running.md"
     prior = "" if args.reset else (running_path.read_text() if running_path.exists() else "")
 
+    from watchmen.agent import provider_banner
+    print(f"  {provider_banner(model=args.model)}", flush=True)
     print(f"Running on {len(days)} days, model={args.model}, output={out_dir}", flush=True)
     if prior:
         print(f"  resuming from prior thesis ({len(prior)} chars)", flush=True)
