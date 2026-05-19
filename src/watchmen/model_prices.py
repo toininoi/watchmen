@@ -1,6 +1,7 @@
 """Model pricing — fetch from OpenRouter API, cache locally, fall back to hardcoded defaults.
 
-OpenRouter's /models endpoint returns pricing as **per-token** strings.
+OpenRouter's /models endpoint returns pricing as **per-token** strings; we
+normalize those to our per-million convention before caching.
 We cache the response locally so we don't hammer the API on every metrics run.
 
 Cached data: ~/.watchmen/cache/model_prices.json (expires after 24h)
@@ -15,16 +16,6 @@ Lookup order in `price_for_model`:
      hardcode but OpenRouter knows about)
   3. family-pattern fallback (claude-opus-99-99 → current Opus pricing)
 
-TODO(phase-3 pricing cleanup):
-  - `_parse_pricing` stores OpenRouter prices verbatim (per-token), while
-    the hardcoded fallback + `turn_cost_usd` math assume per-million. Step 1
-    above means this currently has no observable effect (we never use API
-    pricing for any supported model), but step 2 will start using API pricing
-    once we start querying unknown models. Multiply by 1M in `_parse_pricing`
-    before that becomes a hot path.
-  - First metrics call blocks on a 30s API request when the cache is cold;
-    pre-warm the cache during `watchmen init` or move the fetch off the hot
-    path.
 """
 
 import json
@@ -45,6 +36,7 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 CACHE_DIR = WATCHMEN_HOME / "cache"
 CACHE_FILE = CACHE_DIR / "model_prices.json"
 CACHE_TTL = 24 * 60 * 60  # 24 hours
+API_TIMEOUT = 2.0
 
 # ─── Data structures ───────────────────────────────────────────────────────
 
@@ -191,18 +183,31 @@ def _normalize_model_name(api_name: str) -> str:
 def _parse_pricing(pricing: dict) -> Optional[ModelPricing]:
     """Parse pricing from OpenRouter response.
 
-    OpenRouter returns pricing as strings like "$3.00" per million tokens.
+    OpenRouter returns pricing as per-token strings; store per-million prices
+    so API-backed and hardcoded prices use the same convention.
     We need: input, cache_write_5m, cache_write_1h, cache_read, output.
     """
+    def per_million(value: object) -> float:
+        return float(str(value).replace("$", "").replace(",", "")) * 1_000_000
+
     try:
-        prompt = float(pricing.get("prompt", "0").replace("$", "").replace(",", ""))
-        completion = float(pricing.get("completion", "0").replace("$", "").replace(",", ""))
+        prompt = per_million(pricing.get("prompt", "0"))
+        completion = per_million(pricing.get("completion", "0"))
 
         # Cache pricing: OpenRouter returns separate fields
         # If not available, approximate: cache_write ≈ input, cache_read ≈ input * 0.1
-        cache_write_5m = float(pricing.get("cache_creation_input", pricing.get("cache_write", prompt)))
-        cache_write_1h = float(pricing.get("cache_creation_input_1h", cache_write_5m))
-        cache_read = float(pricing.get("cache_read_input", prompt * 0.1))
+        if "cache_creation_input" in pricing:
+            cache_write_5m = per_million(pricing["cache_creation_input"])
+        elif "cache_write" in pricing:
+            cache_write_5m = per_million(pricing["cache_write"])
+        else:
+            cache_write_5m = prompt
+        cache_write_1h = (
+            per_million(pricing["cache_creation_input_1h"])
+            if "cache_creation_input_1h" in pricing
+            else cache_write_5m
+        )
+        cache_read = per_million(pricing["cache_read_input"]) if "cache_read_input" in pricing else prompt * 0.1
 
         return ModelPricing(prompt, cache_write_5m, cache_write_1h, cache_read, completion)
     except (ValueError, TypeError):
@@ -216,7 +221,7 @@ def _fetch_from_api() -> Optional[PriceDatabase]:
         return None
 
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=API_TIMEOUT) as client:
             response = client.get(
                 OPENROUTER_MODELS_URL,
                 headers={"Authorization": f"Bearer {api_key}"},
