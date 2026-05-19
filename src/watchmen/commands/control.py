@@ -458,7 +458,7 @@ def cmd_reset(args) -> int:
 
     print(green(f"✓ reset {project_key}: {deleted_files} file(s), {deleted_dirs} dir(s) removed"))
     if has_state_markers:
-        print(dim(f"  cleared state.db markers"))
+        print(dim("  cleared state.db markers"))
 
     # Optional chained re-learn — convenience for the common case of
     # "wipe and immediately re-run from scratch".

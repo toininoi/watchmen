@@ -28,18 +28,34 @@ ENV_PATH = _env_path()
 # overrides the auto-detect-from-which-key-is-present fallback below.
 PROVIDER_ENV_VAR = "WATCHMEN_PROVIDER"
 
-# Each provider stores its key in its own env var so a machine can hold
-# multiple keys simultaneously and switch active provider without re-pasting.
+# Each env-var-based provider stores its key in its own env var so a
+# machine can hold multiple keys simultaneously and switch active
+# provider without re-pasting.
 PROVIDER_KEY_VARS: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
 }
 
-# Order matters for the auto-detect path in `active_provider()`: prefer
-# OpenRouter when present (existing-user backward compat), then OpenAI,
-# then Anthropic.
-_PROVIDER_PRIORITY = ("openrouter", "openai", "anthropic")
+# OAuth providers don't take pasted keys — they discover credentials from
+# Claude Code's keychain entry / Codex's auth.json. Kept here so
+# `active_provider()` can detect them and `provider_key()` knows to
+# delegate to the provider's `resolve_api_key()` hook instead of reading
+# an env var.
+OAUTH_PROVIDERS: tuple[str, ...] = ("claude-pro", "chatgpt")
+
+# Combined set of all known provider names. Used to validate
+# WATCHMEN_PROVIDER overrides — an unknown value silently falls back to
+# auto-detect rather than crashing every command.
+ALL_PROVIDERS: tuple[str, ...] = tuple(PROVIDER_KEY_VARS) + OAUTH_PROVIDERS
+
+# Order matters for the auto-detect path in `active_provider()`:
+# - Env-var-based providers come first because they represent explicit
+#   user intent (they pasted a key).
+# - OAuth providers come last because their presence is "ambient" (the
+#   user installed Claude Code / Codex for unrelated reasons, not
+#   necessarily to use them via watchmen).
+_PROVIDER_PRIORITY = ("openrouter", "openai", "anthropic", "claude-pro", "chatgpt")
 
 # Bumped 8888 → 8979 in 0.2: 8888 collides with Jupyter, which a lot of
 # data-science users have permanently bound. 8979 is uncommon, mnemonic
@@ -117,26 +133,61 @@ def active_provider() -> str:
 
     Resolution order:
     1. `WATCHMEN_PROVIDER` env / `.env` — explicit selection, takes precedence.
-    2. First provider with a configured key, in priority order
-       (openrouter > openai > anthropic). Keeps existing OpenRouter-only
-       installs working without re-running onboard.
-    3. "openrouter" as the absolute default.
+       Both env-var-based providers (openrouter/openai/anthropic) and
+       OAuth providers (claude-pro/chatgpt) are accepted here.
+    2. First env-var-based provider with a configured key, in priority
+       order (openrouter > openai > anthropic). Keeps existing
+       OpenRouter-only installs working without re-running onboard.
+    3. First OAuth provider with a credential available on disk, in
+       priority order (claude-pro > chatgpt). "Ambient" auth — the user
+       installed Claude Code / Codex for unrelated reasons, so OAuth
+       lands here only when no explicit env-var key was set.
+    4. "openrouter" as the absolute default.
     """
     explicit = read_env_var(PROVIDER_ENV_VAR)
-    if explicit and explicit in PROVIDER_KEY_VARS:
+    if explicit and explicit in ALL_PROVIDERS:
         return explicit
-    for name in _PROVIDER_PRIORITY:
+    # Env-var-based providers — explicit user intent
+    for name in PROVIDER_KEY_VARS:
         if read_env_var(PROVIDER_KEY_VARS[name]):
+            return name
+    # OAuth providers — discovered credentials
+    for name in OAUTH_PROVIDERS:
+        if _has_oauth_credential(name):
             return name
     return "openrouter"
 
 
+def _has_oauth_credential(provider: str) -> bool:
+    """Cheap presence check for an OAuth provider's credential. Imports
+    providers lazily to avoid a config→providers→config import cycle in
+    some test orderings."""
+    try:
+        from watchmen import providers as _providers
+        prov = _providers.get_provider(provider)
+        return prov.resolve_api_key(None) is not None
+    except Exception:
+        # A missing keychain / malformed auth.json / unsupported platform
+        # should never crash the resolver — auto-detect just skips this
+        # provider and tries the next.
+        return False
+
+
 def provider_key(provider: str) -> str | None:
-    """API key configured for `provider`, or None if unset."""
-    var = PROVIDER_KEY_VARS.get(provider)
-    if not var:
-        return None
-    return read_env_var(var)
+    """API key (or OAuth access token) for `provider`, or None if unset.
+
+    For env-var-based providers, reads `PROVIDER_KEY_VARS[provider]`.
+    For OAuth providers, delegates to the provider's `resolve_api_key()`
+    hook (reads the keychain / auth.json on demand)."""
+    if provider in PROVIDER_KEY_VARS:
+        return read_env_var(PROVIDER_KEY_VARS[provider])
+    if provider in OAUTH_PROVIDERS:
+        try:
+            from watchmen import providers as _providers
+            return _providers.get_provider(provider).resolve_api_key(None)
+        except Exception:
+            return None
+    return None
 
 
 def set_active_provider(provider: str) -> Path:
@@ -148,7 +199,19 @@ def set_active_provider(provider: str) -> Path:
 
 
 def set_provider_key(provider: str, key: str) -> Path:
-    """Persist an API key for `provider` to the global env file."""
+    """Persist an API key for `provider` to the global env file.
+
+    OAuth providers (claude-pro / chatgpt) don't take pasted keys —
+    their credential lives in Claude Code's keychain entry / Codex's
+    auth.json. Calling set_provider_key() on those raises so the CLI
+    can surface a clear "use `claude login` / `codex login` instead"
+    message rather than silently writing a junk env var."""
+    if provider in OAUTH_PROVIDERS:
+        raise ValueError(
+            f"{provider!r} uses OAuth — its credential is sourced from "
+            f"{'Claude Code (`claude login`)' if provider == 'claude-pro' else 'Codex (`codex login`)'}. "
+            f"There is no API key to paste."
+        )
     var = PROVIDER_KEY_VARS.get(provider)
     if not var:
         raise ValueError(f"unknown provider: {provider!r}")

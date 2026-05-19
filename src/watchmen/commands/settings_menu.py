@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import sys
 from enum import Enum
-from typing import Callable
 
 from rich.console import Console
 
@@ -211,6 +210,12 @@ def _render_provider_status(console: Console) -> None:
         marker = "[green]✓[/] set" if key else "[dim]—[/] not set"
         active_marker = "[bold cyan]→[/]" if name == active else " "
         table.add_row(active_marker, name, marker, f"[dim]{env_var}[/]")
+    for name in config.OAUTH_PROVIDERS:
+        available = config.provider_key(name) is not None
+        marker = "[green]✓[/] OAuth" if available else "[dim]—[/] not signed in"
+        source = "Claude Code keychain" if name == "claude-pro" else "Codex auth.json"
+        active_marker = "[bold cyan]→[/]" if name == active else " "
+        table.add_row(active_marker, name, marker, f"[dim]{source}[/]")
     console.print(table)
     console.print()
 
@@ -220,11 +225,15 @@ def _switch_provider(console: Console) -> None:
 
     active = config.active_provider()
     choices = []
-    for name in config.PROVIDER_KEY_VARS:
-        key_set = bool(config.provider_key(name))
-        label = f"{name} {'(key set)' if key_set else '(no key — set one first)'}"
-        # Don't disable no-key providers — we want the user to be able to
-        # switch first and add a key after; we just warn after the fact.
+    for name in config.ALL_PROVIDERS:
+        cred = config.provider_key(name)
+        if name in config.OAUTH_PROVIDERS:
+            suffix = "(OAuth ready)" if cred else "(not signed in — `claude` / `codex login` first)"
+        else:
+            suffix = "(key set)" if cred else "(no key — set one first)"
+        label = f"{name} {suffix}"
+        # Don't disable empty-credential providers — let the user switch
+        # first and add a credential after; we just warn after the fact.
         choices.append(questionary.Choice(label, value=name, checked=(name == active)))
     choices += [questionary.Separator(), questionary.Choice("Cancel", value=_CANCEL)]
 
@@ -239,10 +248,17 @@ def _switch_provider(console: Console) -> None:
 
     config.set_active_provider(new_provider)
     if not config.provider_key(new_provider):
-        console.print(
-            f"[yellow]![/] active provider → [bold]{new_provider}[/] "
-            f"(no key configured yet — set one with the menu's next option)"
-        )
+        if new_provider in config.OAUTH_PROVIDERS:
+            login_cmd = "claude" if new_provider == "claude-pro" else "codex login"
+            console.print(
+                f"[yellow]![/] active provider → [bold]{new_provider}[/] "
+                f"(sign in with `{login_cmd}` to enable)"
+            )
+        else:
+            console.print(
+                f"[yellow]![/] active provider → [bold]{new_provider}[/] "
+                f"(no key configured yet — set one with the menu's next option)"
+            )
     else:
         console.print(f"[green]✓[/] active provider → [bold]{new_provider}[/]")
 
@@ -251,10 +267,23 @@ def _set_api_key(console: Console) -> None:
     import questionary
 
     choices = []
+    # Only env-var-based providers are listed here — OAuth credentials are
+    # managed by `claude` / `codex login`, not by pasting a key.
     for name in config.PROVIDER_KEY_VARS:
         key = config.provider_key(name)
         suffix = "(set)" if key else "(unset)"
         choices.append(questionary.Choice(f"{name} {suffix}", value=name))
+    # Show OAuth providers as informational-only entries so the user doesn't
+    # wonder why they're missing from the picker.
+    for name in config.OAUTH_PROVIDERS:
+        cred = config.provider_key(name)
+        suffix = "OAuth ready" if cred else "not signed in"
+        login_cmd = "claude" if name == "claude-pro" else "codex login"
+        choices.append(questionary.Choice(
+            f"{name} ({suffix}, use `{login_cmd}` to manage)",
+            value=name,
+            disabled="OAuth — no key to set",
+        ))
     choices += [questionary.Separator(), questionary.Choice("Cancel", value=_CANCEL)]
 
     target = questionary.select(
@@ -263,6 +292,9 @@ def _set_api_key(console: Console) -> None:
         use_indicator=True,
     ).ask()
     if target is None or target == _CANCEL:
+        return
+    if target in config.OAUTH_PROVIDERS:
+        # Disabled entries shouldn't ever return, but guard anyway.
         return
 
     new_key = questionary.password(
@@ -296,7 +328,7 @@ def _set_api_key(console: Console) -> None:
     ).ask()
     if save_anyway:
         config.set_provider_key(target, new_key)
-        console.print(f"[yellow]![/] saved despite rejection")
+        console.print("[yellow]![/] saved despite rejection")
 
 
 # ─── Default model ─────────────────────────────────────────────────────────
@@ -386,8 +418,8 @@ def _port_page(console: Console, breadcrumb: list[str]) -> _Nav:
                     from watchmen import service
                     if service.is_viewer_loaded():
                         console.print(
-                            f"  [yellow]![/] viewer is loaded on the old port — "
-                            f"run [bold]watchmen viewer install[/] to move it"
+                            "  [yellow]![/] viewer is loaded on the old port — "
+                            "run [bold]watchmen viewer install[/] to move it"
                         )
                 except Exception:
                     pass
@@ -508,7 +540,7 @@ def _project_page(console: Console, breadcrumb: list[str], project_key: str) -> 
             ).ask()
             if new_notes is not None:
                 state.update_project(project_key, notes=new_notes.strip() or None)
-                console.print(f"[green]✓[/] notes updated")
+                console.print("[green]✓[/] notes updated")
 
 
 # ─── Header rendering ──────────────────────────────────────────────────────

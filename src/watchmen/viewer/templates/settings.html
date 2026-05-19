@@ -130,38 +130,52 @@
   </div>
 </div>
 
-<!-- Per-provider key forms — one card each so the user can see which
-     keys exist on disk at a glance and update any one without touching
-     the others. -->
+<!-- Per-provider credential cards — one card each so the user can see which
+     credentials exist on disk at a glance and update any one without touching
+     the others. Env-var-based providers get a password form; OAuth providers
+     are read-only (their credential comes from `claude` / `codex login`). -->
 {% for p in providers %}
 <div class="wm-card mb-4">
   <div class="flex items-center justify-between mb-1">
     <div class="text-xs text-gray-500 uppercase tracking-wide">
-      {{ p.display_name }} API key
+      {{ p.display_name }} {% if p.auth == "oauth" %}OAuth{% else %}API key{% endif %}
       {% if p.active %}<span class="ml-2 wm-pill wm-pill-ok">active</span>{% endif %}
     </div>
-    <code class="text-[10px] text-gray-400">{{ p.env_var }}</code>
+    {% if p.env_var %}<code class="text-[10px] text-gray-400">{{ p.env_var }}</code>{% endif %}
   </div>
   <div class="mb-3">
     {% if p.set %}
-    <span class="font-mono text-sm text-gray-700">{{ p.masked }}</span>
-    <span class="wm-pill wm-pill-ok ml-2">set</span>
+      {% if p.masked %}<span class="font-mono text-sm text-gray-700">{{ p.masked }}</span>{% endif %}
+      <span class="wm-pill wm-pill-ok ml-2">{% if p.auth == "oauth" %}OAuth ready{% else %}set{% endif %}</span>
     {% else %}
-    <span class="text-sm text-gray-500">not set</span>
-    <span class="wm-pill wm-pill-fail ml-2">missing</span>
+      <span class="text-sm text-gray-500">{% if p.auth == "oauth" %}not signed in{% else %}not set{% endif %}</span>
+      <span class="wm-pill wm-pill-fail ml-2">missing</span>
     {% endif %}
   </div>
-  <form method="post" action="/settings/api-key" class="flex gap-2 items-center">
-    <input type="hidden" name="provider" value="{{ p.name }}">
-    <input type="password" name="value" required
-           placeholder="paste {{ p.name }} API key"
-           autocomplete="off"
-           class="flex-1 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
-    <button type="submit"
-            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
-      Save
-    </button>
-  </form>
+  {% if p.auth == "oauth" %}
+    <div class="text-sm text-gray-600">
+      Credential sourced from <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.source_hint }}</code>.
+      {% if not p.set %}
+        Run <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.login_cmd }}</code> in your shell to sign in,
+        then reload this page.
+      {% else %}
+        Token rotates automatically; nothing to update here.
+        Run <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.login_cmd }}</code> if you need to re-authenticate.
+      {% endif %}
+    </div>
+  {% else %}
+    <form method="post" action="/settings/api-key" class="flex gap-2 items-center">
+      <input type="hidden" name="provider" value="{{ p.name }}">
+      <input type="password" name="value" required
+             placeholder="paste {{ p.name }} API key"
+             autocomplete="off"
+             class="flex-1 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+      <button type="submit"
+              class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+        Save
+      </button>
+    </form>
+  {% endif %}
   <div class="text-xs text-gray-500 mt-2">
     Default model on this provider:
     <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.default_model }}</code>

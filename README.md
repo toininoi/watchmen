@@ -143,7 +143,7 @@ You then get `/skills brief` (or `$brief`) inside Codex with the same workspace 
 
 - macOS or Linux (Windows: WSL works; native untested)
 - [`uv`](https://github.com/astral-sh/uv) (Python toolchain) — Python 3.11+
-- An API key for **one** of: OpenRouter, OpenAI, or Anthropic
+- A credential for **one** of the providers below
 - At least one supported coding agent in active use
 
 Default model per provider: `deepseek/deepseek-v4-flash` (OpenRouter) ·
@@ -153,13 +153,16 @@ per command via `--model`, globally via `WATCHMEN_DEFAULT_MODEL`.
 ### Provider auth
 
 Pick whichever account you already pay for — `watchmen init` walks you through
-it on first run. Switch anytime without losing keys for the others:
+it on first run. Switch anytime without losing other credentials:
 
 ```bash
-watchmen settings provider                           # status: which provider is active, which keys are set
-watchmen settings provider openai                    # switch active provider
-watchmen settings api-key --provider anthropic       # set a key (live-validated against the provider's API)
+watchmen settings provider                            # status: active provider + per-provider credential state
+watchmen settings provider claude-pro                 # switch active provider (incl. OAuth ones)
+watchmen settings api-key --provider anthropic        # set an API key (live-validated against the provider's API)
 ```
+
+**API-key providers** — paste a key once, lives in `~/.config/watchmen/.env`
+(chmod 0600):
 
 | Provider | Where to get a key | Default model |
 |---|---|---|
@@ -167,11 +170,27 @@ watchmen settings api-key --provider anthropic       # set a key (live-validated
 | **OpenAI** | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — billed per-token against your org | `gpt-5-mini` |
 | **Anthropic** | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) — billed per-token against your org | `claude-haiku-4-5-20251001` |
 
-Keys live in `~/.config/watchmen/.env` (chmod 0600). Each provider has its
-own env var (`OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`),
-and `WATCHMEN_PROVIDER` picks which one is active. The shell env wins over
-the on-disk file, so CI runs that set `OPENROUTER_API_KEY=...` inline still
-just work.
+**OAuth providers (macOS, subscription-quota)** — no paste step. If you're
+already signed in via the upstream CLI, watchmen reuses that credential
+directly and bills against your existing subscription instead of your API
+credit:
+
+| Provider | How | Default model |
+|---|---|---|
+| **Claude Pro / Team / Max** (`claude-pro`) | Sign in to Claude Code (`claude` CLI). watchmen reads the OAuth token from the macOS keychain. **Billed against your Claude subscription quota.** | `claude-haiku-4-5-20251001` |
+| **ChatGPT** (`chatgpt`, experimental) | Sign in to Codex (`codex login`) with your ChatGPT account. watchmen reads the OAuth token from `~/.codex/auth.json` and calls the Codex Responses API. Restricted model whitelist. | `gpt-5.4-mini` |
+
+OAuth on Linux / Windows isn't yet supported (Claude Code stores
+credentials differently outside macOS); the OAuth providers don't appear
+in the picker there.
+
+Codex api-key bonus: if you've previously run `codex login --api-key
+sk-...`, the `openai` provider falls back to reusing that key — you don't
+need to paste it into watchmen separately.
+
+`WATCHMEN_PROVIDER` controls which provider is active. Shell env wins
+over the on-disk file, so CI runs that set `OPENROUTER_API_KEY=...`
+inline still just work.
 
 ## How it works
 

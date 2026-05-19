@@ -740,10 +740,35 @@ def cmd_settings_api_key(args) -> int:
     console = Console()
 
     provider_name = (getattr(args, "provider", None) or config.active_provider()).lower()
-    if provider_name not in config.PROVIDER_KEY_VARS:
+    if provider_name not in config.ALL_PROVIDERS:
         console.print(f"[red]✗[/] unknown provider: {provider_name!r}  "
-                      f"[dim](valid: {', '.join(config.PROVIDER_KEY_VARS)})[/]")
+                      f"[dim](valid: {', '.join(config.ALL_PROVIDERS)})[/]")
         return 1
+
+    # OAuth providers source credentials from Claude Code's keychain / Codex
+    # auth.json — there's nothing to paste. Surface the live status from the
+    # provider's probe + an actionable hint instead of falling through to
+    # the "enter key" prompt.
+    if provider_name in config.OAUTH_PROVIDERS:
+        from watchmen import providers as _providers
+        prov = _providers.get_provider(provider_name)
+        token = prov.resolve_api_key(None)
+        if not token:
+            login_cmd = "claude" if provider_name == "claude-pro" else "codex login"
+            console.print(f"[red]✗[/] [{provider_name}] no OAuth credential found")
+            console.print(f"  [dim]sign in with `{login_cmd}` on this machine, then re-run[/]")
+            return 1
+        res = prov.probe(token)
+        marker = "[green]✓[/]" if res.ok else "[red]✗[/]"
+        console.print(f"{marker} [{provider_name}] {res.detail}")
+        if args.check or args.set:
+            # --set is meaningless for OAuth (no key to set); surface the
+            # mismatch directly so users don't think they typed something wrong.
+            if args.set:
+                console.print(f"[dim]note: {provider_name} uses OAuth — there is no key to paste. "
+                              f"Use `claude` / `codex login` to manage the credential.[/]")
+            return 0 if res.ok else 1
+        return 0 if res.ok else 1
 
     current = _read_current_api_key(provider_name)
     ok = False
@@ -798,37 +823,49 @@ def cmd_settings_provider(args) -> int:
     console = Console()
 
     if not getattr(args, "value", None):
-        # Status view: show current active + all configured keys.
+        # Status view: show current active + per-provider credential status.
         active = config.active_provider()
         console.print(f"active provider: [bold cyan]{active}[/]")
         console.print()
         table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2, 0, 0))
         table.add_column("provider")
-        table.add_column("key")
-        table.add_column("env var", style="dim")
-        for name in config.PROVIDER_KEY_VARS:
+        table.add_column("credential")
+        table.add_column("source", style="dim")
+        # Env-var-based providers first
+        for name, env_var in config.PROVIDER_KEY_VARS.items():
             key = config.provider_key(name)
             marker = "[green]set[/]" if key else "[dim]—[/]"
             active_marker = "[bold cyan]→[/] " if name == active else "  "
-            table.add_row(f"{active_marker}{name}", marker, config.PROVIDER_KEY_VARS[name])
+            table.add_row(f"{active_marker}{name}", marker, env_var)
+        # OAuth providers — credential comes from elsewhere on disk
+        for name in config.OAUTH_PROVIDERS:
+            available = config.provider_key(name) is not None
+            marker = "[green]OAuth[/]" if available else "[dim]not signed in[/]"
+            source = "Claude Code keychain" if name == "claude-pro" else "Codex auth.json"
+            active_marker = "[bold cyan]→[/] " if name == active else "  "
+            table.add_row(f"{active_marker}{name}", marker, source)
         console.print(table)
         console.print()
-        console.print(f"[dim]set with: watchmen settings provider <{'/'.join(config.PROVIDER_KEY_VARS)}>[/]")
-        console.print(f"[dim]set a key: watchmen settings api-key --provider <name>[/]")
+        console.print(f"[dim]set with: watchmen settings provider <{'/'.join(config.ALL_PROVIDERS)}>[/]")
+        console.print("[dim]set a key: watchmen settings api-key --provider <name> (OAuth providers don't need this)[/]")
         return 0
 
     new_provider = args.value.lower().strip()
-    if new_provider not in config.PROVIDER_KEY_VARS:
+    if new_provider not in config.ALL_PROVIDERS:
         console.print(f"[red]✗[/] unknown provider: {new_provider!r}  "
-                      f"[dim](valid: {', '.join(config.PROVIDER_KEY_VARS)})[/]")
+                      f"[dim](valid: {', '.join(config.ALL_PROVIDERS)})[/]")
         return 1
 
-    # Warn if switching to a provider that has no key configured yet — the
-    # next analyst/curator run will fail with a clear error, but flagging here
-    # saves the user one round trip.
+    # Warn if switching to a provider with no credential available — the
+    # next analyst/curator run will fail with a clear error, but flagging
+    # here saves the user one round trip.
     if not config.provider_key(new_provider):
-        console.print(f"[yellow]![/] no {new_provider} key configured yet")
-        console.print(f"  set one with: [bold]watchmen settings api-key --provider {new_provider}[/]")
+        console.print(f"[yellow]![/] no {new_provider} credential available yet")
+        if new_provider in config.OAUTH_PROVIDERS:
+            login_cmd = "claude" if new_provider == "claude-pro" else "codex login"
+            console.print(f"  sign in with [bold]{login_cmd}[/], then re-run")
+        else:
+            console.print(f"  set one with: [bold]watchmen settings api-key --provider {new_provider}[/]")
 
     path = config.set_active_provider(new_provider)
     console.print(f"[green]✓[/] active provider → [bold]{new_provider}[/]")
@@ -885,8 +922,8 @@ def cmd_settings_model(args) -> int:
         table.add_row(f"{marker}{name}", _providers.get_provider(name).default_model)
     console.print(table)
     console.print()
-    console.print(f"[dim]override with: watchmen settings model <name>[/]")
-    console.print(f"[dim]clear with:    watchmen settings model --clear[/]")
+    console.print("[dim]override with: watchmen settings model <name>[/]")
+    console.print("[dim]clear with:    watchmen settings model --clear[/]")
     return 0
 
 
@@ -940,14 +977,19 @@ def cmd_doctor(args) -> int:
             fails += 1
         table.add_row(label, mark, detail)
 
-    # 1. Active provider's API key
+    # 1. Active provider's credential
     from watchmen import providers as _providers
     active_provider = config.active_provider()
-    provider_label = f"{_providers.display_name(active_provider)} key"
-    current = _read_current_api_key(active_provider)
+    is_oauth = active_provider in config.OAUTH_PROVIDERS
+    provider_label = f"{_providers.display_name(active_provider)} {'OAuth' if is_oauth else 'key'}"
+    current = config.provider_key(active_provider)
     if not current:
-        fix_hint = f"run `watchmen settings api-key --provider {active_provider}`"
-        row(provider_label, False, f"not set — {fix_hint}")
+        if is_oauth:
+            login_cmd = "claude" if active_provider == "claude-pro" else "codex login"
+            row(provider_label, False, f"no credential — run `{login_cmd}` to sign in")
+        else:
+            fix_hint = f"run `watchmen settings api-key --provider {active_provider}`"
+            row(provider_label, False, f"not set — {fix_hint}")
     else:
         ok, info = _check_provider_key(active_provider, current)
         row(provider_label, ok, info)
@@ -1452,8 +1494,10 @@ def main(argv: list[str] | None = None) -> int:
     p_set.add_argument("value")
     p_set.set_defaults(func=cmd_settings_set)
     p_apikey = settings_sub.add_parser("api-key", help="set or check the API key for an LLM provider (live-validated)")
-    p_apikey.add_argument("--provider", choices=tuple(config.PROVIDER_KEY_VARS),
-                          help="which provider's key (default: active provider)")
+    p_apikey.add_argument("--provider", choices=config.ALL_PROVIDERS,
+                          help="which provider's credential to set or check (default: active provider). "
+                               "OAuth providers (claude-pro, chatgpt) are check-only — their credential "
+                               "comes from `claude` / `codex login`.")
     p_apikey.add_argument("--check", action="store_true", help="check current key without changing it")
     p_apikey.add_argument("--set", metavar="KEY", help="set a key non-interactively (for scripting)")
     p_apikey.set_defaults(func=cmd_settings_api_key)

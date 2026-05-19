@@ -6,6 +6,41 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — OAuth credential reuse: Claude Pro + ChatGPT subscriptions
+- **Claude Pro / Team / Max via Claude Code OAuth** — new `claude-pro`
+  provider reads the OAuth token Claude Code stores in the macOS keychain
+  (`Claude Code-credentials` entry) and posts to `api.anthropic.com/v1/messages`
+  with the `anthropic-beta: oauth-2025-04-20` header. **Calls are billed
+  against your Claude subscription quota, not per-token API credit.**
+  No paste step — token rotation handled by Claude Code itself.
+- **ChatGPT subscription via Codex OAuth (experimental)** — new `chatgpt`
+  provider reads `~/.codex/auth.json`'s ChatGPT-account OAuth token and
+  posts to the Codex Responses API at `chatgpt.com/backend-api/codex/responses`.
+  Full Responses API ↔ chat-completions translator + SSE event stream
+  aggregator so the agent loop stays provider-agnostic. Models: `gpt-5.5`,
+  `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`. Marked
+  experimental because the model whitelist is undocumented and may
+  change without notice.
+- **Codex api-key reuse** — when the `openai` provider has no
+  `OPENAI_API_KEY` set in env / .env, it falls back to reading the
+  `OPENAI_API_KEY` field from `~/.codex/auth.json` (api-key mode users).
+  No re-pasting needed if you already configured Codex.
+- New `watchmen.credentials` package with `claude_code` + `codex` readers.
+  Both are macOS-aware and degrade gracefully (return None) on Linux /
+  fresh installs without the upstream CLI.
+- Provider abstraction extended with `resolve_api_key()` (credential
+  discovery hook) and `custom_transport`/`call()` (lets streaming
+  providers own their HTTP round trip). Adding a fourth OAuth-flavored
+  provider is one subclass + the credential reader.
+- Settings surface across CLI / interactive menu / web UI now distinguishes
+  env-var-based providers (key form) from OAuth providers (read-only
+  status + login hint). `watchmen doctor` probes OAuth credentials via
+  local metadata (expiry, scopes) rather than burning subscription
+  quota on a network probe.
+- Onboard wizard auto-detects local Claude Code / Codex installations
+  and surfaces the OAuth options when present, defaulting to
+  `claude-pro` if available (zero-paste setup).
+
 ### Added — `watchmen reset <project>` for from-scratch re-curates
 - New command wipes a project's analyses + curated bundle (CLAUDE.md,
   AGENTS.md, skills/, _candidates.json, _curation_log.md, _index.md,

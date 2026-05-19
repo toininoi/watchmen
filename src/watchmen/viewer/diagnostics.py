@@ -61,22 +61,31 @@ def run_checks(*, check_openrouter: bool = True) -> dict:
     whichever provider is active, not just OpenRouter)."""
     rows: list[dict] = []
 
-    # 1. Active provider's API key
+    # 1. Active provider's credential (env-var key or OAuth)
     from watchmen import providers as _providers
     active = config.active_provider()
     current = config.provider_key(active)
-    label = f"{_providers.display_name(active)} key"
-    fix_hint = f"Set the API key in /settings, or run `watchmen settings api-key --provider {active}`."
+    is_oauth = active in config.OAUTH_PROVIDERS
+    label = f"{_providers.display_name(active)} {'OAuth' if is_oauth else 'key'}"
     if not current:
-        rows.append(_row(label, "fail", "not set", fix=fix_hint))
+        if is_oauth:
+            login_cmd = "claude" if active == "claude-pro" else "codex login"
+            rows.append(_row(label, "fail", "no credential", fix=f"Sign in with `{login_cmd}` on this machine."))
+        else:
+            rows.append(_row(label, "fail", "not set",
+                             fix=f"Set the API key in /settings, or run `watchmen settings api-key --provider {active}`."))
     elif not check_openrouter:
         rows.append(_row(label, "ok", "set (HTTP probe skipped)"))
     else:
         ok, info = _check_provider_key(active, current)
-        rows.append(_row(
-            label, "ok" if ok else "fail", info,
-            fix=None if ok else fix_hint,
-        ))
+        fix_hint = None
+        if not ok:
+            if is_oauth:
+                login_cmd = "claude" if active == "claude-pro" else "codex login"
+                fix_hint = f"Sign in again with `{login_cmd}`."
+            else:
+                fix_hint = f"Update in /settings or run `watchmen settings api-key --provider {active}`."
+        rows.append(_row(label, "ok" if ok else "fail", info, fix=fix_hint))
 
     # 2. corpus.db
     if not CORPUS_DB.exists():
@@ -279,6 +288,28 @@ def get_settings() -> dict:
             "set": bool(key),
             "masked": _mask(key),
             "default_model": _providers.get_provider(name).default_model,
+            "auth": "key",  # template uses this to pick rendering path
+            "source_hint": None,
+        })
+    for name in config.OAUTH_PROVIDERS:
+        cred = config.provider_key(name)
+        login_cmd = "claude" if name == "claude-pro" else "codex login"
+        source_hint = (
+            "Claude Code keychain (macOS only)"
+            if name == "claude-pro" else
+            "Codex auth.json (~/.codex/auth.json)"
+        )
+        providers_view.append({
+            "name": name,
+            "display_name": _providers.display_name(name),
+            "env_var": None,
+            "active": name == active,
+            "set": bool(cred),
+            "masked": None,
+            "default_model": _providers.get_provider(name).default_model,
+            "auth": "oauth",
+            "source_hint": source_hint,
+            "login_cmd": login_cmd,
         })
     model_override = config.read_env_var("WATCHMEN_DEFAULT_MODEL")
     return {
