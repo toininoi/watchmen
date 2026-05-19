@@ -44,6 +44,14 @@ class _Nav(str, Enum):
     QUIT = "quit"   # exit the menu entirely
 
 
+# Sentinel values for menu Choice entries. Questionary 2.x treats
+# `Choice("Back", value=None)` as "use the title as the value", which would
+# leak the literal string "Back" into downstream code that expects a real
+# selection. Use unambiguous sentinels instead.
+_BACK = "__back__"
+_CANCEL = "__cancel__"
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────
 
 
@@ -218,7 +226,7 @@ def _switch_provider(console: Console) -> None:
         # Don't disable no-key providers — we want the user to be able to
         # switch first and add a key after; we just warn after the fact.
         choices.append(questionary.Choice(label, value=name, checked=(name == active)))
-    choices += [questionary.Separator(), questionary.Choice("Cancel", value=None)]
+    choices += [questionary.Separator(), questionary.Choice("Cancel", value=_CANCEL)]
 
     new_provider = questionary.select(
         "Choose active provider:",
@@ -226,7 +234,7 @@ def _switch_provider(console: Console) -> None:
         use_indicator=True,
     ).ask()
 
-    if not new_provider or new_provider == active:
+    if new_provider is None or new_provider == _CANCEL or new_provider == active:
         return
 
     config.set_active_provider(new_provider)
@@ -247,14 +255,14 @@ def _set_api_key(console: Console) -> None:
         key = config.provider_key(name)
         suffix = "(set)" if key else "(unset)"
         choices.append(questionary.Choice(f"{name} {suffix}", value=name))
-    choices += [questionary.Separator(), questionary.Choice("Cancel", value=None)]
+    choices += [questionary.Separator(), questionary.Choice("Cancel", value=_CANCEL)]
 
     target = questionary.select(
         "Which provider's key?",
         choices=choices,
         use_indicator=True,
     ).ask()
-    if not target:
+    if target is None or target == _CANCEL:
         return
 
     new_key = questionary.password(
@@ -424,14 +432,14 @@ def _projects_root_page(console: Console, breadcrumb: list[str]) -> _Nav:
                 f"{p['project_key']:<30} · {enabled:<7} · threshold {thr}",
                 value=p["project_key"],
             ))
-        choices += [questionary.Separator(), questionary.Choice("Back", value=None)]
+        choices += [questionary.Separator(), questionary.Choice("Back", value=_BACK)]
 
         target = questionary.select(
             "Choose project:",
             choices=choices,
             use_indicator=True,
         ).ask()
-        if not target:
+        if target is None or target == _BACK:
             return _Nav.BACK
 
         breadcrumb.append(target)
@@ -464,7 +472,7 @@ def _project_page(console: Console, breadcrumb: list[str], project_key: str) -> 
             questionary.Choice(f"Skip overlapping skills  · {'yes' if skip_overlap else 'no'}", value="skip_overlap"),
             questionary.Choice(f"Notes                    · {notes or '(empty)'}",               value="notes"),
             questionary.Separator(),
-            questionary.Choice("Back", value=None),
+            questionary.Choice("Back", value=_BACK),
         ]
 
         choice = questionary.select(
@@ -472,7 +480,7 @@ def _project_page(console: Console, breadcrumb: list[str], project_key: str) -> 
             choices=choices,
             use_indicator=True,
         ).ask()
-        if not choice:
+        if choice is None or choice == _BACK:
             return _Nav.BACK
 
         if choice == "enabled":

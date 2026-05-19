@@ -403,6 +403,27 @@ def test_clear_env_var_returns_false_for_missing_key(tmp_path, monkeypatch):
     assert config.read_env_var("OTHER") is None
 
 
+def test_settings_menu_back_and_cancel_never_pass_through_as_data():
+    """Regression: questionary 2.x interprets `Choice("Back", value=None)`
+    as "use the title as the value", so picking Back leaked the literal
+    string "Back" into downstream code that expected a project key /
+    provider name. The fix uses explicit sentinel values; this test scans
+    the source to make sure no future `value=None` slips back in on a
+    nav-action Choice."""
+    from pathlib import Path as _Path
+    src = (_Path(__file__).parent.parent / "src" / "watchmen" / "commands" / "settings_menu.py").read_text()
+    # Strip line comments before scanning so the regression-explainer
+    # comment in the module doesn't trip the check.
+    code_only = "\n".join(
+        line.split("#", 1)[0] for line in src.splitlines()
+    )
+    assert 'value=None' not in code_only, (
+        "settings_menu has a Choice with value=None — questionary treats "
+        "that as 'use title as value', which leaks the literal nav-label "
+        "(e.g. 'Back') into downstream handlers. Use _BACK / _CANCEL instead."
+    )
+
+
 def test_interactive_settings_falls_back_in_non_tty(monkeypatch, capsys):
     """Running `watchmen settings` with stdin/stdout piped (CI, scripts)
     must NOT block on questionary — instead print the flat-subcommand
