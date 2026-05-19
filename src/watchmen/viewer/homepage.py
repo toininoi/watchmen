@@ -322,14 +322,21 @@ def _treatment_date_for_project(project_key: str) -> datetime | None:
     mtimes when `runs` is empty — early curator runs predate the runs-table
     schema, so SKILL.md mtime is the only ground truth for those projects.
     """
+    # `state.conn()` is a @contextmanager — must be entered with `with`.
+    # The previous code did `state.conn().execute(...)`, which threw an
+    # AttributeError that the broad `except Exception` swallowed silently;
+    # the function then always fell through to the SKILL.md-mtime fallback.
+    # Symptom: impact card's treatment date matched whenever the bundle
+    # was last regenerated, not when the curator first landed.
     try:
-        rows = list(
-            state.conn().execute(
-                "SELECT MIN(started_at) AS first_run FROM runs "
-                "WHERE project_key=? AND kind LIKE 'curator%' AND status='ok'",
-                (project_key,),
+        with state.conn() as c:
+            rows = list(
+                c.execute(
+                    "SELECT MIN(started_at) AS first_run FROM runs "
+                    "WHERE project_key=? AND kind LIKE 'curator%' AND status='ok'",
+                    (project_key,),
+                )
             )
-        )
         if rows and rows[0]["first_run"]:
             try:
                 return datetime.fromisoformat(rows[0]["first_run"].replace("Z", "+00:00"))

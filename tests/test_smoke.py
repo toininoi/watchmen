@@ -3098,3 +3098,109 @@ def test_cli_bare_invocation_runs_smart_default():
     finally:
         cli._is_first_run = orig
     assert rc == 0, f"bare watchmen on first-run should exit 0, got {rc}"
+
+
+def test_treatment_date_prefers_runs_table_over_skill_md_mtime(tmp_path, monkeypatch):
+    """`_treatment_date_for_project` should read the earliest curator run
+    from `state.runs` and only fall back to SKILL.md mtime when the runs
+    table is empty for this project.
+
+    Regression: the function previously called `state.conn().execute(...)`
+    directly, but `state.conn` is decorated with `@contextmanager` and
+    returns a context manager — `.execute()` on that object raises
+    AttributeError, which the broad `except Exception` swallowed silently.
+    Net effect: every install's impact card pulled treatment date from
+    SKILL.md mtime regardless of what was in `runs`, so re-curate runs
+    would shift the dashed-annotation line on the chart and the pre/post
+    pivot would drift with bundle regeneration. This test would have
+    caught that before it shipped."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from datetime import datetime
+
+    # Redirect WATCHMEN_HOME so we don't touch the developer's real state.db.
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    # Reload paths + state so STATE_DB picks up the new home.
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen import state as _state
+    importlib.reload(_state)
+    # And the homepage module (uses state.conn via attribute lookup; reload
+    # so any cached module-level references swap to the reloaded state).
+    from watchmen.viewer import homepage as _homepage
+    importlib.reload(_homepage)
+
+    _state.init_db()
+    _state.track_project("demo", "/Users/x/demo", threshold=30)
+
+    # Insert two curator runs — the function should return the earlier one.
+    earlier = "2026-02-01T10:00:00+00:00"
+    later   = "2026-04-15T10:00:00+00:00"
+    with _state.conn() as c:
+        c.execute(
+            "INSERT INTO runs (project_key, kind, started_at, ended_at, status) "
+            "VALUES ('demo', 'curator', ?, ?, 'ok')",
+            (earlier, "2026-02-01T10:30:00+00:00"),
+        )
+        c.execute(
+            "INSERT INTO runs (project_key, kind, started_at, ended_at, status) "
+            "VALUES ('demo', 'curator', ?, ?, 'ok')",
+            (later, "2026-04-15T10:30:00+00:00"),
+        )
+        # An analyst-kind run with an even earlier date must NOT win —
+        # the function filters on `kind LIKE 'curator%'`.
+        c.execute(
+            "INSERT INTO runs (project_key, kind, started_at, ended_at, status) "
+            "VALUES ('demo', 'analyst', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:05:00+00:00', 'ok')",
+        )
+        # A failed curator run must NOT win either (status filter).
+        c.execute(
+            "INSERT INTO runs (project_key, kind, started_at, ended_at, status) "
+            "VALUES ('demo', 'curator', '2026-01-15T00:00:00+00:00', "
+            "'2026-01-15T00:05:00+00:00', 'failed')",
+        )
+        c.commit()
+
+    result = _homepage._treatment_date_for_project("demo")
+    assert result is not None, "expected the runs-table lookup to succeed"
+    assert result == datetime.fromisoformat(earlier), \
+        f"expected the earlier ok-curator run, got {result.isoformat()}"
+
+
+def test_treatment_date_falls_back_to_skill_mtime_when_runs_empty(tmp_path, monkeypatch):
+    """When `state.runs` has no curator rows for the project, the function
+    should fall back to the earliest SKILL.md mtime under bundles/<key>/skills/.
+    Covers legacy installs whose first curator pre-dated the runs-table
+    schema."""
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen import state as _state
+    importlib.reload(_state)
+    from watchmen.viewer import homepage as _homepage
+    importlib.reload(_homepage)
+
+    _state.init_db()
+    _state.track_project("legacy", "/Users/x/legacy", threshold=30)
+
+    # No runs rows. Plant a SKILL.md with a known mtime in the bundles dir.
+    skills_dir = tmp_path / "bundles" / "legacy" / "skills" / "ship-pr"
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / "SKILL.md"
+    skill_file.write_text("# stub\n")
+    target_ts = datetime(2026, 1, 10, 9, 0, tzinfo=timezone.utc).timestamp()
+    _os.utime(skill_file, (target_ts, target_ts))
+
+    result = _homepage._treatment_date_for_project("legacy")
+    assert result is not None
+    # Tolerate filesystem mtime granularity (~1s on macOS HFS+).
+    assert abs(result.timestamp() - target_ts) < 2, \
+        f"expected fallback to SKILL.md mtime ~{target_ts}, got {result.timestamp()}"
