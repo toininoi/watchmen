@@ -6,6 +6,30 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-19
+
+This release lifts watchmen off the OpenRouter-only assumption it shipped
+with in 0.5: multi-provider API-key auth (OpenAI / Anthropic / OpenRouter),
+OAuth credential reuse for Claude Pro and ChatGPT subscriptions, an
+interactive `watchmen settings` menu, `watchmen reset <project>` for
+from-scratch re-curates, an impact-card treatment-date bugfix, and a
+provider startup banner so it's always obvious which endpoint + billing
+mode a run is using.
+
+### Added — Provider startup banner + billing-mode visibility
+- Analyst + curator runs now print a one-line banner at startup:
+  `provider=X · <quota label> · model=Y · endpoint=Z`. Removes the
+  ambiguity around which credential is in flight — particularly useful
+  after switching providers via `watchmen settings provider`.
+- Onboarding cost-preview panel now reads the active provider: subscription
+  providers (`claude-pro`, `chatgpt`) get a "no API spend — counts toward
+  your rate-limit window" note instead of a dollar range. The
+  deepseek-v4-flash-pricing footnote is gone — it was misleading for
+  anyone not on the OpenRouter default.
+- `OpenAIProvider`'s silent fallback to `~/.codex/auth.json`'s api-key
+  field now emits a one-time stderr warning when fired, so users aren't
+  surprised which OpenAI org is being billed.
+
 ### Added — OAuth credential reuse: Claude Pro + ChatGPT subscriptions
 - **Claude Pro / Team / Max via Claude Code OAuth** — new `claude-pro`
   provider reads the OAuth token Claude Code stores in the macOS keychain

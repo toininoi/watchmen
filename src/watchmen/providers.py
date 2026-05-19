@@ -33,6 +33,27 @@ from dataclasses import dataclass
 
 PROVIDER_NAMES = ("openrouter", "openai", "anthropic", "claude-pro", "chatgpt")
 
+
+# Tracks which "this credential came from somewhere surprising" warnings
+# have already been emitted in the current process, so we don't spam the
+# log on every analyst day / curator stage. Cleared by tests via
+# `_warn_once.clear()`.
+_WARNED_KEYS: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Emit a stderr warning once per process keyed by `key`. Used when a
+    Provider discovers a credential from a non-obvious source (e.g.
+    OpenAI provider falling back to Codex's stored api-key)."""
+    import sys
+    if key in _WARNED_KEYS:
+        return
+    _WARNED_KEYS.add(key)
+    print(message, file=sys.stderr, flush=True)
+
+
+_warn_once.clear = _WARNED_KEYS.clear  # type: ignore[attr-defined]
+
 # Human-friendly display labels — used by doctor + onboarding so the UI
 # reads "OpenRouter key" / "OpenAI key" / "Anthropic key" instead of
 # the lowercase identifier.
@@ -82,6 +103,15 @@ class Provider:
     # delegates to `Provider.call()` instead of doing the standard
     # JSON POST itself.
     custom_transport: bool = False
+
+    # True for providers that bill against a flat-rate subscription quota
+    # instead of per-token API credits. Drives the startup banner + the
+    # onboarding cost panel — for subscription providers we don't print a
+    # dollar estimate because there is none.
+    is_subscription_quota: bool = False
+    # Free-form human-readable phrase used in the banner. e.g.
+    # "Claude Pro/Team/Max subscription" or "OpenRouter API credits".
+    quota_label: str = "API credits"
 
     def resolve_api_key(self, configured: str | None) -> str | None:
         """Allow a provider to discover credentials beyond the standard
@@ -136,6 +166,7 @@ class OpenRouterProvider(Provider):
     name = "openrouter"
     endpoint = "https://openrouter.ai/api/v1/chat/completions"
     default_model = "deepseek/deepseek-v4-flash"
+    quota_label = "OpenRouter API credits"
 
     def headers(self, api_key: str, *, agent_name: str = "") -> dict[str, str]:
         return {
@@ -186,18 +217,31 @@ class OpenAIProvider(Provider):
     # gpt-5-mini is the modern cost-efficient default with tool use support.
     # Override with WATCHMEN_DEFAULT_MODEL=gpt-5 etc. for higher-quality runs.
     default_model = "gpt-5-mini"
+    quota_label = "OpenAI API credits"
 
     def resolve_api_key(self, configured: str | None) -> str | None:
         """Fall back to Codex's stored key if `OPENAI_API_KEY` isn't set
         in env / .env. Lets Codex users (who already ran `codex login
         --api-key sk-...`) skip re-pasting into watchmen. Only api-key
-        mode is reused here; chatgpt-OAuth mode is a separate provider."""
+        mode is reused here; chatgpt-OAuth mode is a separate provider.
+
+        Emits a one-time stderr line when the Codex fallback fires so
+        the user isn't surprised which credential is in flight — this
+        is the most opaque path in credential resolution and silently
+        spending against someone else's billed key would be a bad
+        surprise."""
         if configured:
             return configured
         try:
             from watchmen.credentials import CodexCredentials
             creds = CodexCredentials.read()
             if creds and creds.mode == "api-key" and creds.api_key:
+                _warn_once(
+                    "openai-codex-fallback",
+                    "watchmen: reusing OPENAI_API_KEY from ~/.codex/auth.json "
+                    "(Codex CLI). This bills against your OpenAI org. "
+                    "Set OPENAI_API_KEY in your env to override.",
+                )
                 return creds.api_key
         except Exception:
             return None
@@ -231,6 +275,7 @@ class AnthropicProvider(Provider):
     name = "anthropic"
     endpoint = "https://api.anthropic.com/v1/messages"
     default_model = "claude-haiku-4-5-20251001"
+    quota_label = "Anthropic API credits"
     # Cap on output tokens per turn — Anthropic requires this field, OpenAI
     # treats it as optional. We pick a generous default; callers that need
     # less can rely on the model stopping early.
@@ -422,6 +467,8 @@ class ClaudePro(AnthropicProvider):
     # curator output — Haiku is the right pick on subscription quota
     # since the rate-limit-tier math favors it.
     default_model = "claude-haiku-4-5-20251001"
+    is_subscription_quota = True
+    quota_label = "Claude Pro/Team/Max subscription"
 
     def resolve_api_key(self, configured: str | None) -> str | None:
         """Read the OAuth token straight from Claude Code's keychain
@@ -494,6 +541,8 @@ class ChatGPT(Provider):
     endpoint = "https://chatgpt.com/backend-api/codex/responses"
     default_model = "gpt-5.4-mini"
     custom_transport = True
+    is_subscription_quota = True
+    quota_label = "ChatGPT subscription"
 
     # Identifies our traffic as the Codex CLI so the backend accepts the
     # request. Bumping versions periodically keeps us in lockstep with

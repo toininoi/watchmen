@@ -337,24 +337,45 @@ def prompt_for_repo(console: Console, project: dict) -> str | None:
 
 def show_cost_estimate(console: Console, selected: list[dict]) -> None:
     total_prompts = sum(p["prompt_count"] for p in selected)
-    # Empirical: ~$3-8 per project for a full curator run on a moderately active repo.
-    # Analyze cost scales with day count more than prompt count. Use rough bracket.
-    # The numbers reflect the deepseek-v4-flash defaults — direct OpenAI/Anthropic
-    # provider users pay more (the model is the dominant factor here, not the
-    # provider's markup), so we surface the active model in the headline.
-    low = len(selected) * 2 + total_prompts * 0.0005
-    high = len(selected) * 8 + total_prompts * 0.002
     model_label = config.default_model()
+
+    from watchmen import providers as _providers
+    active = config.active_provider()
+    prov = _providers.get_provider(active)
+    time_estimate = f"[bold]{15 * len(selected)} – {90 * len(selected)} min[/] total."
+
+    if prov.is_subscription_quota:
+        # Subscription-quota providers (Claude Pro / ChatGPT OAuth) don't
+        # have a per-token $ cost. Highlight that runs draw against the
+        # subscription's rate-limit window instead.
+        billing = (
+            f"Billing: [bold]{prov.quota_label}[/] · "
+            "no API spend — usage counts toward your rate-limit window.\n"
+        )
+        cost_line = ""
+    else:
+        # Per-token providers — give a rough range. We can't price every
+        # model precisely without burning a /models lookup, so we report
+        # an order-of-magnitude bracket based on prompt volume and let
+        # the actual cost panel after each turn surface the real number.
+        low = len(selected) * 2 + total_prompts * 0.0005
+        high = len(selected) * 8 + total_prompts * 0.002
+        billing = (
+            f"Billing: [bold]{prov.quota_label}[/] on [cyan]{model_label}[/].\n"
+        )
+        cost_line = f"Estimated cost: [bold]${low:.1f} – ${high:.1f}[/]\n"
+
     body = Text.from_markup(
         f"[bold]{len(selected)} project(s)[/], [bold]{total_prompts:,}[/] historical prompts.\n\n"
-        f"Estimated cost on [cyan]{model_label}[/]: [bold]${low:.1f} – ${high:.1f}[/]\n"
-        f"[dim](range assumes deepseek-v4-flash pricing; direct OpenAI/Anthropic models cost more)[/]\n"
-        f"Estimated time: [bold]{15 * len(selected)} – {90 * len(selected)} min[/] total.\n\n"
+        f"{billing}"
+        f"{cost_line}"
+        f"Estimated time: {time_estimate}\n\n"
         "[dim]LLM passes run sequentially. Hit Ctrl-C to bail mid-stream — anything\n"
         "already written stays on disk; you can resume any time with `watchmen analyze`\n"
         "+ `watchmen curate`.[/]"
     )
-    console.print(Panel(body, title="Cost preview", border_style="yellow"))
+    title = "Run preview" if prov.is_subscription_quota else "Cost preview"
+    console.print(Panel(body, title=title, border_style="yellow"))
 
 
 def stream_subprocess(console: Console, label: str, cmd: list[str]) -> int:

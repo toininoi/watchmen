@@ -1018,6 +1018,8 @@ def main():
     _, replay_handlers = make_tools(source_repo=args.repo, project_key=args.project)
 
     print(f"== curate {args.project} (repo={args.repo}, model={args.model})", flush=True)
+    from watchmen.agent import provider_banner
+    print(f"   {provider_banner(model=args.model)}", flush=True)
     print(f"   output → bundles/{args.project}/  log → {log_path.name}", flush=True)
 
     with httpx.Client(timeout=300.0) as client:
