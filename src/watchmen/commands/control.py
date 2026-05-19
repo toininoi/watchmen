@@ -483,3 +483,152 @@ def _default_learn_model() -> str:
     imports for the non-reset commands."""
     from watchmen import config
     return config.default_model()
+
+
+# ─── prune ─────────────────────────────────────────────────────────────────
+
+
+def cmd_prune(args) -> int:
+    """Run the LLM judge over `<project>`'s bundled skills and write
+    `_prune_queue.json`. Default mode is queue-only — nothing destructive
+    happens until you run `watchmen prune <project> --apply` (or click
+    Approve in the viewer at `/p/<project>/prune`).
+
+    With `--all`: iterate every tracked project sequentially. Per-project
+    failures don't abort the rest of the loop — the user can re-run the
+    failed one individually after diagnosing.
+
+    With `--apply`: skip the LLM call and consume the existing queue —
+    prompt for each flagged skill (k/d/s/q) and delete approved ones.
+    """
+    if getattr(args, "apply", False):
+        return _cmd_prune_apply(args)
+
+    from watchmen import state
+    from watchmen.prune import run_prune
+
+    if getattr(args, "all", False):
+        try:
+            state.init_db()
+            projects = [p["project_key"] for p in state.list_projects() if p.get("enabled", 1)]
+        except Exception as e:
+            print(yellow(f"could not list projects: {e}"))
+            return 1
+        if not projects:
+            print(yellow("no tracked projects"))
+            return 1
+        print(bold(f"Pruning {len(projects)} project(s)..."))
+        failures = 0
+        for pk in projects:
+            print()
+            print(cyan(f"→ {pk}"))
+            try:
+                queue_path = run_prune(pk, model=getattr(args, "model", None))
+                print(green(f"  ✓ wrote {queue_path}"))
+            except Exception as e:
+                failures += 1
+                print(yellow(f"  ✗ {type(e).__name__}: {e}"))
+        return 1 if failures else 0
+
+    if not args.project:
+        print(yellow("usage: watchmen prune <project> | --all"))
+        return 1
+
+    try:
+        queue_path = run_prune(args.project, model=getattr(args, "model", None))
+    except FileNotFoundError as e:
+        print(yellow(str(e)))
+        return 1
+    except RuntimeError as e:
+        print(yellow(str(e)))
+        return 1
+    print(green(f"✓ wrote {queue_path}"))
+    print(dim(f"  review at  watchmen viewer  → /p/{args.project}/prune"))
+    print(dim(f"  or apply via  watchmen prune {args.project} --apply"))
+    return 0
+
+
+def _cmd_prune_apply(args) -> int:
+    """Consume `_prune_queue.json` interactively, deleting approved skills
+    and recording dismissals to `_prune_dismissed.json`. Bails when stdin
+    isn't a tty — destructive prompts in CI would be unsafe."""
+    import json
+    import sys
+
+    from watchmen.util import bundle_dir
+
+    if not sys.stdin.isatty():
+        print(yellow("`watchmen prune --apply` is interactive — needs a tty"))
+        return 1
+
+    bdir = bundle_dir(args.project)
+    queue_path = bdir / "_prune_queue.json"
+    if not queue_path.exists():
+        print(yellow(f"no prune queue at {queue_path}"))
+        print(dim(f"  run `watchmen prune {args.project}` first"))
+        return 1
+
+    try:
+        queue = json.loads(queue_path.read_text())
+    except json.JSONDecodeError:
+        print(yellow(f"queue file is malformed: {queue_path}"))
+        return 1
+
+    flagged = queue.get("flagged") or []
+    if not flagged:
+        print(green("✓ queue is empty — nothing flagged"))
+        return 0
+
+    dismissed_path = bdir / "_prune_dismissed.json"
+    try:
+        dismissed: set[str] = set(json.loads(dismissed_path.read_text()))
+    except (FileNotFoundError, json.JSONDecodeError):
+        dismissed = set()
+
+    print(bold(f"Reviewing {len(flagged)} flagged skill(s) in {args.project}"))
+    print(dim("  k = keep (dismiss flag) · d = delete · s = skip · q = quit"))
+    print()
+
+    skills_dir = bdir / "skills"
+    deleted = 0
+    kept = 0
+    skipped = 0
+
+    for i, entry in enumerate(flagged, 1):
+        slug = entry.get("slug", "?")
+        sev = entry.get("severity", "?")
+        reason = entry.get("reason", "")
+        print(f"[{i}/{len(flagged)}] {cyan(slug)}  [{sev}]")
+        print(f"    {reason}")
+        skill_dir = skills_dir / slug
+        if not skill_dir.exists():
+            print(yellow("    (already deleted)"))
+            print()
+            continue
+        try:
+            choice = input("    [k/d/s/q] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        print()
+        if choice == "q":
+            break
+        if choice == "d":
+            shutil.rmtree(skill_dir, ignore_errors=True)
+            deleted += 1
+            print(green(f"    ✓ deleted {slug}"))
+            print()
+            continue
+        if choice == "k":
+            dismissed.add(slug)
+            kept += 1
+            print(dim(f"    kept {slug} — dismissed for future prune runs"))
+            print()
+            continue
+        skipped += 1
+
+    dismissed_path.write_text(json.dumps(sorted(dismissed), indent=2))
+    print(bold(f"Done. deleted={deleted} kept={kept} skipped={skipped}"))
+    if deleted:
+        print(dim("  re-run `watchmen viewer` or refresh to see the new skill list"))
+    return 0

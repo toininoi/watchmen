@@ -290,6 +290,7 @@ def scan(entry: dict):
                             "timestamp": ts,
                             "tool_name": block.get("name") or "?",
                             "is_error": 0,
+                            "skill_name": None,
                         })
 
         elif role == "toolResult":
@@ -307,6 +308,7 @@ def scan(entry: dict):
                 "timestamp": ts,
                 "tool_name": "bash",
                 "is_error": 0,
+                "skill_name": None,
             })
 
         # custom / branchSummary / compactionSummary — silently ignore.

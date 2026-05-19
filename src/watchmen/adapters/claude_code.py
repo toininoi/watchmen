@@ -206,11 +206,24 @@ def scan(entry: dict):
                             session["assistant_thinking_count"] += 1
                         elif btype == "tool_use":
                             session["tool_use_count"] += 1
+                            tool_name = block.get("name", "?")
+                            # Claude Code records skill activations as a
+                            # `Skill` tool_use with `input.skill = '<slug>'`.
+                            # Capture the slug separately so prune can count
+                            # per-skill usage without re-parsing transcripts.
+                            skill_name: str | None = None
+                            if tool_name == "Skill":
+                                inp = block.get("input") or {}
+                                if isinstance(inp, dict):
+                                    slug = inp.get("skill")
+                                    if isinstance(slug, str) and slug.strip():
+                                        skill_name = slug.strip()
                             tool_calls.append({
                                 "session_id": session["session_id"],
                                 "timestamp": ts,
-                                "tool_name": block.get("name", "?"),
+                                "tool_name": tool_name,
                                 "is_error": 0,
+                                "skill_name": skill_name,
                             })
 
     session["models"] = json.dumps(sorted(models))
