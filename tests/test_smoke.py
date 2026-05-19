@@ -324,7 +324,6 @@ def test_claude_adapter_stores_decoded_paths():
     """The Claude adapter must call decode_project_dir on the encoded dir name —
     if it stored '-Users-...' the per-project analyst couldn't merge with Codex's
     real-path sessions. Regression test for the original split-counts gotcha."""
-    import os
     import sys as _sys
     import tempfile
     from watchmen.adapters import claude_code
