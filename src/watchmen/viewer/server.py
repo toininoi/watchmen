@@ -680,7 +680,13 @@ async def settings_set_provider(request: Request):
         path = wm_diag.set_active_provider(new_provider)
     except ValueError as e:
         return _settings_redirect(str(e), ok=False)
-    return _settings_redirect(f"active provider → {new_provider} · wrote → {path}")
+    msg = f"active provider → {new_provider} · wrote → {path}"
+    # Daemon scheduler unit still bakes the old model — surface that in the
+    # flash so the user knows to reinstall to pick up the change.
+    from watchmen import service as _service
+    if _service.is_daemon_loaded():
+        msg += " · daemon needs reinstall to use new provider"
+    return _settings_redirect(msg)
 
 
 @app.post("/settings/model")
@@ -694,20 +700,26 @@ async def settings_set_model(request: Request):
     fields = await _form_fields(request)
     action = (fields.get("action") or "set").strip().lower()
 
+    from watchmen import service as _service
+
     if action == "clear":
         cleared = wm_diag.clear_default_model()
         if cleared:
             from watchmen import config as _config
-            return _settings_redirect(
-                f"model override cleared · using provider default ({_config.default_model()})"
-            )
+            msg = f"model override cleared · using provider default ({_config.default_model()})"
+            if _service.is_daemon_loaded():
+                msg += " · daemon needs reinstall to use new model"
+            return _settings_redirect(msg)
         return _settings_redirect("no model override was set", ok=False)
 
     try:
         path = wm_diag.set_default_model(fields.get("value", ""))
     except ValueError as e:
         return _settings_redirect(str(e), ok=False)
-    return _settings_redirect(f"default model updated · wrote → {path}")
+    msg = f"default model updated · wrote → {path}"
+    if _service.is_daemon_loaded():
+        msg += " · daemon needs reinstall to use new model"
+    return _settings_redirect(msg)
 
 
 @app.post("/settings/port")

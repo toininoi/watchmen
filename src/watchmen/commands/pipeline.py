@@ -49,6 +49,99 @@ def _print_runtime_state_error(exc: BaseException, *, stderr: bool = True) -> No
 # ─── status ────────────────────────────────────────────────────────────────
 
 
+def _render_status_overview(console) -> None:
+    """Top-of-screen overview: services + provider + corpus health.
+
+    Each section is small (1-3 lines) and falls back gracefully if its data
+    source is missing — a fresh install with no corpus / no daemon still
+    renders cleanly, just with "—" placeholders.
+    """
+    import sqlite3
+    from datetime import datetime
+    from watchmen import paths
+    from watchmen.agent import provider_banner
+
+    # Provider banner — matches what analyst/curator runs print at startup,
+    # so the user can verify on the status screen which provider their
+    # runs are using before they kick one off.
+    console.print(f"[dim]{provider_banner()}[/]")
+    console.print()
+
+    # Services row — daemon, viewer, hooks. Each shows loaded/not + a tag
+    # for the scheduler backend (launchd/systemd/schtasks) so the user knows
+    # which OS path the daemon is going through.
+    try:
+        from watchmen import service, hooks_setup
+        daemon_loaded = service.is_daemon_loaded()
+        viewer_loaded = service.is_viewer_loaded()
+        backend = service.BACKEND_NAME
+    except Exception:
+        daemon_loaded = viewer_loaded = False
+        backend = "?"
+    try:
+        hooks_state = hooks_setup.is_installed_summary()  # type: ignore[attr-defined]
+    except (AttributeError, Exception):
+        # `is_installed_summary` is a new helper; older versions just check
+        # presence of the settings.json entry. Fall back to a coarse signal.
+        hooks_state = None
+
+    def _mark(b: bool) -> str:
+        return "[green]✓[/]" if b else "[dim]·[/]"
+
+    parts = [
+        f"  {_mark(daemon_loaded)} [bold]daemon[/]  [dim]({backend})[/]",
+        f"  {_mark(viewer_loaded)} [bold]viewer[/]  [dim]({backend})[/]",
+    ]
+    if hooks_state is None:
+        parts.append("  [dim]·[/] [bold]hooks[/]   [dim](status unavailable)[/]")
+    else:
+        # hooks_state is a dict like {"claude_code": True, "codex": False}.
+        marks = " ".join(f"{k}={'✓' if v else '·'}" for k, v in hooks_state.items())
+        all_on = all(hooks_state.values()) if hooks_state else False
+        parts.append(f"  {_mark(all_on)} [bold]hooks[/]   [dim]{marks}[/]")
+    console.print("\n".join(parts))
+
+    # Corpus health — last ingest mtime (file_mtime of newest session row),
+    # total session count, last-7d Skill calls. Fail-soft on a missing DB.
+    corpus_db = paths.WATCHMEN_HOME / "corpus.db"
+    if corpus_db.exists():
+        try:
+            conn = sqlite3.connect(corpus_db)
+            conn.row_factory = sqlite3.Row
+            session_count = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
+            latest_mtime = conn.execute(
+                "SELECT MAX(file_mtime) AS m FROM sessions WHERE file_mtime IS NOT NULL"
+            ).fetchone()["m"]
+            from datetime import timedelta as _td
+            now_utc = datetime.utcnow()
+            cutoff = (now_utc - _td(days=7)).isoformat()
+            skill_7d = conn.execute(
+                "SELECT COUNT(*) AS n FROM tool_calls WHERE tool_name='Skill' AND timestamp >= ?",
+                (cutoff,),
+            ).fetchone()["n"]
+            conn.close()
+            if latest_mtime:
+                latest_str = datetime.fromtimestamp(float(latest_mtime)).strftime("%Y-%m-%d %H:%M")
+            else:
+                latest_str = "—"
+            console.print()
+            console.print(
+                f"  [dim]corpus:[/]  {session_count:,} sessions · "
+                f"latest transcript {latest_str} · "
+                f"{skill_7d} skill call(s) · 7d"
+            )
+        except sqlite3.Error:
+            console.print()
+            console.print("  [dim]corpus:[/]  [yellow](error reading corpus.db)[/]")
+    else:
+        console.print()
+        console.print(
+            "  [dim]corpus:[/]  [yellow]not initialized[/] — run "
+            "[cyan]watchmen ingest[/]"
+        )
+    console.print()
+
+
 def cmd_status(args) -> int:
     from rich.console import Console
     from rich.table import Table
@@ -59,6 +152,13 @@ def cmd_status(args) -> int:
     except Exception as e:
         _print_runtime_state_error(e, stderr=False)
         return 1
+
+    # ── Services + provider + corpus ─────────────────────────────────────
+    # Pulled up to the top so `watchmen status` answers "is anything
+    # broken?" before "what's the project queue?". The four previously
+    # separate commands (`daemon status`, `viewer status`, `hooks status`,
+    # `doctor`) now feed into one screen.
+    _render_status_overview(console)
 
     tracked = state.list_projects()
     if not tracked:

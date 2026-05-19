@@ -96,6 +96,7 @@ from watchmen.commands.pipeline import (
     cmd_runs,
     cmd_status,
 )
+from watchmen.commands.lifecycle import cmd_down, cmd_up
 from watchmen.util import find_changelog as _find_changelog
 
 
@@ -871,6 +872,8 @@ def cmd_settings_provider(args) -> int:
     path = config.set_active_provider(new_provider)
     console.print(f"[green]✓[/] active provider → [bold]{new_provider}[/]")
     console.print(f"  wrote → {path}")
+    from watchmen import service as _service
+    _service.notify_settings_changed("provider", interactive=True)
     return 0
 
 
@@ -894,6 +897,8 @@ def cmd_settings_model(args) -> int:
     if getattr(args, "clear", False):
         if config.clear_env_var("WATCHMEN_DEFAULT_MODEL"):
             console.print(f"[green]✓[/] override cleared — now using {active} default: [bold]{provider_default}[/]")
+            from watchmen import service as _service
+            _service.notify_settings_changed("model", interactive=True)
         else:
             console.print("[dim]no override was set[/]")
         return 0
@@ -907,6 +912,8 @@ def cmd_settings_model(args) -> int:
         path = config.write_env_var("WATCHMEN_DEFAULT_MODEL", new_value)
         console.print(f"[green]✓[/] default model → [bold]{new_value}[/]")
         console.print(f"  wrote → {path}")
+        from watchmen import service as _service
+        _service.notify_settings_changed("model", interactive=True)
         return 0
 
     # Status view: current + per-provider defaults
@@ -1158,6 +1165,8 @@ def _add_statusline_install_args(p) -> None:
 _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Get started", [
         ("init",       "5-minute interactive setup wizard"),
+        ("up",         "install + start daemon + viewer + hooks in one shot"),
+        ("down",       "uninstall daemon + viewer + hooks (preserves corpus / state / bundles)"),
         ("doctor",     "diagnose your install — API key, corpus, services"),
         ("settings",   "view / update OpenRouter key + per-project settings"),
     ]),
@@ -1421,6 +1430,23 @@ def main(argv: list[str] | None = None) -> int:
 
     # `config` was a P3 placeholder — kept as hidden alias until removed entirely.
     sub.add_parser("config", help=argparse.SUPPRESS).set_defaults(func=cmd_config)
+
+    # ── up / down (lifecycle) ──────────────────────────────────────────────
+    # Sugar over the daemon + viewer + hooks install trio. Most users only
+    # ever need these two verbs; the noun-verb forms below stay around for
+    # power users and scripts that target one subsystem at a time.
+    p_up = sub.add_parser("up", help="install + start daemon, viewer, and hooks in one shot")
+    p_up.add_argument("--skip-hooks",  action="store_true", help="skip the hooks install step")
+    p_up.add_argument("--skip-daemon", action="store_true", help="skip the daemon install step")
+    p_up.add_argument("--skip-viewer", action="store_true", help="skip the viewer install step")
+    p_up.set_defaults(func=cmd_up)
+
+    p_down = sub.add_parser("down", help="uninstall daemon + viewer + hooks (corpus/state/bundles preserved)")
+    p_down.add_argument("--yes",          action="store_true", help="skip the confirmation prompt")
+    p_down.add_argument("--skip-hooks",   action="store_true")
+    p_down.add_argument("--skip-daemon",  action="store_true")
+    p_down.add_argument("--skip-viewer",  action="store_true")
+    p_down.set_defaults(func=cmd_down)
 
     # ── daemon (noun) ──────────────────────────────────────────────────────
     p_daemon = sub.add_parser("daemon", help="run / install / uninstall the watchmen daemon")
