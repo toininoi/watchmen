@@ -1325,16 +1325,14 @@
     <div class="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-3">
       <div class="flex items-center gap-3 flex-wrap">
         <a href="/" class="wm-brand mr-2" aria-label="watchmen — home">
-          <!-- Smiley with blood streak: the iconic Watchmen mark.
-               Yellow disc, ink eyes + smile, blood-crimson slash from
-               upper-left through the right eye. Hidden under Doomsday. -->
-          <svg class="wm-brand__mark wm-brand__mark--smiley" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <circle cx="12" cy="12" r="11" fill="#F5C518" stroke="#131316" stroke-width="1.5"/>
-            <circle cx="8.5" cy="10.5" r="1.15" fill="#131316"/>
-            <circle cx="15.5" cy="10.5" r="1.15" fill="#131316"/>
-            <path d="M 7.6 14.4 Q 12 17.6 16.4 14.4" stroke="#131316" stroke-width="1.6" fill="none" stroke-linecap="round"/>
-            <path d="M 3.2 6.5 L 17 11.4" stroke="#BC1D2E" stroke-width="2" stroke-linecap="round"/>
-          </svg>
+          <!-- Smiley with blood streak: the iconic Watchmen mark. Served
+               from /static rather than inlined so we don't ship the
+               raster-in-SVG payload on every page. Hidden under Doomsday
+               and Rorschach themes via the CSS rules below. -->
+          <img class="wm-brand__mark wm-brand__mark--smiley"
+               src="/static/watchmen-logo.svg"
+               alt=""
+               aria-hidden="true">
           <!-- Doomsday clock: minutes-to-midnight. Cool-white ring on a
                dark face, blood-red minute hand at 12, hour hand at 11.
                Only shown under [data-theme="doomsday"]. -->

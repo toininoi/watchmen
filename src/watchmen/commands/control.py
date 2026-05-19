@@ -297,3 +297,189 @@ def cmd_review(args) -> int:
         review_path.write_text("\n".join(block) + ("\n" + existing if existing else ""))
         console.print(f"\n  [dim]audit log → {review_path}[/]")
     return 0
+
+
+# ─── reset ─────────────────────────────────────────────────────────────────
+
+
+# Files we delete in the bundles/<project>/ dir during reset. Anything not
+# in this set is preserved (so a future addition like a custom user file
+# won't be silently wiped). Pins + blocklist are always opt-in via
+# --wipe-all so we don't trash the user's curation intent by accident.
+_RESET_BUNDLE_FILES = (
+    "CLAUDE.md",
+    "AGENTS.md",
+    "_candidates.json",
+    "_curation_log.md",
+    "_index.md",
+    "_run.log",
+    "_cache.json",
+    "review.md",
+)
+_RESET_BUNDLE_DIRS = (
+    "skills",
+    "_pending",
+)
+_RESET_BUNDLE_STEERING = (
+    "_pinned.json",
+    "_blocklist.json",
+)
+# state.db columns reset by `watchmen reset`. Keeps the project row itself
+# (and source_repo, threshold, notes — those are user-set config that
+# shouldn't be touched by re-curate) but clears all "last ran X" markers
+# so the next analyst / curator cycle behaves like a fresh install.
+_RESET_STATE_FIELDS = {
+    "last_analyst_day": None,
+    "last_analyst_run": None,
+    "last_curator_run": None,
+    "last_curator_skill_count": 0,
+}
+
+
+def _collect_reset_targets(project_key: str, wipe_all: bool) -> list:
+    """Return list of (path, kind) tuples for everything `cmd_reset` will
+    delete given the supplied flags. Computed up-front so --dry-run can
+    print the exact same set the destructive path would touch."""
+    from watchmen.util import analyses_base, bundle_dir
+    targets: list = []
+    bdir = bundle_dir(project_key)
+    adir = analyses_base() / project_key
+
+    # Analyses: wipe the whole directory contents (thesis snapshots +
+    # _running.md). Cheaper to delete the dir than enumerate files.
+    if adir.exists():
+        targets.append((adir, "dir"))
+
+    if bdir.exists():
+        for fname in _RESET_BUNDLE_FILES:
+            f = bdir / fname
+            if f.exists():
+                targets.append((f, "file"))
+        for dname in _RESET_BUNDLE_DIRS:
+            d = bdir / dname
+            if d.exists():
+                targets.append((d, "dir"))
+        if wipe_all:
+            for sname in _RESET_BUNDLE_STEERING:
+                f = bdir / sname
+                if f.exists():
+                    targets.append((f, "file"))
+
+    return targets
+
+
+def cmd_reset(args) -> int:
+    """Wipe a project's analyst output + curated bundle, then reset state.db
+    markers so the next `watchmen learn` (or analyst/curator pair) treats
+    it as a fresh install.
+
+    By default preserves:
+    - `_pinned.json` / `_blocklist.json` — your steering intent; use
+      `--wipe-all` to nuke those too.
+    - `corpus.db` + raw transcripts — upstream data, not a curation.
+    - `state.db` project row config (`source_repo`, `threshold`, `notes`,
+      `enabled`, `approval_required`, `skip_overlapping_skills`).
+
+    Flags:
+    - `--dry-run` lists what would be removed without touching anything.
+    - `--yes` skips the confirmation prompt (CI / scripting).
+    - `--wipe-all` also removes pins + blocklist.
+    - `--then-learn` runs `watchmen learn --full` after the reset (so
+      the rerun-from-scratch is one command).
+    """
+    from watchmen import state
+    from watchmen.util import bundle_dir
+    project_key = args.project
+
+    state.init_db()
+    proj = state.get_project(project_key)
+    if not proj:
+        print(yellow(f"'{project_key}' not tracked. Run `watchmen list` to see candidates."))
+        return 1
+
+    targets = _collect_reset_targets(project_key, wipe_all=bool(getattr(args, "wipe_all", False)))
+
+    has_state_markers = any(proj.get(k) for k in _RESET_STATE_FIELDS)
+    if not targets and not has_state_markers:
+        print(green(f"✓ {project_key}: nothing to reset (no analyses, no bundle, no run history)"))
+        return 0
+
+    # Preview — same set whether dry-run or not, so the user can see
+    # exactly what's about to disappear before they confirm.
+    print(bold(f"\nReset plan — {project_key}\n"))
+    if targets:
+        for path, kind in targets:
+            kind_marker = dim("dir/" if kind == "dir" else "    ")
+            print(f"  {yellow('✗')} {kind_marker} {path}")
+    if has_state_markers:
+        marker_summary = ", ".join(k for k, _ in _RESET_STATE_FIELDS.items() if proj.get(k))
+        print(f"  {yellow('↺')}      state.db markers ({marker_summary})")
+    print()
+    if not getattr(args, "wipe_all", False) and (bundle_dir(project_key) / "_pinned.json").exists():
+        print(dim("  preserved: _pinned.json (pass --wipe-all to also remove)"))
+    if not getattr(args, "wipe_all", False) and (bundle_dir(project_key) / "_blocklist.json").exists():
+        print(dim("  preserved: _blocklist.json (pass --wipe-all to also remove)"))
+    print()
+
+    if getattr(args, "dry_run", False):
+        print(dim("dry-run — no files removed."))
+        return 0
+
+    if not getattr(args, "yes", False):
+        try:
+            answer = input(f"Type {bold(project_key)} to confirm: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print(dim("aborted."))
+            return 1
+        if answer != project_key:
+            print(dim("aborted — project key didn't match."))
+            return 1
+
+    # Apply
+    import shutil as _shutil
+    deleted_files = 0
+    deleted_dirs = 0
+    for path, kind in targets:
+        try:
+            if kind == "dir":
+                _shutil.rmtree(path)
+                deleted_dirs += 1
+            else:
+                path.unlink()
+                deleted_files += 1
+        except OSError as e:
+            print(yellow(f"  ! failed to remove {path}: {e}"))
+            # Continue with the rest — partial reset is better than no reset
+            # if one file is locked.
+
+    if has_state_markers:
+        state.update_project(project_key, **_RESET_STATE_FIELDS)
+
+    print(green(f"✓ reset {project_key}: {deleted_files} file(s), {deleted_dirs} dir(s) removed"))
+    if has_state_markers:
+        print(dim(f"  cleared state.db markers"))
+
+    # Optional chained re-learn — convenience for the common case of
+    # "wipe and immediately re-run from scratch".
+    if getattr(args, "then_learn", False):
+        print()
+        print(bold(f"Chaining → watchmen learn {project_key} --full"))
+        print()
+        # Local import to avoid a control↔pipeline cycle at module load.
+        from watchmen.commands.pipeline import cmd_learn
+        learn_args = argparse.Namespace(
+            project=project_key,
+            full=True,
+            model=getattr(args, "model", None) or _default_learn_model(),
+        )
+        return cmd_learn(learn_args)
+    return 0
+
+
+def _default_learn_model() -> str:
+    """Resolve the default model the same way cli.py's argparse does.
+    Lazy import keeps the control.py surface free of config + providers
+    imports for the non-reset commands."""
+    from watchmen import config
+    return config.default_model()

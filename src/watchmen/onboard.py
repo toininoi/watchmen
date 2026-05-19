@@ -56,6 +56,90 @@ def show_welcome(console: Console, total_steps: int) -> None:
     console.print(Panel(body, title="onboard", border_style="cyan"))
 
 
+# Per-provider key signup URL surfaced when prompting. None ⇒ no URL shown.
+_PROVIDER_SIGNUP = {
+    "openrouter": ("https://openrouter.ai/keys", "credit pre-load not required for deepseek-v4-flash"),
+    "openai":     ("https://platform.openai.com/api-keys", "billed per-token against your OpenAI org"),
+    "anthropic":  ("https://console.anthropic.com/settings/keys", "billed per-token against your Anthropic org"),
+}
+
+# Key-format hints used to gently catch paste errors without being rigid —
+# users who really paste an unusual key are still given a "save anyway?" path.
+_PROVIDER_KEY_PREFIXES = {
+    "openrouter": ("sk-or-", "sk_"),
+    "openai":     ("sk-",),
+    "anthropic":  ("sk-ant-",),
+}
+
+
+def _have_any_provider_key() -> bool:
+    """True iff at least one provider has a key configured."""
+    from watchmen import config as _config
+    return any(_config.provider_key(p) for p in _config.PROVIDER_KEY_VARS)
+
+
+def _prompt_provider_choice(console: Console) -> str:
+    """Pick the LLM provider the wizard will configure a key for. Returns
+    the canonical provider name."""
+    from watchmen import config as _config
+    options = list(_config.PROVIDER_KEY_VARS)  # order is the priority order
+
+    console.print("[bold]Which LLM provider would you like to use?[/]")
+    console.print(
+        "  [cyan]openrouter[/]  cheapest default (deepseek-v4-flash), one key gets you many models\n"
+        "  [cyan]openai[/]      use your OpenAI API key directly\n"
+        "  [cyan]anthropic[/]   use your Anthropic API key directly"
+    )
+    choice = Prompt.ask(
+        "Provider",
+        choices=options,
+        default="openrouter",
+    )
+    return choice
+
+
+def _prompt_for_provider_key(console: Console, provider_name: str) -> bool:
+    """Prompt for a key for `provider_name`, write to ~/.config/watchmen/.env,
+    set it in the current process, and persist the active-provider selection.
+    Returns True if a key is now in scope."""
+    from watchmen import config as _config
+
+    key_var = _config.PROVIDER_KEY_VARS[provider_name]
+    signup_url, signup_note = _PROVIDER_SIGNUP.get(provider_name, (None, None))
+
+    console.print(f"[bold yellow]{key_var} not found.[/]")
+    if signup_url:
+        console.print(f"[dim]Get one at {signup_url} — {signup_note}.[/]")
+    console.print()
+    key = Prompt.ask(
+        f"Paste your {provider_name} API key (or press enter to skip)",
+        password=True,
+        default="",
+        show_default=False,
+    ).strip()
+    if not key:
+        console.print(f"[dim]Skipped. Set {key_var} in your shell or in ~/.config/watchmen/.env, then re-run onboard.[/]")
+        return False
+
+    prefixes = _PROVIDER_KEY_PREFIXES.get(provider_name) or ()
+    if prefixes and not any(key.startswith(p) for p in prefixes):
+        if not Confirm.ask(
+            f"  [yellow]Key doesn't look like a {provider_name} key (starts with {key[:6]}…). Save anyway?[/]",
+            default=False,
+        ):
+            return False
+
+    _config.set_provider_key(provider_name, key)
+    _config.set_active_provider(provider_name)
+    os.environ[key_var] = key
+    os.environ[_config.PROVIDER_ENV_VAR] = provider_name
+    env_path = _config.ENV_PATH
+    console.print(f"[green]✓[/] Wrote {provider_name} key to {env_path}  [dim](chmod 600)[/]")
+    console.print(f"[green]✓[/] Active provider: [bold]{provider_name}[/]")
+    return True
+
+
+# ── Legacy helpers (kept for backward compat with any external callers) ──
 def _have_openrouter_key() -> bool:
     if os.environ.get("OPENROUTER_API_KEY"):
         return True
@@ -67,46 +151,19 @@ def _have_openrouter_key() -> bool:
 
 
 def _prompt_for_openrouter_key(console: Console) -> bool:
-    """Ask the user for an OpenRouter key, write to ~/.config/watchmen/.env,
-    set it in the current process. Returns True if a key is now in scope."""
-    console.print("[bold yellow]OPENROUTER_API_KEY not found.[/]")
-    console.print("[dim]Get one at https://openrouter.ai/keys — credit pre-loading not required for deepseek-v4-flash.[/]")
-    console.print()
-    key = Prompt.ask(
-        "Paste your OpenRouter API key (or press enter to skip)",
-        password=True,
-        default="",
-        show_default=False,
-    ).strip()
-    if not key:
-        console.print("[dim]Skipped. Set OPENROUTER_API_KEY in your shell or in ~/.config/watchmen/.env, then re-run onboard.[/]")
-        return False
-    if not (key.startswith("sk-or-") or key.startswith("sk_")):
-        if not Confirm.ask(
-            f"  [yellow]Key doesn't look like an OpenRouter key (starts with {key[:6]}…). Save anyway?[/]",
-            default=False,
-        ):
-            return False
-
-    env_dir = Path.home() / ".config" / "watchmen"
-    env_dir.mkdir(parents=True, exist_ok=True)
-    env_file = env_dir / ".env"
-
-    # Preserve any other lines, update or append OPENROUTER_API_KEY.
-    lines = env_file.read_text().splitlines() if env_file.exists() else []
-    new_lines = [ln for ln in lines if not ln.startswith("OPENROUTER_API_KEY=")]
-    new_lines.append(f"OPENROUTER_API_KEY={key}")
-    env_file.write_text("\n".join(new_lines) + "\n")
-    env_file.chmod(0o600)
-    os.environ["OPENROUTER_API_KEY"] = key
-    console.print(f"[green]✓[/] Wrote key to {env_file}  [dim](chmod 600)[/]")
-    return True
+    """Legacy: prompts only for an OpenRouter key. New onboard flows go
+    through `_prompt_for_provider_key()` with a provider arg."""
+    return _prompt_for_provider_key(console, "openrouter")
 
 
 def check_prerequisites(console: Console) -> bool:
-    if not _have_openrouter_key():
-        if not _prompt_for_openrouter_key(console):
-            console.print("[red]✗[/] Can't continue without OPENROUTER_API_KEY.")
+    if not _have_any_provider_key():
+        provider_name = _prompt_provider_choice(console)
+        if not _prompt_for_provider_key(console, provider_name):
+            console.print(
+                "[red]✗[/] Can't continue without an API key. "
+                "Re-run `watchmen init` (or `watchmen settings api-key`) once you have one."
+            )
             return False
 
     missing = []
@@ -228,11 +285,16 @@ def show_cost_estimate(console: Console, selected: list[dict]) -> None:
     total_prompts = sum(p["prompt_count"] for p in selected)
     # Empirical: ~$3-8 per project for a full curator run on a moderately active repo.
     # Analyze cost scales with day count more than prompt count. Use rough bracket.
+    # The numbers reflect the deepseek-v4-flash defaults — direct OpenAI/Anthropic
+    # provider users pay more (the model is the dominant factor here, not the
+    # provider's markup), so we surface the active model in the headline.
     low = len(selected) * 2 + total_prompts * 0.0005
     high = len(selected) * 8 + total_prompts * 0.002
+    model_label = config.default_model()
     body = Text.from_markup(
         f"[bold]{len(selected)} project(s)[/], [bold]{total_prompts:,}[/] historical prompts.\n\n"
-        f"Estimated cost on deepseek-v4-flash: [bold]${low:.1f} – ${high:.1f}[/]\n"
+        f"Estimated cost on [cyan]{model_label}[/]: [bold]${low:.1f} – ${high:.1f}[/]\n"
+        f"[dim](range assumes deepseek-v4-flash pricing; direct OpenAI/Anthropic models cost more)[/]\n"
         f"Estimated time: [bold]{15 * len(selected)} – {90 * len(selected)} min[/] total.\n\n"
         "[dim]LLM passes run sequentially. Hit Ctrl-C to bail mid-stream — anything\n"
         "already written stays on disk; you can resume any time with `watchmen analyze`\n"

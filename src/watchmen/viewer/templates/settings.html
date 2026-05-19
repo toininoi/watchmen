@@ -80,7 +80,7 @@
 <div class="mb-6">
   <h1 class="text-2xl font-semibold">Settings</h1>
   <div class="text-sm text-gray-600 mt-1">
-    Configure the OpenRouter API key, viewer port, and per-project
+    Configure provider auth, default model, viewer port, and per-project
     cadence. Mirrors <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen settings</code>:
     edits write to <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">~/.config/watchmen/.env</code>
     and <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">state.db</code>, the same paths the CLI uses.
@@ -99,14 +99,52 @@
   {% endif %}
 {% endif %}
 
-<!-- ── Global settings ───────────────────────────────────────────────── -->
-<h2 class="text-lg font-semibold mb-3">Global</h2>
+<!-- ── Providers + API keys ──────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">LLM provider</h2>
 
 <div class="wm-card mb-4">
-  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">OpenRouter API key</div>
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Active provider</div>
+  <div class="mb-3 text-sm text-gray-700">
+    Currently using <span class="font-mono">{{ active_provider }}</span>
+    <span class="text-xs text-gray-500">({{ active_provider_display }})</span>.
+    Switch below; the LLM passes (analyst + curator + insights) will route
+    through the new provider on the next run.
+  </div>
+  <form method="post" action="/settings/provider" class="flex gap-2 items-center">
+    <select name="value" required
+            class="text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+      {% for p in providers %}
+      <option value="{{ p.name }}" {% if p.active %}selected{% endif %}>
+        {{ p.display_name }}{% if not p.set %} (no key set){% endif %}
+      </option>
+      {% endfor %}
+    </select>
+    <button type="submit"
+            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+      Switch
+    </button>
+  </form>
+  <div class="text-xs text-gray-500 mt-2">
+    Switching to a provider with no key configured won't fail immediately —
+    the next LLM pass will, with a clear error. Set the key below first.
+  </div>
+</div>
+
+<!-- Per-provider key forms — one card each so the user can see which
+     keys exist on disk at a glance and update any one without touching
+     the others. -->
+{% for p in providers %}
+<div class="wm-card mb-4">
+  <div class="flex items-center justify-between mb-1">
+    <div class="text-xs text-gray-500 uppercase tracking-wide">
+      {{ p.display_name }} API key
+      {% if p.active %}<span class="ml-2 wm-pill wm-pill-ok">active</span>{% endif %}
+    </div>
+    <code class="text-[10px] text-gray-400">{{ p.env_var }}</code>
+  </div>
   <div class="mb-3">
-    {% if api_key_set %}
-    <span class="font-mono text-sm text-gray-700">{{ api_key_masked }}</span>
+    {% if p.set %}
+    <span class="font-mono text-sm text-gray-700">{{ p.masked }}</span>
     <span class="wm-pill wm-pill-ok ml-2">set</span>
     {% else %}
     <span class="text-sm text-gray-500">not set</span>
@@ -114,8 +152,9 @@
     {% endif %}
   </div>
   <form method="post" action="/settings/api-key" class="flex gap-2 items-center">
+    <input type="hidden" name="provider" value="{{ p.name }}">
     <input type="password" name="value" required
-           placeholder="sk-or-v1-…"
+           placeholder="paste {{ p.name }} API key"
            autocomplete="off"
            class="flex-1 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
     <button type="submit"
@@ -124,10 +163,51 @@
     </button>
   </form>
   <div class="text-xs text-gray-500 mt-2">
-    Saved to <code>~/.config/watchmen/.env</code>. Check validity at
-    <a href="/doctor" class="text-blue-600 hover:underline">/doctor</a>.
+    Default model on this provider:
+    <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.default_model }}</code>
   </div>
 </div>
+{% endfor %}
+
+<!-- ── Default model ─────────────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3 mt-6">Default model</h2>
+
+<div class="wm-card mb-6">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Resolved default</div>
+  <div class="mb-3">
+    <span class="font-mono text-sm text-gray-700">{{ model.resolved }}</span>
+    {% if model.override %}
+    <span class="wm-pill ml-2">override</span>
+    <span class="text-xs text-gray-500 ml-1">(WATCHMEN_DEFAULT_MODEL)</span>
+    {% else %}
+    <span class="text-xs text-gray-500 ml-2">(from {{ active_provider }} provider default)</span>
+    {% endif %}
+  </div>
+  <form method="post" action="/settings/model" class="flex gap-2 items-center">
+    <input type="text" name="value"
+           placeholder="e.g. gpt-5, claude-sonnet-4-6, deepseek/deepseek-v4-flash"
+           value="{{ model.override or '' }}"
+           class="flex-1 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+    <button type="submit" name="action" value="set"
+            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+      Set override
+    </button>
+    <button type="submit" name="action" value="clear"
+            {% if not model.override %}disabled{% endif %}
+            class="text-xs px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+      Clear
+    </button>
+  </form>
+  <div class="text-xs text-gray-500 mt-2">
+    Override pins a specific model regardless of provider; clear it to
+    fall back to the active provider's default
+    (<code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ model.active_provider_default }}</code>).
+    Use any model the active provider supports.
+  </div>
+</div>
+
+<!-- ── Other global settings ────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">Other</h2>
 
 <div class="wm-card mb-6">
   <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Viewer port</div>

@@ -33,66 +33,49 @@ def _row(label: str, severity: Severity, detail: str, fix: str | None = None) ->
     return {"label": label, "severity": severity, "detail": detail, "fix": fix}
 
 
-def _check_openrouter_key(key: str) -> tuple[bool, str]:
-    """Same logic as cli._check_openrouter_key, duplicated locally so
-    diagnostics doesn't cross-import the CLI module (which would create
-    a viewer→cli cycle for what's logically a leaf concern)."""
-    import httpx
+def _check_provider_key(provider_name: str, key: str) -> tuple[bool, str]:
+    """Probe `provider_name`'s auth endpoint with `key`. Returns (ok, detail).
+
+    Duplicated from cli._check_provider_key locally so diagnostics doesn't
+    cross-import the CLI module (which would create a viewer→cli cycle for
+    what's logically a leaf concern)."""
+    from watchmen import providers
     try:
-        r = httpx.get(
-            "https://openrouter.ai/api/v1/auth/key",
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=10.0,
-        )
-    except httpx.RequestError as e:
-        return False, f"connection error: {type(e).__name__}"
-    if r.status_code == 200:
-        try:
-            info = (r.json() or {}).get("data") or {}
-        except ValueError:
-            info = {}
-        usage = info.get("usage")
-        limit = info.get("limit")
-        if usage is not None and limit is not None and limit > 0:
-            return True, f"valid · credits used ${float(usage):.2f} of ${float(limit):.2f}"
-        if usage is not None and limit is None:
-            return True, f"valid · credits used ${float(usage):.2f} (no hard limit)"
-        return True, "valid"
-    if r.status_code == 401:
-        try:
-            msg = (r.json().get("error") or {}).get("message", "")
-        except (ValueError, AttributeError):
-            msg = ""
-        return False, f"401 · {msg or 'unauthorized'}"
-    return False, f"HTTP {r.status_code} · {r.text[:120]}"
+        prov = providers.get_provider(provider_name)
+    except ValueError as e:
+        return False, str(e)
+    res = prov.probe(key)
+    return res.ok, res.detail
+
+
+# Legacy alias for any external caller still importing this name.
+def _check_openrouter_key(key: str) -> tuple[bool, str]:
+    return _check_provider_key("openrouter", key)
 
 
 def run_checks(*, check_openrouter: bool = True) -> dict:
     """Run all doctor probes; return {rows, summary} for template render.
 
-    `check_openrouter=False` skips the HTTP probe (handy in tests + when
-    rendering the page should be fast/offline). The key-set check still
-    runs either way."""
+    `check_openrouter=False` skips the HTTP probe for the active provider
+    (kwarg name kept for backward compat with viewer callers — applies to
+    whichever provider is active, not just OpenRouter)."""
     rows: list[dict] = []
 
-    # 1. OpenRouter API key
-    current = config.read_env_var("OPENROUTER_API_KEY")
+    # 1. Active provider's API key
+    from watchmen import providers as _providers
+    active = config.active_provider()
+    current = config.provider_key(active)
+    label = f"{_providers.display_name(active)} key"
+    fix_hint = f"Set the API key in /settings, or run `watchmen settings api-key --provider {active}`."
     if not current:
-        rows.append(_row(
-            "OpenRouter key", "fail",
-            "not set",
-            fix="Set the API key in /settings, or run `watchmen settings api-key`.",
-        ))
+        rows.append(_row(label, "fail", "not set", fix=fix_hint))
     elif not check_openrouter:
-        rows.append(_row(
-            "OpenRouter key", "ok",
-            "set (HTTP probe skipped)",
-        ))
+        rows.append(_row(label, "ok", "set (HTTP probe skipped)"))
     else:
-        ok, info = _check_openrouter_key(current)
+        ok, info = _check_provider_key(active, current)
         rows.append(_row(
-            "OpenRouter key", "ok" if ok else "fail", info,
-            fix=None if ok else "Update in /settings or run `watchmen settings api-key`.",
+            label, "ok" if ok else "fail", info,
+            fix=None if ok else fix_hint,
         ))
 
     # 2. corpus.db
@@ -263,8 +246,17 @@ def _mask(key: str) -> str:
 
 def get_settings() -> dict:
     """Snapshot for the /settings template. API key is masked unless the
-    user explicitly opts to reveal (URL query, future enhancement)."""
-    key = config.read_env_var("OPENROUTER_API_KEY") or ""
+    user explicitly opts to reveal (URL query, future enhancement).
+
+    Returns both the active-provider key (for the headline status) and a
+    per-provider table so the UI can render which providers have keys
+    saved without exposing the values. Model resolution surfaces three
+    pieces: the active resolved default, whether an override is in play,
+    and each provider's own default — enough for the template to render
+    a "Default model" panel with status + override field + clear button."""
+    from watchmen import providers as _providers
+    active = config.active_provider()
+    active_key = config.provider_key(active) or ""
     port = config.viewer_port()
     port_source = (
         "explicit (env or .env)"
@@ -276,9 +268,33 @@ def get_settings() -> dict:
         projects = state.list_projects()
     except Exception:
         projects = []
+    providers_view: list[dict] = []
+    for name, env_var in config.PROVIDER_KEY_VARS.items():
+        key = config.provider_key(name) or ""
+        providers_view.append({
+            "name": name,
+            "display_name": _providers.display_name(name),
+            "env_var": env_var,
+            "active": name == active,
+            "set": bool(key),
+            "masked": _mask(key),
+            "default_model": _providers.get_provider(name).default_model,
+        })
+    model_override = config.read_env_var("WATCHMEN_DEFAULT_MODEL")
     return {
-        "api_key_set": bool(key),
-        "api_key_masked": _mask(key),
+        # Backward-compat: existing templates reference api_key_* directly.
+        "api_key_set": bool(active_key),
+        "api_key_masked": _mask(active_key),
+        # New: active provider + per-provider key status table.
+        "active_provider": active,
+        "active_provider_display": _providers.display_name(active),
+        "providers": providers_view,
+        # Default-model state for the new "Default model" panel.
+        "model": {
+            "resolved": config.default_model(),
+            "override": model_override,
+            "active_provider_default": _providers.get_provider(active).default_model,
+        },
         "viewer_port": port,
         "viewer_port_source": port_source,
         "viewer_port_default": config.VIEWER_DEFAULT_PORT,
@@ -286,11 +302,40 @@ def get_settings() -> dict:
     }
 
 
-def set_api_key(value: str) -> Path:
+def set_api_key(value: str, provider: str | None = None) -> Path:
+    """Persist `value` as the API key for `provider` (default: active).
+    Used by the viewer /settings POST handler."""
     value = (value or "").strip()
     if not value:
         raise ValueError("api key cannot be empty")
-    return config.write_env_var("OPENROUTER_API_KEY", value)
+    return config.set_provider_key(provider or config.active_provider(), value)
+
+
+def set_active_provider(provider: str) -> Path:
+    """Persist the active provider selection. Wraps config.set_active_provider
+    so the viewer route doesn't have to import config directly."""
+    if provider not in config.PROVIDER_KEY_VARS:
+        raise ValueError(f"unknown provider: {provider!r}")
+    return config.set_active_provider(provider)
+
+
+def set_default_model(value: str) -> Path:
+    """Persist WATCHMEN_DEFAULT_MODEL. Used by the /settings/model route.
+
+    Empty strings (form left blank) raise ValueError so the redirect
+    flashes a useful error instead of silently no-oping."""
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("model name cannot be empty")
+    return config.write_env_var("WATCHMEN_DEFAULT_MODEL", value)
+
+
+def clear_default_model() -> bool:
+    """Remove the WATCHMEN_DEFAULT_MODEL override. Returns True if a value
+    was actually cleared, False if there was nothing to clear — used by
+    the redirect flash so we report 'reverted to <X>' vs 'no override was
+    active' accurately."""
+    return config.clear_env_var("WATCHMEN_DEFAULT_MODEL")
 
 
 def set_viewer_port(value: str) -> tuple[Path, int]:
