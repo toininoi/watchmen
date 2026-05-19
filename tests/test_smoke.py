@@ -3116,7 +3116,7 @@ def test_treatment_date_prefers_runs_table_over_skill_md_mtime(tmp_path, monkeyp
     caught that before it shipped."""
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Redirect WATCHMEN_HOME so we don't touch the developer's real state.db.
     monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))

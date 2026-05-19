@@ -225,12 +225,12 @@ def main() -> int:
         "standard test plan + summary template.\ntrigger_phrases: [open a PR, ship this]\n---\n\n"
         "# ship-pr\n\nFollow the team's PR conventions when shipping changes from this repo.\n"
     )
-    print(f"  bundles: stubbed CLAUDE.md + one skill")
+    print("  bundles: stubbed CLAUDE.md + one skill")
 
     print()
     print("Done. Next steps:")
     print(f"  export WATCHMEN_HOME={home}")
-    print(f"  uv run watchmen viewer run")
+    print("  uv run watchmen viewer run")
     print(f"  open http://127.0.0.1:8979/p/{PROJECT_KEY}")
     return 0
 
