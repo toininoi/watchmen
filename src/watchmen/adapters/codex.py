@@ -225,6 +225,7 @@ def scan(entry: dict):
                     "timestamp": ts,
                     "tool_name": payload.get("name") or "?",
                     "is_error": 0,
+                    "skill_name": None,
                 })
             elif ptype in ("function_call_output", "custom_tool_call_output"):
                 # Tool result. is_error not directly exposed; some outputs carry
@@ -239,6 +240,7 @@ def scan(entry: dict):
                     "timestamp": ts,
                     "tool_name": ptype,
                     "is_error": 0,
+                    "skill_name": None,
                 })
 
     session["models"] = json.dumps(sorted(models))

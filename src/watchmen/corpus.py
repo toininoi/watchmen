@@ -71,10 +71,17 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     session_id TEXT,
     timestamp TEXT,
     tool_name TEXT,
-    is_error INTEGER NOT NULL DEFAULT 0
+    is_error INTEGER NOT NULL DEFAULT 0,
+    -- `skill_name` is populated only when `tool_name = 'Skill'` and the
+    -- Claude Code transcript carries `input.skill = '<slug>'`. Used by
+    -- the prune pipeline to count how often each curated skill actually
+    -- fires in real sessions.
+    skill_name TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
+-- idx_tool_calls_skill is created inside `_migrate_tool_calls_columns`
+-- so legacy DBs missing the `skill_name` column don't blow up here.
 """
 
 
@@ -87,6 +94,7 @@ def init_db(*, full: bool = False) -> sqlite3.Connection:
         conn.executescript("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS prompts; DROP TABLE IF EXISTS tool_calls;")
     conn.executescript(_CREATE_TABLES)
     _migrate_sessions_columns(conn)
+    _migrate_tool_calls_columns(conn)
     conn.commit()
     return conn
 
@@ -115,6 +123,23 @@ def _migrate_sessions_columns(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent)")
 
 
+def _migrate_tool_calls_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent column-level migrations for `tool_calls`.
+
+    History:
+      - `skill_name` added with the prune pipeline (v0.6.1) so the
+        per-skill usage signal can be extracted without a full rebuild.
+        Existing rows get NULL — that's correct since pre-migration
+        sessions weren't scanned for the input.skill payload.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_calls)").fetchall()}
+    if "skill_name" not in cols:
+        conn.execute("ALTER TABLE tool_calls ADD COLUMN skill_name TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_skill ON tool_calls(skill_name)"
+        )
+
+
 def migrate_schema() -> None:
     """Open corpus.db just to run pending column migrations, then close.
     Called once from `cli.main()` so every watchmen command auto-applies
@@ -135,6 +160,7 @@ def migrate_schema() -> None:
             ).fetchone()
             if row is not None:
                 _migrate_sessions_columns(conn)
+                _migrate_tool_calls_columns(conn)
                 conn.commit()
         finally:
             conn.close()
@@ -182,8 +208,8 @@ def _replace_session(conn: sqlite3.Connection, session: dict, prompts: list, too
         )
     if tools:
         conn.executemany(
-            """INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error)
-               VALUES (:session_id, :timestamp, :tool_name, :is_error)""",
+            """INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name)
+               VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name)""",
             tools,
         )
 

@@ -59,6 +59,7 @@ from watchmen.util import (
 from watchmen.commands.control import (
     cmd_drop,
     cmd_pin,
+    cmd_prune,
     cmd_reset,
     cmd_restore,
     cmd_review,
@@ -1334,6 +1335,19 @@ def main(argv: list[str] | None = None) -> int:
     p_review.add_argument("project")
     p_review.set_defaults(func=cmd_review)
 
+    p_prune = sub.add_parser(
+        "prune",
+        help="LLM judge over a project's bundled skills — flag dead/contradictory/low-value ones for review",
+    )
+    p_prune.add_argument("project", nargs="?", help="project key (omit when using --all)")
+    p_prune.add_argument("--all", action="store_true",
+                         help="run the judge for every tracked project")
+    p_prune.add_argument("--apply", action="store_true",
+                         help="interactively review the existing queue and delete approved skills")
+    p_prune.add_argument("--model", default=None,
+                         help=f"model override (default: {DEFAULT_MODEL()})")
+    p_prune.set_defaults(func=cmd_prune)
+
     p_reset = sub.add_parser(
         "reset",
         help="wipe a project's analyses + curated bundle, reset state.db markers (fresh re-curate)",
@@ -1360,7 +1374,10 @@ def main(argv: list[str] | None = None) -> int:
     p_track.add_argument("--threshold", type=int, default=30, help="min new prompts to trigger run")
     p_track.set_defaults(func=cmd_track)
 
-    sub.add_parser("ingest", help="re-scan all coding-agent transcripts into corpus.db").set_defaults(func=cmd_ingest)
+    p_ing = sub.add_parser("ingest", help="re-scan all coding-agent transcripts into corpus.db")
+    p_ing.add_argument("--full", action="store_true",
+                       help="drop and rebuild corpus.db from scratch instead of an incremental scan")
+    p_ing.set_defaults(func=cmd_ingest)
 
     p_sync = sub.add_parser("sync", help="bootstrap state from existing analyses/ + bundles/ on disk")
     p_sync.add_argument("--project", help="just one project (default: all tracked)")

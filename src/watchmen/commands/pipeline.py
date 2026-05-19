@@ -142,8 +142,13 @@ def cmd_status(args) -> int:
 
 
 def cmd_ingest(args) -> int:
-    print(_dim("Running corpus.py scan..."))
-    r = subprocess.run([sys.executable, "-m", "watchmen.corpus", "scan"], cwd=str(ROOT))
+    cmd = [sys.executable, "-m", "watchmen.corpus", "scan"]
+    if getattr(args, "full", False):
+        cmd.append("--full")
+        print(_dim("Running corpus.py scan (full rebuild)..."))
+    else:
+        print(_dim("Running corpus.py scan..."))
+    r = subprocess.run(cmd, cwd=str(ROOT))
     return r.returncode
 
 

@@ -446,6 +446,127 @@ def skill_restore(project_key: str, skill_slug: str):
     )
 
 
+# ─── Prune review queue ─────────────────────────────────────────────────────
+# Renders the LLM-judge output written by `watchmen prune <project>`. Each
+# flagged skill has Approve (delete) / Dismiss (keep) buttons. Dismissals
+# accumulate in `_prune_dismissed.json` so future prune runs can de-prioritize
+# them rather than silently re-flagging the same skills every cycle.
+
+
+def _read_prune_queue(project_key: str) -> dict | None:
+    """Load `_prune_queue.json` for a project. Returns None when no queue
+    has been generated yet — the template handles the empty state."""
+    path = BUNDLES / project_key / "_prune_queue.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _read_dismissed(project_key: str) -> set[str]:
+    path = BUNDLES / project_key / "_prune_dismissed.json"
+    try:
+        return set(json.loads(path.read_text()))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+
+def _write_dismissed(project_key: str, dismissed: set[str]) -> None:
+    path = BUNDLES / project_key / "_prune_dismissed.json"
+    path.write_text(json.dumps(sorted(dismissed), indent=2))
+
+
+def _remove_from_queue(project_key: str, slug: str) -> None:
+    """Drop a single skill from the queue file. Idempotent — silently
+    no-ops if the queue is missing or the slug isn't in it."""
+    path = BUNDLES / project_key / "_prune_queue.json"
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return
+    payload["flagged"] = [f for f in (payload.get("flagged") or []) if f.get("slug") != slug]
+    path.write_text(json.dumps(payload, indent=2))
+
+
+@app.get("/p/{project_key}/prune", response_class=HTMLResponse)
+def prune_page(request: Request, project_key: str):
+    """Render the prune review queue for one project. Empty queue and
+    'no queue generated yet' get distinct empty states so the user can
+    tell which one they're in."""
+    proj = get_project_meta(project_key)
+    if not proj:
+        raise HTTPException(404, f"project {project_key} not tracked")
+    queue = _read_prune_queue(project_key)
+    skills_dir = BUNDLES / project_key / "skills"
+
+    # Decorate each flagged entry with the SKILL.md mtime + a quick
+    # description preview, so the user can judge without clicking
+    # through. Skills already deleted (CLI --apply path) get filtered.
+    flagged: list[dict] = []
+    if queue is not None:
+        for entry in queue.get("flagged") or []:
+            slug = entry.get("slug")
+            skill_dir = skills_dir / (slug or "")
+            if not skill_dir.exists():
+                continue  # already deleted
+            skill_md = skill_dir / "SKILL.md"
+            preview = ""
+            if skill_md.exists():
+                try:
+                    head = skill_md.read_text(encoding="utf-8")[:1200]
+                    # Pull description out of frontmatter if present.
+                    import re as _re
+                    m = _re.search(r"^description:\s*(.+)$", head, _re.MULTILINE)
+                    if m:
+                        preview = m.group(1).strip().strip('"').strip("'")
+                except OSError:
+                    pass
+            flagged.append({
+                "slug": slug,
+                "severity": entry.get("severity", "medium"),
+                "reason": entry.get("reason", ""),
+                "description": preview,
+            })
+
+    return TEMPLATES.TemplateResponse(request, "prune.html", {
+        "project": proj,
+        "queue": queue,
+        "flagged": flagged,
+        "dismissed": sorted(_read_dismissed(project_key)),
+    })
+
+
+@app.post("/p/{project_key}/prune/{skill_slug}/approve")
+def prune_approve(project_key: str, skill_slug: str):
+    """Approve a flagged skill — delete its bundle directory + drop the
+    entry from the queue. The next curator run won't re-propose it
+    unless the project's _blocklist.json says otherwise; for the
+    soft-suppression path the user should hit Dismiss + add to blocklist
+    separately. Approving = "I'm done with this skill", not "block it
+    forever" — matches the `drop` endpoint's contract."""
+    skill_dir = BUNDLES / project_key / "skills" / skill_slug
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
+    _remove_from_queue(project_key, skill_slug)
+    return RedirectResponse(url=f"/p/{project_key}/prune", status_code=303)
+
+
+@app.post("/p/{project_key}/prune/{skill_slug}/dismiss")
+def prune_dismiss(project_key: str, skill_slug: str):
+    """Dismiss = keep the skill. Records the slug in
+    `_prune_dismissed.json` so the next prune run can de-prioritize it
+    (re-flagging is allowed but the judge sees it was previously kept)."""
+    dismissed = _read_dismissed(project_key)
+    dismissed.add(skill_slug)
+    _write_dismissed(project_key, dismissed)
+    _remove_from_queue(project_key, skill_slug)
+    return RedirectResponse(url=f"/p/{project_key}/prune", status_code=303)
+
+
 # ─── Web-triggered runs ──────────────────────────────────────────────────────
 # Lets users press "Analyze now" / "Curate now" buttons in the action banner.
 # Spawns a detached subprocess; the page redirects to /actions/run/<id> which

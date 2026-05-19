@@ -3204,3 +3204,187 @@ def test_treatment_date_falls_back_to_skill_mtime_when_runs_empty(tmp_path, monk
     # Tolerate filesystem mtime granularity (~1s on macOS HFS+).
     assert abs(result.timestamp() - target_ts) < 2, \
         f"expected fallback to SKILL.md mtime ~{target_ts}, got {result.timestamp()}"
+
+
+# ─── prune ─────────────────────────────────────────────────────────────────
+
+
+def test_corpus_extracts_skill_name_from_claude_code_tool_use(tmp_path, monkeypatch):
+    """The corpus ingester should pick up `input.skill = '<slug>'` from a
+    Claude Code transcript's `Skill` tool_use block and write it to
+    `tool_calls.skill_name`. Without this signal, prune can't tell which
+    skills actually fired in real sessions."""
+    import json as _json
+
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen import corpus as _corpus
+    importlib.reload(_corpus)
+    from watchmen.adapters import claude_code as _cc
+    importlib.reload(_cc)
+
+    # Build a minimal Claude Code transcript with one Skill tool_use.
+    proj_dir = tmp_path / "claude_projects" / "-Users-test-demo"
+    proj_dir.mkdir(parents=True)
+    transcript = proj_dir / "abc-def.jsonl"
+    transcript.write_text(_json.dumps({
+        "type": "assistant",
+        "uuid": "u1", "sessionId": "abc-def", "cwd": "/Users/test/demo",
+        "timestamp": "2026-05-10T12:00:00Z",
+        "message": {
+            "id": "m1", "model": "claude-sonnet-4-6", "role": "assistant",
+            "content": [{
+                "type": "tool_use", "id": "tu1", "name": "Skill",
+                "input": {"skill": "ship-pr", "args": "..."},
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+        },
+    }) + "\n")
+
+    session, prompts, tools = _cc.scan({
+        "path": transcript,
+        "session_id": "abc-def",
+        "project_dir": "/Users/test/demo",
+        "is_subagent": 0,
+        "parent_session_id": None,
+    })
+    assert any(t.get("skill_name") == "ship-pr" for t in tools), \
+        f"expected skill_name='ship-pr' in tool_calls, got {[(t.get('tool_name'), t.get('skill_name')) for t in tools]}"
+
+
+def test_prune_judge_inputs_joins_bundle_with_usage(tmp_path, monkeypatch):
+    """gather_judge_inputs() should read SKILL.md frontmatter from the
+    bundle directory and join it with usage counts from corpus.db's
+    skill_name column. Verifies the catalog the judge receives matches
+    on-disk reality."""
+    import sqlite3 as _sql
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen import state as _state
+    importlib.reload(_state)
+    from watchmen import prune as _prune
+    importlib.reload(_prune)
+
+    _state.init_db()
+    _state.track_project("demo", "/Users/test/demo", threshold=30)
+
+    # Stub bundle: CLAUDE.md + one skill
+    bundle = tmp_path / "bundles" / "demo"
+    (bundle / "skills" / "ship-pr").mkdir(parents=True)
+    (bundle / "CLAUDE.md").write_text("# demo brief\n")
+    (bundle / "skills" / "ship-pr" / "SKILL.md").write_text(
+        "---\nname: ship-pr\ndescription: open a PR\n"
+        "trigger_phrases: [ship this]\n---\n\n# body\n"
+    )
+
+    # Stub corpus.db with one fired Skill row for that slug
+    corpus_db = tmp_path / "corpus.db"
+    conn = _sql.connect(corpus_db)
+    conn.executescript("""
+        CREATE TABLE tool_calls (
+            session_id TEXT, timestamp TEXT, tool_name TEXT,
+            is_error INTEGER NOT NULL DEFAULT 0, skill_name TEXT
+        );
+    """)
+    conn.execute(
+        "INSERT INTO tool_calls VALUES ('s1', '2026-05-10T12:00:00Z', 'Skill', 0, 'ship-pr')"
+    )
+    conn.execute(
+        "INSERT INTO tool_calls VALUES ('s1', '2026-05-11T12:00:00Z', 'Skill', 0, 'ship-pr')"
+    )
+    conn.commit()
+    conn.close()
+
+    inputs = _prune.gather_judge_inputs("demo")
+    assert len(inputs.skills) == 1
+    s = inputs.skills[0]
+    assert s.slug == "ship-pr"
+    assert s.usage_count == 2
+    assert s.last_fired_at and s.last_fired_at.startswith("2026-05-11")
+    assert "demo brief" in inputs.workspace_brief
+
+
+def test_viewer_prune_endpoint_renders_queue(tmp_path, monkeypatch):
+    """The /p/<project>/prune route should render the queue JSON the
+    LLM judge wrote, with severity badges + approve/dismiss buttons.
+    Empty-state branches are exercised separately by the bare endpoint."""
+    import json as _json
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen import state as _state
+    importlib.reload(_state)
+    from watchmen.viewer import server as _server
+    importlib.reload(_server)
+
+    _state.init_db()
+    _state.track_project("demo", "/Users/test/demo", threshold=30)
+
+    bundle = tmp_path / "bundles" / "demo"
+    (bundle / "skills" / "doomed-skill").mkdir(parents=True)
+    (bundle / "skills" / "doomed-skill" / "SKILL.md").write_text(
+        "---\nname: doomed-skill\ndescription: never fires\n---\n\n# body\n"
+    )
+    (bundle / "_prune_queue.json").write_text(_json.dumps({
+        "project_key": "demo",
+        "summary": "one skill flagged",
+        "previously_dismissed": [],
+        "flagged": [{
+            "slug": "doomed-skill",
+            "severity": "high",
+            "reason": "Skill never fired and trigger_phrases overlap with `existing-skill`.",
+        }],
+    }))
+
+    client = TestClient(_server.app)
+    r = client.get("/p/demo/prune")
+    assert r.status_code == 200
+    assert "doomed-skill" in r.text
+    assert "Skill never fired" in r.text
+    assert ">high<" in r.text  # severity badge text
+
+
+def test_viewer_prune_approve_deletes_and_removes_from_queue(tmp_path, monkeypatch):
+    """POST /p/<project>/prune/<slug>/approve should delete the skill
+    directory AND drop the entry from _prune_queue.json so the next
+    page render shows the queue cleared."""
+    import json as _json
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen import state as _state
+    importlib.reload(_state)
+    from watchmen.viewer import server as _server
+    importlib.reload(_server)
+
+    _state.init_db()
+    _state.track_project("demo", "/Users/test/demo", threshold=30)
+    bundle = tmp_path / "bundles" / "demo"
+    skill_dir = bundle / "skills" / "doomed-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: doomed-skill\n---\n")
+    (bundle / "_prune_queue.json").write_text(_json.dumps({
+        "project_key": "demo",
+        "summary": "",
+        "previously_dismissed": [],
+        "flagged": [{"slug": "doomed-skill", "severity": "high", "reason": "x"}],
+    }))
+
+    client = TestClient(_server.app)
+    r = client.post("/p/demo/prune/doomed-skill/approve",
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert not skill_dir.exists(), "approve should remove the skill bundle"
+    queue = _json.loads((bundle / "_prune_queue.json").read_text())
+    assert queue["flagged"] == [], "approve should drop the entry from the queue"

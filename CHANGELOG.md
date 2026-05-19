@@ -6,6 +6,54 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-19
+
+This release ships **`watchmen prune`** — the cleaner mode promised at
+launch. The curator is deliberately greedy when it bundles skills (better
+to over-generate than to under-cover); prune is the counterweight.
+
+### Added — `watchmen prune <project>` (LLM-judge skill review)
+- New `watchmen prune <project>` runs an LLM-judge over the project's
+  bundled skills + workspace brief (CLAUDE.md / AGENTS.md) + per-skill
+  usage telemetry from `corpus.db`. The judge is an agent with tools:
+  - `read_skill_full(slug)` — pull the full SKILL.md body
+  - `read_transcript_excerpts(skill_name)` — session windows where the
+    skill actually fired, so the judge can verify usage matches the
+    skill's stated trigger phrases
+  - `read_repo_file` / `list_repo_files` — verify the skill still
+    matches the current source repo
+  - `flag_skill(slug, severity, reason)` — push onto the review queue
+- Writes `bundles/<project>/_prune_queue.json` — no auto-deletes.
+- **Aggressive mode by default** — flag anything that looks low-value
+  (never-fired skills, contradictions with siblings, redundancy with
+  the workspace brief, drifted references to deleted code, vague
+  triggers). Human reviews every flag in the UI.
+- `watchmen prune --all` iterates every tracked project sequentially.
+- `watchmen prune <project> --apply` consumes the queue interactively
+  in the terminal (k/d/s/q prompts).
+- `--model` override matches the curator/analyst conventions; default
+  resolves to the active provider's pick (works on subscription OAuth
+  out of the box).
+
+### Added — Viewer review queue (`/p/<project>/prune`)
+- Renders the flagged skills with severity badge + judge's reason +
+  per-skill description preview + Approve (delete) / Dismiss (keep)
+  buttons.
+- Dismissed slugs persist in `_prune_dismissed.json` and surface back to
+  the judge on the next run — explicit ("I was kept previously, re-flag
+  only with new evidence") rather than silent suppression.
+- "Prune skills →" link added to the project page header.
+
+### Added — Per-skill usage telemetry in corpus.db
+- New `tool_calls.skill_name` column — captures the `input.skill =
+  '<slug>'` payload from Claude Code's `Skill` tool_use blocks. Drives
+  the prune signal but also available for any future analytics. Backed
+  by an idempotent migration so existing corpus.db users only need
+  `watchmen ingest --full` once to backfill.
+- `watchmen ingest --full` flag — surfaces the existing `scan_all(full=True)`
+  path on the CLI. Needed for the one-shot skill_name backfill on
+  pre-0.6.1 installs.
+
 ## [0.6.0] — 2026-05-19
 
 This release lifts watchmen off the OpenRouter-only assumption it shipped
