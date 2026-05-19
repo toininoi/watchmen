@@ -3388,3 +3388,104 @@ def test_viewer_prune_approve_deletes_and_removes_from_queue(tmp_path, monkeypat
     assert not skill_dir.exists(), "approve should remove the skill bundle"
     queue = _json.loads((bundle / "_prune_queue.json").read_text())
     assert queue["flagged"] == [], "approve should drop the entry from the queue"
+
+
+# ─── lifecycle ─────────────────────────────────────────────────────────────
+
+
+def test_cmd_up_dispatches_to_install_helpers_and_prints_summary(monkeypatch, capsys):
+    """`watchmen up` should call hooks.install + service.install_daemon +
+    service.install_viewer in order, then print a success summary."""
+    import argparse
+    from watchmen.commands import lifecycle
+    from watchmen import service as _service, hooks_setup as _hooks
+
+    calls: list[str] = []
+    monkeypatch.setattr(_hooks, "install",   lambda: calls.append("hooks") or 0)
+    monkeypatch.setattr(_service, "install_daemon", lambda **kw: calls.append("daemon") or 0)
+    monkeypatch.setattr(_service, "install_viewer", lambda **kw: calls.append("viewer") or 0)
+    # Stub provider banner so the test doesn't depend on global env state.
+    from watchmen import agent as _agent
+    monkeypatch.setattr(_agent, "provider_banner", lambda **kw: "provider=stub · stub · model=stub")
+
+    rc = lifecycle.cmd_up(argparse.Namespace(
+        skip_hooks=False, skip_daemon=False, skip_viewer=False,
+    ))
+    assert rc == 0
+    assert calls == ["hooks", "daemon", "viewer"], f"unexpected call order: {calls}"
+    out = capsys.readouterr().out
+    assert "watchmen is up" in out
+    assert "viewer:" in out
+
+
+def test_cmd_up_skip_flags_omit_subsystems(monkeypatch):
+    """`--skip-daemon` (etc.) should make `up` bypass that subsystem entirely
+    — install function must not be called for the skipped subsystem."""
+    import argparse
+    from watchmen.commands import lifecycle
+    from watchmen import service as _service, hooks_setup as _hooks
+    from watchmen import agent as _agent
+
+    monkeypatch.setattr(_agent, "provider_banner", lambda **kw: "stub")
+    calls: list[str] = []
+    monkeypatch.setattr(_hooks, "install",   lambda: calls.append("hooks") or 0)
+    monkeypatch.setattr(_service, "install_daemon", lambda **kw: calls.append("daemon") or 0)
+    monkeypatch.setattr(_service, "install_viewer", lambda **kw: calls.append("viewer") or 0)
+
+    lifecycle.cmd_up(argparse.Namespace(skip_hooks=True, skip_daemon=False, skip_viewer=True))
+    assert calls == ["daemon"], f"only daemon should have run: {calls}"
+
+
+def test_cmd_down_yes_dispatches_to_uninstall_helpers(monkeypatch, capsys):
+    """`watchmen down --yes` should call service.uninstall_{daemon,viewer} +
+    hooks.uninstall without prompting."""
+    import argparse
+    from watchmen.commands import lifecycle
+    from watchmen import service as _service, hooks_setup as _hooks
+
+    calls: list[str] = []
+    monkeypatch.setattr(_service, "uninstall_daemon", lambda: calls.append("daemon") or 0)
+    monkeypatch.setattr(_service, "uninstall_viewer", lambda: calls.append("viewer") or 0)
+    monkeypatch.setattr(_hooks,   "uninstall",         lambda: calls.append("hooks") or 0)
+
+    rc = lifecycle.cmd_down(argparse.Namespace(
+        yes=True, skip_hooks=False, skip_daemon=False, skip_viewer=False,
+    ))
+    assert rc == 0
+    assert calls == ["daemon", "viewer", "hooks"], f"unexpected order: {calls}"
+    assert "watchmen is down" in capsys.readouterr().out
+
+
+def test_status_overview_section_renders_services_and_corpus(tmp_path, monkeypatch):
+    """`watchmen status` should now print a services row + corpus health
+    line at the top before the project table. Smoke-tests that
+    `_render_status_overview` writes to the console without crashing on a
+    fresh WATCHMEN_HOME."""
+    from io import StringIO
+    from rich.console import Console
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen.commands import pipeline as _pipeline
+    importlib.reload(_pipeline)
+
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=False, width=120)
+    _pipeline._render_status_overview(console)
+    out = buf.getvalue()
+    assert "daemon" in out and "viewer" in out and "hooks" in out
+    # Corpus section should render even without a corpus.db.
+    assert "corpus" in out
+
+
+def test_notify_settings_changed_no_op_when_daemon_not_loaded(monkeypatch, capsys):
+    """`notify_settings_changed` should silently return False when no
+    daemon is installed — avoids a spurious "reinstall now?" prompt for
+    users who never installed the daemon in the first place."""
+    from watchmen import service
+    monkeypatch.setattr(service, "is_daemon_loaded", lambda: False)
+    out_was = service.notify_settings_changed("provider", interactive=True)
+    assert out_was is False
+    captured = capsys.readouterr()
+    assert "reinstall" not in captured.out.lower()

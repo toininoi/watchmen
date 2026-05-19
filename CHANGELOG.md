@@ -6,6 +6,44 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-05-19
+
+Daemon lifecycle simplification. Three quick wins that turn the
+multi-step "daemon install + viewer install + hooks install + remember
+to reinstall after settings change" routine into a couple of one-liners.
+
+### Added — `watchmen up` and `watchmen down`
+- `watchmen up` installs daemon + viewer + hooks in one shot, auto-starts
+  the services, and prints a success summary with the viewer URL,
+  daemon interval, and a provider-banner line so it's clear which
+  endpoint will handle the runs. `--skip-{hooks,daemon,viewer}` opts
+  out of one subsystem (CI, remote servers, etc.).
+- `watchmen down` is the inverse — uninstalls the scheduler units +
+  hooks settings entries with a single confirmation prompt. Does NOT
+  touch `corpus.db`, `state.db`, or `bundles/`; running `watchmen up`
+  later brings everything back to where it was.
+
+### Changed — Unified `watchmen status`
+- The four previously separate views (`daemon status`, `viewer status`,
+  `hooks status`, `doctor`) collapsed into one screen. New top section
+  shows: active provider banner, services row (daemon / viewer / hooks
+  with ✓/· per host), corpus health (session count, latest transcript
+  time, last-7d skill calls). Below stays the project queue + recent
+  runs table you already had.
+- New `hooks_setup.is_installed_summary()` helper powers the hooks row
+  without printing — uses the existing basename-matcher so stale
+  absolute paths from earlier installs still register as "installed".
+
+### Added — Auto-prompt reinstall on settings change
+- Switching provider or default model previously left the daemon's
+  scheduler unit baking the old config until you remembered to
+  `watchmen daemon install`. The four entry points
+  (`settings provider`, `settings model`, interactive menu provider
+  switch, interactive menu model edit) now call
+  `service.notify_settings_changed()` which detects an installed daemon
+  and offers an in-place reinstall — no more silent staleness. The
+  viewer settings page surfaces the same warning in its flash banner.
+
 ## [0.6.1] — 2026-05-19
 
 This release ships **`watchmen prune`** — the cleaner mode promised at

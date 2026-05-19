@@ -80,3 +80,56 @@ def is_viewer_loaded() -> bool:
         return bool(_backend().is_viewer_loaded())
     except Exception:
         return False
+
+
+def notify_settings_changed(what: str, *, interactive: bool = False) -> bool:
+    """Tell the user the daemon's baked configuration is now stale.
+
+    Daemon scheduler units (launchd plist / systemd service / Task
+    Scheduler XML) embed the model name at install time. Changing provider
+    or model via `watchmen settings ...` doesn't propagate to the daemon
+    until the user reinstalls it. Easy to forget; this surfaces the gap.
+
+    `interactive=True` (the CLI + menu paths) offers a y/N reinstall right
+    now. `interactive=False` (web viewer, programmatic callers) just prints
+    a one-line note. Returns True iff a reinstall was actually performed.
+    """
+    import sys
+    if not is_daemon_loaded():
+        return False
+
+    msg = (
+        f"[yellow]![/] daemon was installed with a different {what}. "
+        f"It keeps using the previous {what} until reinstalled."
+    )
+    if not interactive or not sys.stdin.isatty():
+        # Programmatic path: leave a breadcrumb, let the user act later.
+        try:
+            from rich.console import Console
+            Console().print(msg)
+            Console().print("  [dim]reinstall with: watchmen daemon install[/]")
+        except Exception:
+            # Even if rich isn't available, fall back to plain print so the
+            # notice still surfaces. The auto-prompt notice is too useful
+            # to suppress silently on an import-time hiccup.
+            print(f"! daemon was installed with a different {what}. Run: watchmen daemon install")
+        return False
+
+    from rich.console import Console
+    console = Console()
+    console.print(msg)
+    try:
+        choice = input("  Reinstall daemon now to pick it up? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if choice not in ("y", "yes"):
+        console.print("  [dim]skipped — `watchmen daemon install` when ready[/]")
+        return False
+
+    rc = install_daemon()  # picks up new model via config.default_model()
+    if rc == 0:
+        console.print("[green]✓[/] daemon reinstalled")
+        return True
+    console.print(f"[red]✗[/] daemon reinstall failed (exit {rc})")
+    return False

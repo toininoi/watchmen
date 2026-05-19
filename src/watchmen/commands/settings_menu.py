@@ -261,6 +261,8 @@ def _switch_provider(console: Console) -> None:
             )
     else:
         console.print(f"[green]✓[/] active provider → [bold]{new_provider}[/]")
+    from watchmen import service as _service
+    _service.notify_settings_changed("provider", interactive=True)
 
 
 def _set_api_key(console: Console) -> None:
@@ -371,9 +373,13 @@ def _model_page(console: Console, breadcrumb: list[str]) -> _Nav:
             if new_model and new_model.strip():
                 config.write_env_var("WATCHMEN_DEFAULT_MODEL", new_model.strip())
                 console.print(f"[green]✓[/] default model → [bold]{new_model.strip()}[/]")
+                from watchmen import service as _service
+                _service.notify_settings_changed("model", interactive=True)
         elif choice == "clear":
             if config.clear_env_var("WATCHMEN_DEFAULT_MODEL"):
                 console.print(f"[green]✓[/] override cleared — now using provider default ([bold]{provider_default}[/])")
+                from watchmen import service as _service
+                _service.notify_settings_changed("model", interactive=True)
             else:
                 console.print("[dim]no override was set[/]")
 

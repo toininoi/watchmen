@@ -276,6 +276,49 @@ def uninstall() -> int:
     return 0
 
 
+def is_installed_summary() -> dict[str, bool]:
+    """Return per-host installation state for use in `watchmen status`.
+
+    A host is considered "installed" iff its settings file exists AND at
+    least one of the expected hook events has a watchmen command registered.
+    Quieter than `status()` (no stdout), which is what the unified status
+    screen needs.
+    """
+    out: dict[str, bool] = {}
+    for host in HOSTS:
+        path = _host_path(host)
+        if not path.exists():
+            out[host.name] = False
+            continue
+        try:
+            settings = _load_settings(path)
+        except Exception:
+            out[host.name] = False
+            continue
+        hooks = settings.get("hooks") or {}
+        # Walk every event we install into and look for a watchmen command.
+        # Use `_is_watchmen_hook_cmd` so stale absolute paths from a prior
+        # install location still count as "installed" — what we care about
+        # at the status screen is "is there *any* watchmen hook wired up",
+        # not "is the path on disk identical to today's script path".
+        present = False
+        for event, scripts in WATCHMEN_HOOKS.items():
+            if host.supported_events is not None and event not in host.supported_events:
+                continue
+            entries = hooks.get(event) or []
+            for e in entries:
+                for h in e.get("hooks", []):
+                    if _is_watchmen_hook_cmd(h.get("command") or ""):
+                        present = True
+                        break
+                if present:
+                    break
+            if present:
+                break
+        out[host.name] = present
+    return out
+
+
 def status() -> int:
     for key, p in WATCHMEN_SCRIPTS.items():
         print(f"watchmen {key}: {p}")
