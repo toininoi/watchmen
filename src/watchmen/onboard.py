@@ -73,16 +73,29 @@ _PROVIDER_KEY_PREFIXES = {
 
 
 def _have_any_provider_key() -> bool:
-    """True iff at least one provider has a key configured."""
+    """True iff at least one provider has a credential available — env-var
+    key or OAuth credential discovered from Claude Code / Codex."""
     from watchmen import config as _config
-    return any(_config.provider_key(p) for p in _config.PROVIDER_KEY_VARS)
+    return any(_config.provider_key(p) for p in _config.ALL_PROVIDERS)
 
 
 def _prompt_provider_choice(console: Console) -> str:
-    """Pick the LLM provider the wizard will configure a key for. Returns
-    the canonical provider name."""
+    """Pick the LLM provider the wizard will configure a credential for.
+    Returns the canonical provider name.
+
+    Surfaces OAuth options (claude-pro, chatgpt) when a matching local
+    credential is already present, with subscription-quota framing.
+    Falls back to env-var providers (openrouter / openai / anthropic)
+    otherwise."""
     from watchmen import config as _config
-    options = list(_config.PROVIDER_KEY_VARS)  # order is the priority order
+    from watchmen.credentials import (
+        ClaudeCodeCredentials,
+        CodexCredentials,
+        is_claude_code_available,
+    )
+
+    options = list(_config.PROVIDER_KEY_VARS)
+    default = "openrouter"
 
     console.print("[bold]Which LLM provider would you like to use?[/]")
     console.print(
@@ -90,19 +103,60 @@ def _prompt_provider_choice(console: Console) -> str:
         "  [cyan]openai[/]      use your OpenAI API key directly\n"
         "  [cyan]anthropic[/]   use your Anthropic API key directly"
     )
+
+    # Detect OAuth availability — only surface as a wizard option when the
+    # credential is actually present on disk, otherwise we'd offer choices
+    # that immediately need re-routing to a sign-in step.
+    cc_creds = ClaudeCodeCredentials.read() if is_claude_code_available() else None
+    if cc_creds and cc_creds.has_inference_scope() and not cc_creds.is_expired():
+        options.append("claude-pro")
+        default = "claude-pro"  # prefer "free" subscription auth if available
+        plan = cc_creds.subscription_type or "unknown"
+        console.print(
+            f"  [magenta]claude-pro[/]  use your existing Claude {plan} subscription "
+            f"(detected via Claude Code) — [bold]no extra API spend[/]"
+        )
+    cx_creds = CodexCredentials.read()
+    if cx_creds and cx_creds.mode == "chatgpt":
+        options.append("chatgpt")
+        console.print(
+            "  [magenta]chatgpt[/]    use your ChatGPT subscription via Codex (experimental — "
+            "limited model whitelist, mandatory streaming)"
+        )
+
     choice = Prompt.ask(
         "Provider",
         choices=options,
-        default="openrouter",
+        default=default,
     )
     return choice
 
 
 def _prompt_for_provider_key(console: Console, provider_name: str) -> bool:
-    """Prompt for a key for `provider_name`, write to ~/.config/watchmen/.env,
-    set it in the current process, and persist the active-provider selection.
-    Returns True if a key is now in scope."""
+    """Prompt for a credential for `provider_name` and persist the active-
+    provider selection. Returns True if a credential is now in scope.
+
+    For OAuth providers (claude-pro / chatgpt) there's nothing to paste —
+    the credential is already on disk, we just confirm the choice and
+    flip the active provider. For env-var providers, the legacy key-paste
+    flow runs."""
     from watchmen import config as _config
+
+    # OAuth path — credentials are already on disk; we just need to mark
+    # this provider as active.
+    if provider_name in _config.OAUTH_PROVIDERS:
+        token = _config.provider_key(provider_name)
+        if not token:
+            login_cmd = "claude" if provider_name == "claude-pro" else "codex login"
+            console.print(
+                f"[red]✗[/] {provider_name}: no OAuth credential found on disk. "
+                f"Sign in with `{login_cmd}` first, then re-run."
+            )
+            return False
+        _config.set_active_provider(provider_name)
+        os.environ[_config.PROVIDER_ENV_VAR] = provider_name
+        console.print(f"[green]✓[/] Active provider: [bold]{provider_name}[/]  [dim](OAuth — no key needed)[/]")
+        return True
 
     key_var = _config.PROVIDER_KEY_VARS[provider_name]
     signup_url, signup_note = _PROVIDER_SIGNUP.get(provider_name, (None, None))

@@ -34,12 +34,19 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def load_api_key(provider: str | None = None) -> str:
-    """Resolve the API key for the active (or named) provider.
+    """Resolve the API key (or OAuth access token) for the active (or
+    named) provider.
 
-    Resolution: process env → ~/.config/watchmen/.env. The wizard writes the
-    file with chmod 0600. Raises RuntimeError with an actionable message
-    rather than returning empty — every call site eventually hits an HTTP
-    401 if we return None, and the error trail is harder to follow.
+    Resolution differs by provider type:
+    - **Env-var-based** (openrouter/openai/anthropic): process env →
+      ~/.config/watchmen/.env. The wizard writes the file with chmod 0600.
+    - **OAuth-based** (claude-pro/chatgpt): delegates to the provider's
+      `resolve_api_key()` hook, which reads the macOS keychain entry /
+      Codex auth.json on demand. The user never pastes anything.
+
+    Raises RuntimeError with an actionable message rather than returning
+    empty — every call site eventually hits an HTTP 401 if we return
+    None, and the error trail is harder to follow.
     """
     # Lazy local import to avoid a config↔agent cycle: agent is imported
     # eagerly by several modules; config imports providers; providers
@@ -47,20 +54,64 @@ def load_api_key(provider: str | None = None) -> str:
     from watchmen import config
 
     name = provider or config.active_provider()
+
+    # OAuth providers: defer entirely to the provider's discovery hook.
+    if name in config.OAUTH_PROVIDERS:
+        from watchmen import providers as _providers
+        prov = _providers.get_provider(name)
+        token = prov.resolve_api_key(None)
+        if token:
+            return token
+        # Provider-specific actionable hint — knowing what to do next is
+        # the difference between a tractable error and a silent failure.
+        hint = {
+            "claude-pro": (
+                "Claude Code OAuth credential not found. Sign in via the "
+                "`claude` CLI (or Claude Code desktop) on this machine, "
+                "then retry."
+            ),
+            "chatgpt":    (
+                "Codex ChatGPT OAuth credential not found. Run `codex login` "
+                "and pick ChatGPT-account auth, then retry."
+            ),
+        }.get(name, f"OAuth credential not available for {name}")
+        raise RuntimeError(hint)
+
     if name not in config.PROVIDER_KEY_VARS:
         raise RuntimeError(
-            f"unknown provider {name!r}; valid: {', '.join(config.PROVIDER_KEY_VARS)}"
+            f"unknown provider {name!r}; valid: {', '.join(config.ALL_PROVIDERS)}"
         )
     key_var = config.PROVIDER_KEY_VARS[name]
 
+    # Standard resolution: process env → .env file
+    found: str | None = None
     if k := os.environ.get(key_var):
-        return k
-    env_path = Path.home() / ".config" / "watchmen" / ".env"
-    if env_path.exists():
-        prefix = f"{key_var}="
-        for line in env_path.read_text().splitlines():
-            if line.startswith(prefix):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
+        found = k
+    else:
+        env_path = Path.home() / ".config" / "watchmen" / ".env"
+        if env_path.exists():
+            prefix = f"{key_var}="
+            for line in env_path.read_text().splitlines():
+                if line.startswith(prefix):
+                    found = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+
+    # Give the provider a chance to override or discover the credential
+    # from a non-env source — OpenAIProvider uses this to read Codex's
+    # stored api-key when OPENAI_API_KEY isn't set, so existing Codex
+    # users get credential reuse without an extra paste step.
+    from watchmen import providers as _providers
+    try:
+        prov = _providers.get_provider(name)
+        resolved = prov.resolve_api_key(found)
+        if resolved:
+            return resolved
+    except (ValueError, Exception):
+        # If the provider hook itself fails, fall back to the env-var
+        # value we already found (or raise the standard error below).
+        if found:
+            return found
+
     raise RuntimeError(
         f"{key_var} not set. Either `export {key_var}=...` or run "
         f"`watchmen settings api-key --provider {name}` "
@@ -192,10 +243,18 @@ def chat_call(
         if v is not None:
             body[k] = v
 
-    raw = call_chat(
-        client, prov.endpoint, headers, body,
-        max_retries=max_retries, log=log, provider_label=name,
-    )
+    # Providers with non-chat-completions transports (e.g. streaming-only
+    # Responses API for ChatGPT OAuth) override `call()`. We let them own
+    # the HTTP round-trip + protocol handling; everything else still goes
+    # through the standard call_chat path.
+    if getattr(prov, "custom_transport", False):
+        raw = prov.call(client, prov.endpoint, headers, body,
+                        max_retries=max_retries, log=log, label=name)
+    else:
+        raw = call_chat(
+            client, prov.endpoint, headers, body,
+            max_retries=max_retries, log=log, provider_label=name,
+        )
     return prov.translate_response(raw)
 
 
@@ -288,14 +347,23 @@ class Agent:
                 messages=messages,
                 tools=self.tool_specs,
             )
-            raw = call_chat(
-                self.client,
-                self.endpoint,
-                self.headers,
-                payload,
-                log=self._log,
-                provider_label=self.provider_name,
-            )
+            # See comment in chat_call() — providers with streaming
+            # transports (ChatGPT/Codex Responses API) own the HTTP round
+            # trip themselves. Others go through the standard chat_call.
+            if getattr(self.provider, "custom_transport", False):
+                raw = self.provider.call(
+                    self.client, self.endpoint, self.headers, payload,
+                    log=self._log, label=self.provider_name,
+                )
+            else:
+                raw = call_chat(
+                    self.client,
+                    self.endpoint,
+                    self.headers,
+                    payload,
+                    log=self._log,
+                    provider_label=self.provider_name,
+                )
             data = self.provider.translate_response(raw)
 
             # Track per-turn cost; honor the budget ceiling before doing
