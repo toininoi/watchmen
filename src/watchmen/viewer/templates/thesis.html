@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}thesis — {{ project_key }} — watchmen{% endblock %}
+{% block title %}thesis · {{ project_key }} · watchmen{% endblock %}
 {% block content %}
 
 <div class="mb-6">
@@ -16,7 +16,7 @@
   <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Daily snapshots (each builds on the prior)</div>
   <div class="grid grid-cols-3 md:grid-cols-5 gap-2">
     {% for d in days %}
-    <a href="/p/{{ project_key }}/thesis/{{ d.day }}" class="text-sm text-indigo-600 font-mono hover:underline">{{ d.day }} <span class="text-xs text-gray-500">({{ "%.1f"|format(d.size/1024) }}K)</span></a>
+    <a href="/p/{{ project_key }}/thesis/{{ d.day }}" class="text-sm text-blue-600 font-mono hover:underline">{{ d.day }} <span class="text-xs text-gray-500">({{ "%.1f"|format(d.size/1024) }}K)</span></a>
     {% endfor %}
   </div>
 </div>
@@ -28,7 +28,7 @@
   {{ running_html|safe }}
 </article>
 {% else %}
-<div class="text-sm text-gray-500">No thesis generated yet — run <code>watchmen analyze {{ project_key }}</code>.</div>
+<div class="text-sm text-gray-500">No thesis generated yet. Run <code>watchmen analyze {{ project_key }}</code>.</div>
 {% endif %}
 
 {% endblock %}

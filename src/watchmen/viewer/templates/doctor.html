@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}doctor · watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-6 flex items-end justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold">Doctor</h1>
+    <div class="text-sm text-gray-600 mt-1">
+      Install health diagnostics. Same probes as
+      <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen doctor</code>,
+      rendered in the browser so you don't have to leave the viewer
+      to know what's broken.
+    </div>
+  </div>
+  <div class="flex gap-2">
+    {% if check_openrouter %}
+    <a href="/doctor?check_openrouter=0"
+       class="text-xs px-3 py-1.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50"
+       title="Skip the OpenRouter HTTP probe for faster page loads.">
+      Skip API probe
+    </a>
+    {% else %}
+    <a href="/doctor"
+       class="text-xs px-3 py-1.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50">
+      Run API probe
+    </a>
+    {% endif %}
+    <a href="/doctor" class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]"
+       title="Re-run all checks.">
+      Re-check
+    </a>
+  </div>
+</div>
+
+<!-- Verdict summary -->
+<div class="wm-doctor-verdict wm-doctor-verdict--{% if summary.fails %}fail{% elif summary.warns %}warn{% else %}ok{% endif %} mb-6">
+  <div class="flex items-center gap-3">
+    <span class="wm-doctor-verdict__icon">
+      {% if summary.fails %}✗{% elif summary.warns %}!{% else %}✓{% endif %}
+    </span>
+    <div>
+      <div class="wm-doctor-verdict__label">{{ summary.verdict }}</div>
+      <div class="wm-doctor-verdict__mood">{{ summary.mood }}</div>
+    </div>
+  </div>
+</div>
+
+<!-- Checks table -->
+<div class="wm-card mb-6 overflow-hidden p-0">
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="border-b border-gray-200">
+        <th class="text-left font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Check</th>
+        <th class="text-center font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5 w-16">Status</th>
+        <th class="text-left font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Detail</th>
+        <th class="text-left font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Fix</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr class="border-b border-gray-100 last:border-b-0">
+        <td class="px-4 py-2.5 font-medium">{{ r.label }}</td>
+        <td class="px-4 py-2.5 text-center">
+          {% if r.severity == "ok" %}<span class="wm-pill wm-pill-ok">✓</span>
+          {% elif r.severity == "warn" %}<span class="wm-pill wm-pill-running">!</span>
+          {% else %}<span class="wm-pill wm-pill-fail">✗</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-2.5 text-gray-700">{{ r.detail }}</td>
+        <td class="px-4 py-2.5">
+          {% if r.fix %}
+            {# The fix string often embeds backticks; render as code if it has them. #}
+            {% if "`" in r.fix %}
+              {% set parts = r.fix.split("`") %}
+              <span class="text-xs text-gray-600">
+                {% for p in parts %}{% if loop.index0 % 2 == 1 %}<code class="bg-gray-100 px-1 py-0.5 rounded">{{ p }}</code>{% else %}{{ p }}{% endif %}{% endfor %}
+              </span>
+            {% else %}
+              <span class="text-xs text-gray-600">{{ r.fix }}</span>
+            {% endif %}
+          {% else %}
+            <span class="text-xs text-gray-300">·</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="text-xs text-gray-500">
+  CLI equivalent: <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen doctor</code>
+</div>
+
+{% endblock %}

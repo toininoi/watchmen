@@ -15,6 +15,7 @@ Run via: `pytest tests/` or `pytest tests/test_smoke.py -k <name>`.
 ROOT + SRC come from conftest.py.
 """
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -1100,47 +1101,154 @@ def test_changelog_show_release_notes_announces_on_bump_then_silences():
             cli._LAST_SEEN_VERSION_FILE = orig_tracker
 
 
-def test_hooks_scrub_legacy_paths_on_install_and_uninstall():
-    """When a release retires a hook script (e.g., watchmen_brief.sh in
-    0.2.0), the user's existing settings.json keeps pointing at the
-    removed path until install/uninstall scrubs it. Both code paths
-    must clean stale _LEGACY_HOOK_PATHS entries — install so a routine
-    `watchmen hooks install` after pulling fixes the harness, uninstall
-    so a user leaving the project gets fully detached."""
+def test_hooks_scrub_watchmen_entries_matches_by_basename():
+    """`_scrub_watchmen_hooks` must catch every entry whose command's
+    basename is one of watchmen's hook scripts, regardless of the
+    absolute path. That's what lets install/uninstall self-heal stale
+    paths from older releases (different checkout, pre-reorg layout,
+    different uv tool venv) instead of leaving entries that fail with
+    "No such file or directory" on every event.
+    Retired scripts (watchmen_brief.sh in 0.2.0) get scrubbed by the
+    same path — they're in WATCHMEN_SCRIPT_NAMES."""
     from watchmen import hooks_setup
-    legacy = next(iter(hooks_setup._LEGACY_HOOK_PATHS))
-    # Hook block as Claude Code stores it: per-event list of entries, each
-    # containing inner `hooks` arrays with command strings.
+    # Non-watchmen entry that must be preserved (e.g. user's own hook).
+    foreign = "/usr/local/bin/my-other-hook.sh"
+    # Stale watchmen paths from an older install (different absolute path)
+    # plus the canonical current one and a retired-script path.
+    stale_observe = "/Users/somebody/old-checkout/hooks/watchmen_observe.sh"
+    retired = "/some/path/watchmen_brief.sh"
+    current = str(hooks_setup.HOOK_SCRIPT)
     settings = {
         "hooks": {
             "SessionStart": [
-                {"hooks": [{"type": "command", "command": legacy}]},
-                {"hooks": [{"type": "command", "command": str(hooks_setup.HOOK_SCRIPT)}]},
+                {"hooks": [{"type": "command", "command": stale_observe}]},
+                {"hooks": [{"type": "command", "command": retired}]},
+                {"hooks": [{"type": "command", "command": foreign}]},
             ],
             "PreToolUse": [
                 {"matcher": "", "hooks": [
-                    {"type": "command", "command": legacy},
-                    {"type": "command", "command": str(hooks_setup.HOOK_SCRIPT)},
+                    {"type": "command", "command": stale_observe},
+                    {"type": "command", "command": current},
                 ]},
             ],
         }
     }
-    removed = hooks_setup._scrub_legacy_hooks(settings["hooks"])
-    # Two stale references should be removed (one per event).
-    assert removed == 2, f"expected 2 removed, got {removed}"
-    # SessionStart kept the observe entry, dropped the brief entry.
+    removed = hooks_setup._scrub_watchmen_hooks(settings["hooks"])
+    # 4 inner entries removed: 2 in SessionStart (stale + retired) + 2 in
+    # PreToolUse (stale + current — both are ours).
+    assert removed == 4, f"expected 4 removed, got {removed}"
+    # SessionStart kept only the foreign entry.
     ss = settings["hooks"]["SessionStart"]
     cmds = [h["command"] for e in ss for h in e["hooks"]]
-    assert legacy not in cmds
-    assert str(hooks_setup.HOOK_SCRIPT) in cmds
-    # PreToolUse kept the entry but inner array is now observe-only.
-    pre = settings["hooks"]["PreToolUse"]
-    pre_cmds = [h["command"] for e in pre for h in e["hooks"]]
-    assert legacy not in pre_cmds and str(hooks_setup.HOOK_SCRIPT) in pre_cmds
+    assert cmds == [foreign]
+    # PreToolUse: the matcher entry's inner hooks all got scrubbed, so the
+    # whole entry dropped — and since that was the only PreToolUse entry,
+    # the event key got removed entirely.
+    assert "PreToolUse" not in settings["hooks"]
+    # Idempotent: nothing left to scrub.
+    assert hooks_setup._scrub_watchmen_hooks(settings["hooks"]) == 0
 
-    # Calling again is idempotent (nothing left to remove).
-    removed_again = hooks_setup._scrub_legacy_hooks(settings["hooks"])
-    assert removed_again == 0
+
+def test_hooks_install_self_heals_stale_paths(tmp_path, monkeypatch):
+    """End-to-end: a settings.json containing a stale watchmen entry from
+    an older install (different absolute path) must come out of `install()`
+    with the stale entry removed and the canonical one in its place.
+    Regression guard for the issue where a pre-reorg layout left settings
+    pointing at a non-existent watchmen_observe.sh on every event.
+
+    Patches BOTH supported hosts to temp paths so install() never touches
+    the developer's real ~/.claude or ~/.codex configs."""
+    from watchmen import hooks_setup
+    stale = "/tmp/never-existed-checkout/hooks/watchmen_observe.sh"
+    fake_claude = tmp_path / "claude" / "settings.json"
+    fake_codex = tmp_path / "codex" / "hooks.json"
+    fake_claude.parent.mkdir(parents=True)
+    fake_codex.parent.mkdir(parents=True)
+    fake_claude.write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": stale}]}],
+            "PreToolUse":   [{"matcher": "", "hooks": [{"type": "command", "command": stale}]}],
+        }
+    }))
+    fake_codex.write_text(json.dumps({"hooks": {}}))
+    monkeypatch.setattr(hooks_setup, "CLAUDE_SETTINGS_FILE", fake_claude)
+    monkeypatch.setattr(hooks_setup, "CODEX_SETTINGS_FILE", fake_codex)
+
+    rc = hooks_setup.install()
+    assert rc == 0
+    written = json.loads(fake_claude.read_text())
+    all_cmds = [
+        h.get("command", "")
+        for event_entries in written.get("hooks", {}).values()
+        for e in event_entries
+        for h in e.get("hooks", [])
+    ]
+    assert stale not in all_cmds, "stale path survived install — self-heal broken"
+    # On POSIX the canonical command is the script path verbatim; on Windows
+    # it's the powershell -File wrapper. _settings_command_for produces
+    # whichever form the host shell needs.
+    canonical = hooks_setup._settings_command_for(hooks_setup.HOOK_SCRIPT)
+    assert canonical in all_cmds, "canonical command missing"
+
+
+def test_hooks_install_writes_to_codex_with_event_subset(tmp_path, monkeypatch):
+    """Codex CLI only honors a subset of Claude Code's hook events. install()
+    must write the canonical observe script into every Codex-supported event
+    in ~/.codex/hooks.json, and NOT write entries for events Codex ignores
+    (SessionEnd / SubagentStop / Notification / PreCompact). Regression guard
+    against a future addition to WATCHMEN_HOOKS silently leaking into Codex."""
+    from watchmen import hooks_setup
+    fake_claude = tmp_path / "claude" / "settings.json"
+    fake_codex = tmp_path / "codex" / "hooks.json"
+    fake_claude.parent.mkdir(parents=True)
+    fake_codex.parent.mkdir(parents=True)
+    fake_claude.write_text("{}")
+    # No pre-existing Codex hooks file content — install() should create one.
+    monkeypatch.setattr(hooks_setup, "CLAUDE_SETTINGS_FILE", fake_claude)
+    monkeypatch.setattr(hooks_setup, "CODEX_SETTINGS_FILE", fake_codex)
+
+    rc = hooks_setup.install()
+    assert rc == 0
+    codex = json.loads(fake_codex.read_text())
+    codex_events = set(codex.get("hooks", {}).keys())
+    # Codex supports exactly these.
+    supported = {"SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"}
+    assert codex_events == supported, (
+        f"Codex hooks.json got unexpected event set {codex_events} (expected {supported})"
+    )
+    # Every Codex entry must point at the canonical observe script.
+    # On Windows the canonical form is the powershell -File wrapper, on
+    # POSIX it's the bare path. _settings_command_for resolves that.
+    canonical = hooks_setup._settings_command_for(hooks_setup.HOOK_SCRIPT)
+    cmds = [
+        h.get("command", "")
+        for entries in codex["hooks"].values() for e in entries for h in e.get("hooks", [])
+    ]
+    assert all(c == canonical for c in cmds), f"Codex entries diverged: {cmds}"
+
+
+def test_hooks_install_skips_codex_when_not_installed(tmp_path, monkeypatch):
+    """If a user only has Claude Code (no ~/.codex/ directory), install()
+    must skip Codex gracefully without creating ~/.codex/ themselves —
+    auto-creating an agent's home tree on a machine without that agent is
+    presumptuous. Claude Code install still runs."""
+    from watchmen import hooks_setup
+    fake_claude = tmp_path / "claude" / "settings.json"
+    # Point Codex at a path whose PARENT also doesn't exist (simulates "no
+    # Codex on this machine"). install() must NOT create it.
+    fake_codex = tmp_path / "no-such-codex" / "hooks.json"
+    fake_claude.parent.mkdir(parents=True)
+    fake_claude.write_text("{}")
+    monkeypatch.setattr(hooks_setup, "CLAUDE_SETTINGS_FILE", fake_claude)
+    monkeypatch.setattr(hooks_setup, "CODEX_SETTINGS_FILE", fake_codex)
+
+    rc = hooks_setup.install()
+    assert rc == 0
+    assert not fake_codex.exists(), "install() created Codex config on a machine without Codex"
+    assert not fake_codex.parent.exists(), "install() materialized ~/.codex/ on a machine without Codex"
+    # Claude Code side should still be wired.
+    claude = json.loads(fake_claude.read_text())
+    assert "hooks" in claude and len(claude["hooks"]) > 0
 
 
 def test_brief_artifacts_no_longer_shipped():
@@ -1158,6 +1266,113 @@ def test_brief_artifacts_no_longer_shipped():
         "brief.py reappeared — 0.2.0 deleted this on purpose"
     assert not (repo_root / "hooks" / "watchmen_brief.sh").exists(), \
         "hooks/watchmen_brief.sh reappeared — 0.2.0 deleted this on purpose"
+
+
+def test_codex_plugin_dir_has_required_layout():
+    """plugin-codex/ ships in Codex's native plugin format (the same shape
+    Figma + GitHub Codex plugins use):
+
+      .codex-plugin/plugin.json   — manifest with `interface` UI metadata
+      hooks.json                  — at plugin root (NOT hooks/hooks.json)
+      skills/brief/SKILL.md       — brief slash-skill
+      bin/*                       — scripts the skill + hook invoke
+
+    Codex also recognizes the Claude-Code compat format (.claude-plugin/ +
+    hooks/hooks.json) — the openai-codex plugin uses it — but the native
+    format unlocks the `interface` block (brandColor, displayName, category,
+    capabilities, defaultPrompt) that renders the plugin as a first-class
+    Codex tile. We deliberately picked native to avoid looking like a
+    Claude-side plugin that happens to load.
+
+    Regression guard against a future refactor that drops one of these —
+    the marketplace install silently degrades when the manifest's expected
+    files are missing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    pc = repo_root / "plugin-codex"
+    assert pc.is_dir(), "plugin-codex/ missing — Codex plugin tree was removed"
+    manifest = pc / ".codex-plugin" / "plugin.json"
+    assert manifest.is_file(), "plugin-codex/.codex-plugin/plugin.json missing"
+    data = json.loads(manifest.read_text())
+    assert data.get("name") == "watchmen", f"plugin name drifted: {data.get('name')!r}"
+    assert data.get("license") == "MIT", "Codex plugin license must match the repo/package license"
+    iface = data.get("interface") or {}
+    assert iface.get("displayName"), "plugin.json missing interface.displayName — Codex tile won't render the brand"
+    assert iface.get("brandColor"), "plugin.json missing interface.brandColor"
+    assert iface.get("category"), "plugin.json missing interface.category"
+    hooks = pc / "hooks.json"
+    assert hooks.is_file(), "plugin-codex/hooks.json missing (native Codex layout puts hooks.json at root, not under hooks/)"
+    hooks_data = json.loads(hooks.read_text())
+    assert "hooks" in hooks_data and isinstance(hooks_data["hooks"], dict), \
+        "hooks.json must wrap event lists in a top-level 'hooks' object — Codex's loader rejects the flat shape"
+    assert (pc / "skills" / "brief" / "SKILL.md").is_file()
+    for script in ("check_prompt.sh", "check_prompt.py", "read_state.sh", "resolve_project_key.py"):
+        assert (pc / "bin" / script).is_file(), f"plugin-codex/bin/{script} missing"
+
+
+def test_codex_plugin_bin_scripts_match_claude_code_byte_for_byte():
+    """plugin/bin/ and plugin-codex/bin/ ship the same Python + shell helpers.
+    Codex's hook env exports CLAUDE_PLUGIN_ROOT as a compat alias and the
+    scripts self-locate via $0, so they're functionally agent-agnostic — we
+    duplicate the files (not symlinks; marketplace tarballs flatten symlinks)
+    and rely on this test to keep them in lockstep. If you intentionally
+    diverge one, update this test with the file you split."""
+    import hashlib
+    repo_root = Path(__file__).resolve().parents[1]
+    src_bin = repo_root / "plugin" / "bin"
+    codex_bin = repo_root / "plugin-codex" / "bin"
+    # Only test the scripts that genuinely belong on both sides. statusline.sh
+    # is Claude-Code-only (Codex has no statusline surface).
+    shared = ("check_prompt.sh", "check_prompt.py", "read_state.sh", "resolve_project_key.py")
+    for name in shared:
+        a = (src_bin / name).read_bytes()
+        b = (codex_bin / name).read_bytes()
+        assert hashlib.sha256(a).hexdigest() == hashlib.sha256(b).hexdigest(), (
+            f"plugin/bin/{name} and plugin-codex/bin/{name} drifted — "
+            f"either re-sync (cp plugin/bin/{name} plugin-codex/bin/{name}) "
+            f"or update this test if the divergence is intentional"
+        )
+
+
+def test_codex_marketplace_lists_plugin():
+    """.agents/plugins/marketplace.json is the Codex-side marketplace manifest.
+    `/plugins marketplace add github:firstbatchxyz/watchmen` reads this file
+    to discover installable plugins; a typo here means the user runs the
+    install command and gets no plugin. Verify it points at plugin-codex/."""
+    repo_root = Path(__file__).resolve().parents[1]
+    mp_path = repo_root / ".agents" / "plugins" / "marketplace.json"
+    assert mp_path.is_file(), ".agents/plugins/marketplace.json missing"
+    mp = json.loads(mp_path.read_text())
+    assert mp.get("name") == "watchmen"
+    plugins = mp.get("plugins") or []
+    sources = [p.get("source") for p in plugins]
+    assert "./plugin-codex" in sources, (
+        f"marketplace.json doesn't point at plugin-codex/ (sources: {sources})"
+    )
+
+
+def test_sdist_includes_launch_surface_files():
+    """The source distribution should contain every public launch surface,
+    including both plugins and community/security docs. PyPI users may inspect
+    the sdist even when plugin installation itself is GitHub-based."""
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text())
+    included = set(pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"])
+    expected = {
+        "plugin",
+        "plugin-codex",
+        ".agents/plugins/marketplace.json",
+        ".claude-plugin/marketplace.json",
+        "docs/images",
+        ".github/ISSUE_TEMPLATE",
+        ".github/pull_request_template.md",
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+    }
+    missing = sorted(expected - included)
+    assert not missing, f"sdist is missing launch surface files: {missing}"
 
 
 def test_harness_installed_skills_reads_skill_md_frontmatter():
@@ -1239,7 +1454,7 @@ def test_curate_finder_schema_accepts_enhancement_of_field():
     # Stub load_api_key so CI (no OPENROUTER_API_KEY) doesn't raise during
     # Agent.__init__.
     _orig_load = _agent.load_api_key
-    _agent.load_api_key = lambda: "stub-test-key"
+    _agent.load_api_key = lambda *a, **k: "stub-test-key"
     try:
         with httpx.Client() as client:
             finder = curate.build_finder_agent(
@@ -1272,7 +1487,7 @@ def test_curate_build_skill_curator_respects_out_subdir():
         "when_to_use": "y", "source_files": [], "session_ids": [],
     }
     _orig_load = _agent.load_api_key
-    _agent.load_api_key = lambda: "stub-test-key"
+    _agent.load_api_key = lambda *a, **k: "stub-test-key"
     try:
         with httpx.Client() as client:
             curator = curate.build_skill_curator(
@@ -1309,7 +1524,7 @@ def test_curate_build_skill_curator_enhancement_mode_prepends_context():
         "enhancement_of": "craft-plan",
     }
     _orig_load = _agent.load_api_key
-    _agent.load_api_key = lambda: "stub-test-key"
+    _agent.load_api_key = lambda *a, **k: "stub-test-key"
     try:
         with httpx.Client() as client:
             curator = curate.build_skill_curator(
@@ -1462,13 +1677,10 @@ def test_metrics_hbar_chart_svg_renders_rows_and_handles_edges():
 
 
 def test_viewer_insights_route_returns_html_with_key_sections():
-    """The /insights route is the user-visible HTML analog of
-    `watchmen insights`. Test that against the actual app:
-      - returns 200
-      - includes the banner, stats tile section, repo table header,
-        cross-repo and untapped sections (when present), and the
-        hour-of-day heatmap container
-    Uses FastAPI's TestClient so we don't need to spin up a real server.
+    """The /insights route is the LLM-driven view: cross-repo digest,
+    friction signals, deep digest cache. Raw aggregations (stat tiles,
+    adapter mix) live on /metrics now — those assertions belong to the
+    metrics smoke test below.
     """
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -1479,18 +1691,311 @@ def test_viewer_insights_route_returns_html_with_key_sections():
     r = client.get("/insights")
     assert r.status_code == 200, f"/insights returned {r.status_code}: {r.text[:200]}"
     html = r.text
-    # Banner + identity
-    assert "Watchmen — insights" in html
-    # Stats tiles
-    assert "Sessions / 7d" in html and "Tool errors / 7d" in html
-    assert "Adapter mix" in html
-    # Repo table
-    assert "<th class=\"px-4 py-2\">Project</th>" in html
-    # Heatmap container (the SVG renders only when there's data, but the
-    # section header is always present)
+    assert "Watchmen insights" in html
+    # Cross-link to raw metrics page (the de-dup pointer).
+    assert 'href="/metrics"' in html
+    # Repo table is still here for LLM-context.
+    assert '<th class="px-4 py-2">Project</th>' in html
+    # Heatmap container header is always rendered.
     assert "Activity by hour" in html
-    # Nav link to itself
+    # Nav link to itself.
     assert "/insights" in html
+
+
+def test_viewer_metrics_route_includes_profile_card():
+    """The profile card (FM-style spider + stats columns + traits +
+    agent-mix donut + top-tools bars + activity sparklines) is inlined
+    into /metrics. Smoke-test that the route renders with the landmarks
+    regardless of corpus state — empty corpus produces a Newcomer card."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/metrics?card_days=90")
+    assert r.status_code == 200, f"/metrics returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    # Card-section anchors.
+    assert "wm-profile" in html
+    assert "OVR" in html
+    # Hero row layout — spider chart + 3-column stat grid.
+    assert "wm-profile__hero" in html and "wm-profile__spider" in html
+    # Each axis name must appear in the page somewhere — either in the
+    # radar chart's JSON payload (lowercase indicator names) or in the
+    # axis-legend block below it (title case + uppercase via CSS). The old
+    # all-caps SVG <text> labels are gone now that the radar is client-rendered.
+    for axis in ("Throughput", "Frugality", "Reliability", "Curiosity", "Range", "Mastery"):
+        assert axis in html, f"axis name {axis} missing from /metrics profile card"
+    for col in ("Volume", "Efficiency", "Breadth"):
+        assert col in html, f"column header {col} missing"
+    # Mini-visualization row.
+    assert "Agent mix" in html and "Top tools" in html
+    assert "Sessions / day" in html  # activity sparklines
+    # Window selector for the card.
+    assert 'name="card_days"' in html
+    assert "Player traits" in html
+
+
+def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
+    """The /metrics route is the raw-numbers dashboard. It should render
+    cleanly with or without corpus data. When corpus.db has sessions, the
+    "By coding agent" table appears; the section is suppressed otherwise
+    so an empty install doesn't show a blank table."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/metrics")
+    assert r.status_code == 200, f"/metrics returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    assert "Aggregated metrics" in html
+    # The headline tiles (sessions/prompts/tokens/cost) live here, not on /insights.
+    assert "Sessions / 7d" in html and "Cost / 7d" in html
+    # Cross-agent comparison panel — guarded by `cmp_facts.adapters >= 2`.
+    # Only assert presence/absence consistently: if there ARE 2+ adapters
+    # in the corpus, the section title must be there; if not, neither.
+    if "How you use each agent" in html:
+        # When the panel renders, its CSS class must be present and at
+        # least 2 per-adapter cards must be inside the grid.
+        assert "wm-cmp__grid" in html
+        assert html.count("wm-cmp__card-header") >= 2, \
+            "cross-agent panel rendered but with <2 adapter cards"
+    # Per-agent section is conditional on adapter data; only assert it
+    # when the corpus actually contains sessions.
+    from watchmen import metrics as _metrics
+    adapters = _metrics.adapter_breakdown_all(days=30)
+    if adapters:
+        assert "By coding agent" in html
+        if any(a["agent"] == "claude_code" for a in adapters):
+            assert "Claude Code" in html
+
+
+def test_viewer_doctor_page_renders_structured_checks(monkeypatch):
+    """`/doctor` should run the same probes as the CLI and render each
+    row with a severity pill. Skipping the OpenRouter HTTP probe keeps
+    the test offline + deterministic; the key-set check still fires."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import server as viewer_server
+
+    client = TestClient(viewer_server.app)
+    r = client.get("/doctor?check_openrouter=0")
+    assert r.status_code == 200, f"/doctor returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    # Page landmarks + at least the key + corpus + projects checks render.
+    assert "OpenRouter key" in html
+    assert "corpus.db" in html
+    assert "tracked projects" in html
+    # Verdict tile always renders (one of three classes).
+    assert "wm-doctor-verdict" in html
+    # CLI parity hint is present so users discover the parallel command.
+    assert "watchmen doctor" in html
+
+
+def test_viewer_settings_page_and_port_post_roundtrip(tmp_path, monkeypatch):
+    """`/settings` should render the form, and POST /settings/port should
+    write through `config.write_env_var` + 303 back with a flash. We
+    redirect the .env path to tmp_path so the real config stays untouched."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen import config as _config
+    from watchmen.viewer import diagnostics as wm_diag
+    from watchmen.viewer import server as viewer_server
+
+    # Redirect config writes to a tmp .env so we don't pollute the user's
+    # real ~/.config/watchmen/.env.
+    fake_env = tmp_path / "watchmen.env"
+    def _read(key, default=None):
+        if not fake_env.exists():
+            return default
+        for line in fake_env.read_text().splitlines():
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1]
+        return default
+    def _write(key, value):
+        lines = []
+        if fake_env.exists():
+            lines = [
+                line for line in fake_env.read_text().splitlines()
+                if not line.startswith(f"{key}=")
+            ]
+        lines.append(f"{key}={value}")
+        fake_env.write_text("\n".join(lines) + "\n")
+        return fake_env
+    monkeypatch.setattr(_config, "read_env_var", _read)
+    monkeypatch.setattr(_config, "write_env_var", _write)
+    monkeypatch.setattr(wm_diag.config, "read_env_var", _read)
+    monkeypatch.setattr(wm_diag.config, "write_env_var", _write)
+
+    client = TestClient(viewer_server.app)
+
+    # GET renders.
+    r = client.get("/settings")
+    assert r.status_code == 200
+    assert "OpenRouter API key" in r.text
+    assert "Viewer port" in r.text
+
+    # POST bad port → redirect with err: flash.
+    r = client.post(
+        "/settings/port",
+        content="value=99",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "flash=err" in r.headers["location"]
+
+    # POST valid port → redirect with ok: flash + env written.
+    r = client.post(
+        "/settings/port",
+        content="value=7777",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "flash=ok" in r.headers["location"]
+    assert "WATCHMEN_VIEWER_PORT=7777" in fake_env.read_text()
+
+
+def test_viewer_actions_run_dispatch_and_status(tmp_path, monkeypatch):
+    """Web-triggered runs should spawn a real CLI subprocess, write a log
+    file under WATCHMEN_HOME/web-runs/, redirect to a tail page, and flip
+    from "running" → "done" once the process exits (zombie reaping)."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import actions as wm_actions
+    from watchmen.viewer import server as viewer_server
+
+    # Redirect web-runs storage to tmp_path so we don't pollute the real
+    # WATCHMEN_HOME, and substitute a fast-exiting binary for "watchmen"
+    # so the test runs in <100ms regardless of CLI install state.
+    runs_dir = tmp_path / "web-runs"
+    monkeypatch.setattr(wm_actions, "WEB_RUNS_DIR", runs_dir)
+    monkeypatch.setattr(wm_actions.shutil, "which", lambda _name: "/bin/echo")
+    monkeypatch.setitem(wm_actions.RUNNABLE_ACTIONS, "analyze", ["analyze"])
+
+    client = TestClient(viewer_server.app)
+
+    # Rejection: unknown action.
+    r = client.post(
+        "/actions/run",
+        content="action=banana&project_key=demo",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert r.status_code == 400
+
+    # Rejection: invalid project_key (path-traversal / shell metachars).
+    r = client.post(
+        "/actions/run",
+        content="action=analyze&project_key=..%2F..%2Fetc%2Fpasswd",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert r.status_code == 400
+
+    # Happy path: spawn "echo analyze demo", redirect to /actions/run/<id>.
+    r = client.post(
+        "/actions/run",
+        content="action=analyze&project_key=demo",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    run_id = r.headers["location"].rsplit("/", 1)[-1]
+    assert (runs_dir / f"{run_id}.json").exists()
+    assert (runs_dir / f"{run_id}.log").exists()
+
+    # Tail page renders + reports done once the zombie is reaped.
+    wm_actions._wait_for_finish(run_id, timeout_s=3.0)
+    r2 = client.get(f"/actions/run/{run_id}")
+    assert r2.status_code == 200
+    assert "✓ done" in r2.text
+    assert "analyze" in r2.text and "demo" in r2.text
+
+
+def test_viewer_next_best_actions_ranks_signals():
+    """The action banner ranks projects by need. With no tracked projects
+    the helper returns an empty list (graceful empty state) — the heavier
+    ranking branches are covered by integration testing against real
+    corpora."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from watchmen.viewer import actions as wm_actions
+
+    # No projects → no actions. Don't assert on shape beyond emptiness;
+    # caller code (template) tolerates any list including empty.
+    out = wm_actions.next_best_actions(project_key="definitely-not-tracked")
+    assert out == []
+
+
+def test_viewer_skill_page_renders_provenance_and_controls(tmp_path, monkeypatch):
+    """Skill detail page should surface `watchmen why` data inline
+    (triggers, source files, sessions, curator excerpt) AND let the user
+    pin/drop without dropping to CLI. Verifies the GET payload contains
+    the new landmarks AND the POST /pin handler mutates _pinned.json."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import json as _json
+    from fastapi.testclient import TestClient
+    from watchmen import cli as _cli
+    from watchmen.viewer import server as viewer_server
+
+    # Build a fake bundle: skills/demo/SKILL.md + _candidates.json with the
+    # slug "demo" so get_skill_provenance() has triggers + source_files +
+    # session_ids to render. No corpus.db, so sessions show "(not in corpus)".
+    project = "smoke-demo"
+    bundles = tmp_path / "bundles"
+    skill_dir = bundles / project / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: smoke test skill\n---\n\n# Demo\n")
+    (bundles / project / "_candidates.json").write_text(_json.dumps([
+        {
+            "slug": "demo",
+            "name": "demo",
+            "description": "smoke test skill",
+            "when_to_use": ["whenever the smoke test runs"],
+            "source_files": [str(skill_dir / "SKILL.md")],
+            "session_ids": ["sess-abc123"],
+        }
+    ]))
+    (bundles / project / "_curation_log.md").write_text(
+        "## 2026-05-16\n## demo\n- rationale: keep it green\n"
+    )
+
+    # Override cli.ROOT so util.bundle_dir() points at our tmp bundles AND
+    # patch the viewer's module-global BUNDLES constant (captured at import).
+    monkeypatch.setattr(_cli, "ROOT", tmp_path)
+    monkeypatch.setattr(viewer_server, "BUNDLES", bundles)
+
+    client = TestClient(viewer_server.app)
+    r = client.get(f"/p/{project}/skills/demo")
+    assert r.status_code == 200, f"skill page returned {r.status_code}: {r.text[:200]}"
+    html = r.text
+    # Provenance landmarks.
+    assert "Provenance" in html
+    assert "When to use" in html
+    assert "whenever the smoke test runs" in html
+    assert "Source files" in html
+    assert "rationale: keep it green" in html  # curator excerpt
+    # Controls.
+    assert f'action="/p/{project}/skills/demo/pin"' in html
+    assert f'action="/p/{project}/skills/demo/drop"' in html
+
+    # POST /pin should write _pinned.json + 303 to the skill page.
+    r2 = client.post(f"/p/{project}/skills/demo/pin", follow_redirects=False)
+    assert r2.status_code == 303
+    assert r2.headers["location"].endswith(f"/p/{project}/skills/demo")
+    pinned_file = bundles / project / "_pinned.json"
+    assert pinned_file.exists() and "demo" in _json.loads(pinned_file.read_text())
+
+    # Page now flips Pin → Unpin and shows the pill.
+    r3 = client.get(f"/p/{project}/skills/demo")
+    assert "Unpin" in r3.text and "pinned" in r3.text
 
 
 def test_viewer_base_template_exposes_insights_nav_link():
@@ -1556,35 +2061,30 @@ def test_onboard_runs_projects_in_parallel():
 # ─── API key management ─────────────────────────────────────────────────────
 
 
-def test_api_key_helpers_roundtrip():
+def test_api_key_helpers_roundtrip(monkeypatch, tmp_path):
     """_read_current_api_key / _write_api_key must roundtrip cleanly while
     preserving any other lines in ~/.config/watchmen/.env (e.g. LANGFUSE_KEY,
     custom OPENROUTER_API_BASE). If write clobbers unrelated lines, teammates
     rotating their key would lose other config silently."""
-    import os
-    import tempfile
 
     from watchmen import cli
-    from watchmen import config
-    with tempfile.TemporaryDirectory() as td:
-        env_path = Path(td) / ".env"
-        env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    env_dir = tmp_path / ".config" / "watchmen"
+    env_dir.mkdir(parents=True)
+    env_path = env_dir / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-old\nOTHER_VAR=keep-me\n")
 
-        orig_env_path = config.ENV_PATH
-        orig_env_key = os.environ.pop("OPENROUTER_API_KEY", None)
-        config.ENV_PATH = env_path
-        try:
-            assert cli._read_current_api_key() == "sk-old"
-            cli._write_api_key("sk-new")
-            assert cli._read_current_api_key() == "sk-new"
-            # Critically: OTHER_VAR must survive the rotation.
-            content = env_path.read_text()
-            assert "OTHER_VAR=keep-me" in content, "rotation clobbered an unrelated env line"
-            assert content.count("OPENROUTER_API_KEY=") == 1, "duplicate OPENROUTER_API_KEY line after rotation"
-        finally:
-            config.ENV_PATH = orig_env_path
-            if orig_env_key is not None:
-                os.environ["OPENROUTER_API_KEY"] = orig_env_key
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Force openrouter as the active provider regardless of test-runner env.
+    monkeypatch.setenv("WATCHMEN_PROVIDER", "openrouter")
+
+    assert cli._read_current_api_key() == "sk-old"
+    cli._write_api_key("sk-new")
+    assert cli._read_current_api_key() == "sk-new"
+    # Critically: OTHER_VAR must survive the rotation.
+    content = env_path.read_text()
+    assert "OTHER_VAR=keep-me" in content, "rotation clobbered an unrelated env line"
+    assert content.count("OPENROUTER_API_KEY=") == 1, "duplicate OPENROUTER_API_KEY line after rotation"
 
 
 # ─── Launchd plist sanity ───────────────────────────────────────────────────
@@ -1802,12 +2302,19 @@ def test_cli_unknown_command_suggests_nearest_match():
     assert "invalid choice" not in body
 
 
-def test_cli_open_constructs_url_and_invokes_webbrowser():
+def test_cli_open_constructs_url_and_invokes_webbrowser(monkeypatch):
     """`watchmen open <project>` must build http://host:port/p/<project> and pass
     it to webbrowser.open. The viewer-down warning must not block the open
-    attempt — open is a 'best effort, give me the URL' command, not a gate."""
-    from watchmen import cli
+    attempt — open is a 'best effort, give me the URL' command, not a gate.
+
+    Monkeypatches `config.read_env_var` so the test's "no project, just base
+    URL" case sees VIEWER_DEFAULT_PORT instead of whatever the user has in
+    ~/.config/watchmen/.env. Otherwise this test fails on developer machines
+    that have customized WATCHMEN_VIEWER_PORT, which has nothing to do with
+    the URL-construction behavior under test."""
+    from watchmen import cli, config
     import webbrowser
+    monkeypatch.setattr(config, "read_env_var", lambda key, default=None: default)
     opened: list[str] = []
     orig = webbrowser.open
     webbrowser.open = lambda url, new=0: (opened.append(url), True)[1]
@@ -1819,7 +2326,6 @@ def test_cli_open_constructs_url_and_invokes_webbrowser():
         opened.clear()
         rc = cli.main(["open"])  # no project, just base URL
         assert rc == 0
-        from watchmen import config
         expected_base = f"http://127.0.0.1:{config.VIEWER_DEFAULT_PORT}"
         assert opened and opened[0].rstrip("/") == expected_base, f"unexpected base URL: {opened}"
     finally:
@@ -2510,89 +3016,77 @@ def test_rorschach_inkblots_are_mirror_symmetric():
     assert inspect._rorschach_inkblot() in inspect._RORSCHACH_BLOTS
 
 
-def test_config_viewer_port_reads_env_then_file_then_default():
+def test_config_viewer_port_reads_env_then_file_then_default(monkeypatch, tmp_path):
     """`config.viewer_port()` resolves in priority order: process env var,
     then the global config file, then the hardcoded default. Regression:
     if the precedence flips, a user who sets WATCHMEN_VIEWER_PORT=9999 in
     their shell will get their saved file value instead — surprising."""
     import os
     from watchmen import config
-    # Isolate to a temp env file so we don't clobber the user's real one.
-    with tempfile.TemporaryDirectory() as td:
-        orig_env_path = config.ENV_PATH
-        config.ENV_PATH = Path(td) / ".env"
-        orig_env = os.environ.pop("WATCHMEN_VIEWER_PORT", None)
-        try:
-            # 1. nothing set → default
-            assert config.viewer_port() == config.VIEWER_DEFAULT_PORT
 
-            # 2. file only
-            config.write_env_var("WATCHMEN_VIEWER_PORT", "9111")
-            assert config.viewer_port() == 9111
+    # Isolate to a temp $HOME so write_env_var doesn't clobber the user's real
+    # ~/.config/watchmen/.env. config resolves the env-file path from
+    # Path.home() on every read, so monkeypatching home is sufficient.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("WATCHMEN_VIEWER_PORT", raising=False)
+    env_file = tmp_path / ".config" / "watchmen" / ".env"
 
-            # 3. env beats file
-            os.environ["WATCHMEN_VIEWER_PORT"] = "9222"
-            assert config.viewer_port() == 9222
+    # 1. nothing set → default
+    assert config.viewer_port() == config.VIEWER_DEFAULT_PORT
 
-            # 4. unrelated keys preserved across writes
-            config.write_env_var("OPENROUTER_API_KEY", "sk-test")
-            config.write_env_var("WATCHMEN_VIEWER_PORT", "9333")
-            file_body = config.ENV_PATH.read_text()
-            assert "OPENROUTER_API_KEY=sk-test" in file_body
-            assert "WATCHMEN_VIEWER_PORT=9333" in file_body
-            # File chmod is 0600 (config writes secrets and shouldn't leak them).
-            assert (config.ENV_PATH.stat().st_mode & 0o777) == 0o600
-        finally:
-            config.ENV_PATH = orig_env_path
-            if orig_env is None:
-                os.environ.pop("WATCHMEN_VIEWER_PORT", None)
-            else:
-                os.environ["WATCHMEN_VIEWER_PORT"] = orig_env
+    # 2. file only
+    config.write_env_var("WATCHMEN_VIEWER_PORT", "9111")
+    assert config.viewer_port() == 9111
+
+    # 3. env beats file
+    os.environ["WATCHMEN_VIEWER_PORT"] = "9222"
+    assert config.viewer_port() == 9222
+
+    # 4. unrelated keys preserved across writes
+    config.write_env_var("OPENROUTER_API_KEY", "sk-test")
+    config.write_env_var("WATCHMEN_VIEWER_PORT", "9333")
+    file_body = env_file.read_text()
+    assert "OPENROUTER_API_KEY=sk-test" in file_body
+    assert "WATCHMEN_VIEWER_PORT=9333" in file_body
+    # File chmod is 0600 (config writes secrets and shouldn't leak them).
+    assert (env_file.stat().st_mode & 0o777) == 0o600
 
 
-def test_cli_settings_port_get_and_set_with_validation():
+def test_cli_settings_port_get_and_set_with_validation(monkeypatch, tmp_path):
     """`watchmen settings port` prints the current value; `watchmen settings port N`
     persists it. Invalid ports (non-numeric, out of 1024–65535) get rejected with
     exit 1 — they'd otherwise crash uvicorn confusingly later."""
     import io
-    import os
     from watchmen import cli
     from watchmen import config
-    with tempfile.TemporaryDirectory() as td:
-        orig_env_path = config.ENV_PATH
-        config.ENV_PATH = Path(td) / ".env"
-        orig_env = os.environ.pop("WATCHMEN_VIEWER_PORT", None)
-        buf = io.StringIO()
-        orig_stdout = cli.sys.stdout
-        cli.sys.stdout = buf
-        try:
-            # Get (no value): shows default
-            rc = cli.main(["settings", "port"])
-            assert rc == 0
-            out = buf.getvalue()
-            assert str(config.VIEWER_DEFAULT_PORT) in out, f"expected default port in: {out!r}"
 
-            # Set valid
-            buf.truncate(0); buf.seek(0)
-            rc = cli.main(["settings", "port", "9543"])
-            assert rc == 0
-            assert config.viewer_port() == 9543, "value not persisted"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("WATCHMEN_VIEWER_PORT", raising=False)
+    buf = io.StringIO()
+    monkeypatch.setattr(cli.sys, "stdout", buf)
 
-            # Set invalid (string)
-            buf.truncate(0); buf.seek(0)
-            rc = cli.main(["settings", "port", "notaport"])
-            assert rc == 1, f"non-numeric port should exit 1, got {rc}"
+    # Get (no value): shows default
+    rc = cli.main(["settings", "port"])
+    assert rc == 0
+    out = buf.getvalue()
+    assert str(config.VIEWER_DEFAULT_PORT) in out, f"expected default port in: {out!r}"
 
-            # Set out-of-range
-            buf.truncate(0); buf.seek(0)
-            rc = cli.main(["settings", "port", "70000"])
-            assert rc == 1, f"out-of-range port should exit 1, got {rc}"
-            assert config.viewer_port() == 9543, "invalid set must not clobber valid prior value"
-        finally:
-            cli.sys.stdout = orig_stdout
-            config.ENV_PATH = orig_env_path
-            if orig_env is not None:
-                os.environ["WATCHMEN_VIEWER_PORT"] = orig_env
+    # Set valid
+    buf.truncate(0); buf.seek(0)
+    rc = cli.main(["settings", "port", "9543"])
+    assert rc == 0
+    assert config.viewer_port() == 9543, "value not persisted"
+
+    # Set invalid (string)
+    buf.truncate(0); buf.seek(0)
+    rc = cli.main(["settings", "port", "notaport"])
+    assert rc == 1, f"non-numeric port should exit 1, got {rc}"
+
+    # Set out-of-range
+    buf.truncate(0); buf.seek(0)
+    rc = cli.main(["settings", "port", "70000"])
+    assert rc == 1, f"out-of-range port should exit 1, got {rc}"
+    assert config.viewer_port() == 9543, "invalid set must not clobber valid prior value"
 
 
 def test_cli_bare_invocation_runs_smart_default():
@@ -2610,5 +3104,3 @@ def test_cli_bare_invocation_runs_smart_default():
     finally:
         cli._is_first_run = orig
     assert rc == 0, f"bare watchmen on first-run should exit 0, got {rc}"
-
-

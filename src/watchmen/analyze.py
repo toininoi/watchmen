@@ -20,12 +20,23 @@ from textwrap import dedent
 
 import httpx
 
-from watchmen.agent import call_openrouter, load_api_key
+from watchmen.agent import chat_call
 from watchmen.corpus_filters import substantive_filter
 from watchmen.paths import ANALYSES_DIR, CORPUS_DB
 
 ROOT = Path(__file__).parent
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+
+
+def _default_model() -> str:
+    """Resolve the analyst's default model via the active provider, lazily
+    so a user who switches provider after import sees the new default."""
+    from watchmen import config
+    return config.default_model()
+
+
+# Module-level alias for external imports that referenced `DEFAULT_MODEL`
+# directly. Resolved at import time against the current active provider.
+DEFAULT_MODEL = _default_model()
 
 
 # ─── Tools ──────────────────────────────────────────────────────────────────
@@ -272,7 +283,16 @@ def run_day(
     project_substr: str | None,
     prior_md: str,
     max_iter: int = 24,
+    *,
+    provider: str | None = None,
 ):
+    """Run one day of analyst.
+
+    `headers` is retained as a positional argument for backward compatibility
+    with external callers, but is now unused — the provider abstraction in
+    `chat_call` builds the right headers from the active provider at call
+    time. New callers can pass `headers={}`.
+    """
     user_msg = dedent(f"""
         Today: {day}
         Project scope: {project_substr or '(all projects)'}
@@ -296,11 +316,14 @@ def run_day(
 
     final_md: str | None = None
     for _ in range(max_iter):
-        data = call_openrouter(client, headers, {
-            "model": model,
-            "messages": messages,
-            "tools": TOOLS,
-        })
+        data = chat_call(
+            client,
+            messages,
+            model=model,
+            tools=TOOLS,
+            provider=provider,
+            agent_name="analyst",
+        )
         msg = data["choices"][0]["message"]
 
         clean = {"role": "assistant", "content": msg.get("content") or ""}
@@ -357,14 +380,10 @@ def main() -> None:
     parser.add_argument("--reset", action="store_true", help="ignore prior _running.md and per-day cache")
     args = parser.parse_args()
 
-    api_key = load_api_key()
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        # OpenRouter app attribution. Matches agent.py for consistent app=watchmen identity.
-        "HTTP-Referer": "https://github.com/firstbatchxyz/watchmen",
-        "X-Title": "watchmen:analyst",
-    }
+    # Headers are no longer assembled here — chat_call() picks them up from
+    # the active provider on every call. Kept as an empty dict because
+    # run_day still accepts it positionally for backward compat.
+    headers: dict = {}
 
     conn = sqlite3.connect(CORPUS_DB)
     conn.row_factory = sqlite3.Row

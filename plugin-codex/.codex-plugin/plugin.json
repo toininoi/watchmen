@@ -1,0 +1,37 @@
+{
+  "name": "watchmen",
+  "version": "0.1.6",
+  "description": "Skill suggestions + workspace context from your watchmen sessions corpus, surfaced into Codex sessions.",
+  "author": {
+    "name": "Dria",
+    "url": "https://github.com/firstbatchxyz/watchmen"
+  },
+  "homepage": "https://github.com/firstbatchxyz/watchmen",
+  "repository": "https://github.com/firstbatchxyz/watchmen",
+  "license": "MIT",
+  "keywords": [
+    "sessions",
+    "skill-suggestions",
+    "context",
+    "claude-code",
+    "codex",
+    "productivity"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Watchmen",
+    "shortDescription": "Skill suggestions + workspace context from your sessions corpus",
+    "longDescription": "Watchmen turns your past coding-agent sessions into a curated skills library. It ingests Claude Code + Codex + pi.dev transcripts into a local corpus, curates reusable skill bundles from your patterns, and quietly surfaces them via a prompt-submit hook so each new session starts with the relevant context already in reach. Pairs with `watchmen brief` (slash skill) to recap what changed since your last curator run.",
+    "developerName": "Dria",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/firstbatchxyz/watchmen",
+    "defaultPrompt": [
+      "What did watchmen detect in this workspace?",
+      "Summarize my last session in this project."
+    ],
+    "brandColor": "#3B82F6"
+  }
+}

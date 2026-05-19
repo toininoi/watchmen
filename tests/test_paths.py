@@ -18,12 +18,14 @@ import pytest
 def reload_paths(tmp_path: Path, monkeypatch):
     """Reimport watchmen.paths with WATCHMEN_HOME pointed at a temp dir so
     the module-level path constants resolve against fresh state. monkeypatch
-    restores the original env var when the test exits."""
+    restores the original env var on teardown, and we evict the cached
+    paths module so the next test re-imports against the real environment."""
     def _reload():
         monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
         sys.modules.pop("watchmen.paths", None)
         return importlib.import_module("watchmen.paths")
-    return _reload
+    yield _reload
+    sys.modules.pop("watchmen.paths", None)
 
 
 def test_legacy_alias_migrates_to_new_name(tmp_path: Path, reload_paths):

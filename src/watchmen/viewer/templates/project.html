@@ -1,19 +1,21 @@
 {% extends "base.html" %}
-{% block title %}{{ project.project_key }} — watchmen{% endblock %}
+{% block title %}{{ project.project_key }} · watchmen{% endblock %}
 {% block content %}
 
 <div class="mb-6 flex items-center justify-between">
   <div>
     <div class="text-xs text-gray-500 mb-1"><a href="/" class="hover:text-gray-700">← dashboard</a></div>
     <h1 class="text-2xl font-semibold">{{ project.project_key }}</h1>
-    <div class="text-sm text-gray-600 mt-1 font-mono">{{ project.source_repo|replace("/Users/batuhanaktas", "~") }}</div>
+    <div class="text-sm text-gray-600 mt-1 font-mono">{{ project.source_repo|replace("/Users/" ~ project.source_repo.split("/")[2], "~") if project.source_repo and project.source_repo.startswith("/Users/") else project.source_repo }}</div>
   </div>
   <div class="text-right space-y-1">
-    <div><a href="/p/{{ project.project_key }}/metrics" class="text-sm text-indigo-600 hover:underline">View metrics →</a></div>
-    <div><a href="/p/{{ project.project_key }}/runs" class="text-sm text-indigo-600 hover:underline">View curator runs →</a></div>
-    <div><a href="/p/{{ project.project_key }}/thesis" class="text-sm text-indigo-600 hover:underline">View thesis →</a></div>
+    <div><a href="/p/{{ project.project_key }}/metrics" class="text-sm text-blue-600 hover:underline">View metrics →</a></div>
+    <div><a href="/p/{{ project.project_key }}/runs" class="text-sm text-blue-600 hover:underline">View curator runs →</a></div>
+    <div><a href="/p/{{ project.project_key }}/thesis" class="text-sm text-blue-600 hover:underline">View thesis →</a></div>
   </div>
 </div>
+
+{% include "_action_banner.html" %}
 
 <div class="grid grid-cols-3 gap-4 mb-6">
   <div class="bg-white p-4 rounded-lg border border-gray-200">
@@ -26,16 +28,108 @@
   </div>
   <div class="bg-white p-4 rounded-lg border border-gray-200">
     <div class="text-xs text-gray-500 uppercase tracking-wide">Last analyst day</div>
-    <div class="text-lg font-mono">{{ project.last_analyst_day or "—" }}</div>
+    <div class="text-lg font-mono">{{ project.last_analyst_day or "·" }}</div>
   </div>
 </div>
+
+{# ─── Impact: per-project before/after ──────────────────────────────────
+   Renders when curator has run at least once AND we have ≥3 sessions
+   on each side of that date.  Otherwise the section explains why —
+   never silently disappears.  All numbers are descriptive; the verdict
+   line names the direction but does not claim causation.                #}
+<section class="mb-6">
+  <div class="flex items-baseline justify-between mb-3">
+    <div>
+      <h2 class="text-lg font-semibold">Impact</h2>
+      <div class="text-xs text-gray-500 mt-0.5">
+        Sessions before vs after curator first landed for this repo.
+        Correlation only — not a controlled experiment.
+      </div>
+    </div>
+    {% if impact.treatment_date %}
+    <div class="text-xs text-gray-500 text-right">
+      first curated <strong class="text-gray-700">{{ impact.days_since_treatment }}d ago</strong>
+      <span class="font-mono ml-1">({{ impact.treatment_date }})</span>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if impact.enough_data %}
+  <div class="wm-card">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div class="lg:col-span-2">
+        <div class="text-xs uppercase tracking-wide text-gray-500 font-semibold mb-2">
+          Tool errors per session · 16 weeks
+        </div>
+        <div class="wm-chart" style="height: 180px;"
+             data-wm-chart="area"
+             data-color="hsl(0 84% 58%)" data-label="Errors / session" data-value-fmt="float"
+             data-mark-date="{{ impact.treatment_bucket_date }}" data-mark-label="curator"
+             data-points='{{ impact.weekly_series|tojson }}'></div>
+      </div>
+      <div>
+        <div class="text-xs uppercase tracking-wide text-gray-500 font-semibold mb-2">
+          Before vs after curator
+        </div>
+        <table class="w-full text-sm tabular">
+          <thead>
+            <tr class="border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
+              <th class="text-left font-medium py-1.5"></th>
+              <th class="text-right font-medium py-1.5">pre</th>
+              <th class="text-right font-medium py-1.5">post</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="border-b border-gray-100">
+              <td class="py-1.5 text-gray-600">Sessions</td>
+              <td class="py-1.5 text-right font-mono">{{ impact.pre.sessions_n }}</td>
+              <td class="py-1.5 text-right font-mono font-semibold">{{ impact.post.sessions_n }}</td>
+            </tr>
+            <tr class="border-b border-gray-100">
+              <td class="py-1.5 text-gray-600">Median tool errors</td>
+              <td class="py-1.5 text-right font-mono">{{ '%.1f'|format(impact.pre.median_errors) }}</td>
+              <td class="py-1.5 text-right font-mono font-semibold">{{ '%.1f'|format(impact.post.median_errors) }}</td>
+            </tr>
+            <tr class="border-b border-gray-100">
+              <td class="py-1.5 text-gray-600">Median prompts</td>
+              <td class="py-1.5 text-right font-mono">{{ '%.0f'|format(impact.pre.median_prompts) }}</td>
+              <td class="py-1.5 text-right font-mono font-semibold">{{ '%.0f'|format(impact.post.median_prompts) }}</td>
+            </tr>
+            <tr>
+              <td class="py-1.5 text-gray-600">Median cost</td>
+              <td class="py-1.5 text-right font-mono">${{ '%.2f'|format(impact.pre.median_cost) }}</td>
+              <td class="py-1.5 text-right font-mono font-semibold">${{ '%.2f'|format(impact.post.median_cost) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        {% if impact.verdict %}
+        <div class="text-xs text-gray-500 mt-3 italic">
+          Direction: {{ impact.verdict }}.
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="wm-card text-sm text-gray-600">
+    <strong class="text-gray-800">Not enough data yet.</strong>
+    {{ impact.verdict_reason }}
+    {% if impact.treatment_date %}
+    <div class="text-xs text-gray-500 mt-2">
+      Keep using <code class="bg-gray-100 px-1 py-0.5 rounded">{{ project.project_key }}</code>;
+      the comparison will fill in as more sessions land.
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
 
 {% if skills %}
 <h2 class="text-lg font-semibold mb-3">Skills</h2>
 <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
   {% for s in skills %}
   <a href="/p/{{ project.project_key }}/skills/{{ s.slug }}" class="skill-card block bg-white p-4 rounded-lg border border-gray-200 no-underline">
-    <div class="font-medium text-indigo-600 mb-1">{{ s.slug }}</div>
+    <div class="font-medium text-blue-600 mb-1">{{ s.slug }}</div>
     <div class="text-xs text-gray-600 line-clamp-2 mb-2">{{ s.description }}</div>
     <div class="text-xs text-gray-500">{{ s.script_count }} script{{ "" if s.script_count == 1 else "s" }}</div>
   </a>
@@ -49,7 +143,7 @@
   {{ claude_md|safe }}
 </article>
 {% else %}
-<div class="text-sm text-gray-500">No CLAUDE.md generated yet — run <code>watchmen curate {{ project.project_key }}</code>.</div>
+<div class="text-sm text-gray-500">No CLAUDE.md generated yet. Run <code>watchmen curate {{ project.project_key }}</code>.</div>
 {% endif %}
 
 {% endblock %}

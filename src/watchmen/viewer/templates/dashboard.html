@@ -1,6 +1,138 @@
 {% extends "base.html" %}
-{% block title %}watchmen dashboard{% endblock %}
+{% block title %}watchmen mission control{% endblock %}
+{% block head_extra %}
+<style>
+  /* ── Mission control: KPI cards ──────────────────────────────────── */
+  .wm-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+  }
+  @media (max-width: 720px) {
+    .wm-kpi-grid { grid-template-columns: 1fr; }
+  }
+  .wm-kpi {
+    padding: 18px 20px;
+    background: hsl(var(--card));
+    border: var(--panel-border);
+    border-radius: var(--panel-radius);
+    box-shadow: var(--panel-shadow);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .wm-kpi__label {
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: hsl(var(--muted-foreground)); font-weight: 600;
+  }
+  .wm-kpi__value {
+    font-family: var(--font-display);
+    font-size: 36px; font-weight: 700; line-height: 1;
+    color: hsl(var(--ink)); letter-spacing: -0.01em;
+  }
+  .wm-kpi__sub {
+    font-size: 12px; color: hsl(var(--muted-foreground));
+  }
+  .wm-kpi__delta { font-weight: 600; font-size: 13px; }
+  .wm-kpi__delta--up   { color: hsl(142 65% 38%); }
+  .wm-kpi__delta--down { color: hsl(0 70% 48%); }
+  .wm-kpi__delta--good-down { color: hsl(142 65% 38%); }
+  .wm-kpi__delta--bad-up    { color: hsl(0 70% 48%); }
+  .wm-kpi__delta--flat { color: hsl(var(--muted-foreground)); }
+
+  /* ── Leaderboard rows ────────────────────────────────────────────── */
+  .wm-leader-row {
+    display: grid;
+    grid-template-columns: 220px 1fr 110px;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 4px;
+    border-bottom: 1px solid hsl(var(--border) / 0.4);
+  }
+  .wm-leader-row:last-child { border-bottom: 0; }
+  .wm-leader-row__name { font-weight: 600; color: hsl(var(--ink)); }
+  .wm-leader-row__bar {
+    height: 8px; background: hsl(var(--muted)); border-radius: 4px; overflow: hidden;
+  }
+  .wm-leader-row__bar > span {
+    display: block; height: 100%;
+    background: linear-gradient(90deg, hsl(var(--accent) / 0.85), hsl(var(--accent)));
+    border-radius: 4px;
+  }
+  .wm-leader-row__count {
+    font-family: var(--font-accent);
+    font-size: 13px;
+    color: hsl(var(--ink-soft));
+    text-align: right;
+  }
+  .wm-leader-row__count strong { color: hsl(var(--ink)); font-weight: 700; }
+
+  /* ── Status tile grid ────────────────────────────────────────────── */
+  .wm-tile-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .wm-tile {
+    padding: 12px 14px;
+    background: hsl(var(--card));
+    border: var(--panel-border);
+    border-radius: var(--panel-radius);
+    text-decoration: none;
+    color: hsl(var(--ink));
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    display: flex; flex-direction: column; gap: 4px;
+    position: relative;
+  }
+  .wm-tile:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--panel-shadow-hover, 0 2px 6px hsl(0 0% 0% / 0.08));
+  }
+  .wm-tile__dot {
+    position: absolute; top: 12px; right: 12px;
+    width: 10px; height: 10px; border-radius: 50%;
+  }
+  .wm-tile--healthy   .wm-tile__dot { background: hsl(142 65% 42%); }
+  .wm-tile--stale     .wm-tile__dot { background: hsl(38 92% 50%); }
+  .wm-tile--uncurated .wm-tile__dot { background: hsl(var(--muted-foreground)); }
+  .wm-tile__name {
+    font-family: var(--font-display);
+    font-weight: 700; letter-spacing: 0.04em;
+    color: hsl(var(--ink));
+    margin-right: 18px;
+  }
+  .wm-tile__stats {
+    font-size: 11px;
+    color: hsl(var(--muted-foreground));
+    font-family: var(--font-accent);
+    line-height: 1.5;
+  }
+
+  /* ── Action queue rows ───────────────────────────────────────────── */
+  .wm-action-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid hsl(var(--border) / 0.4);
+  }
+  .wm-action-row:last-child { border-bottom: 0; }
+  .wm-action-row__sev {
+    flex-shrink: 0;
+    width: 6px; align-self: stretch; border-radius: 3px;
+  }
+  .wm-action-row__sev--high   { background: hsl(0 70% 50%); }
+  .wm-action-row__sev--medium { background: hsl(38 92% 50%); }
+  .wm-action-row__sev--low    { background: hsl(var(--muted-foreground)); }
+  .wm-action-row__title { font-weight: 500; }
+  .wm-action-row__reason {
+    font-size: 12px; color: hsl(var(--muted-foreground));
+    margin-top: 2px;
+  }
+</style>
+{% endblock %}
 {% block content %}
+
+{# The global _action_banner.html is intentionally NOT included here.
+   The "Next actions" section below renders the same data with the
+   same severity rails — duplicating both at the top of the page
+   reads as repetitive and pushes the impact strip below the fold. #}
 
 {% if changelog_version and changelog_body_html %}
 <div id="watchmen-changelog-banner"
@@ -8,7 +140,7 @@
      class="hidden mb-6 rounded-lg border border-amber-300 bg-amber-50 px-5 py-4 shadow-sm">
   <div class="flex items-start justify-between gap-4">
     <div class="text-sm text-amber-900">
-      <div class="font-semibold mb-1">◷ watchmen updated to v{{ changelog_version }}</div>
+      <div class="font-semibold mb-1">watchmen updated to v{{ changelog_version }}</div>
       <div class="prose prose-sm prose-amber max-w-none">
         {{ changelog_body_html | safe }}
       </div>
@@ -40,81 +172,220 @@
 {% endif %}
 
 <div class="mb-8">
-  <h1 class="text-2xl font-semibold mb-2">Tracked projects</h1>
-  <p class="text-sm text-gray-600">Run <code class="bg-gray-200 px-1 rounded">watchmen track &lt;key&gt; --repo &lt;path&gt;</code> from the terminal to add more.</p>
+  <h1 class="text-2xl font-semibold mb-1">Mission control</h1>
+  <p class="text-sm text-gray-600">
+    Skill activity, friction trends, and what to run next — across every tracked project.
+  </p>
 </div>
 
-{% if projects %}
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-8">
-  <table class="w-full">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
-        <th class="px-4 py-3">Project</th>
-        <th class="px-4 py-3">Skills</th>
-        <th class="px-4 py-3">Thesis days</th>
-        <th class="px-4 py-3">CLAUDE.md</th>
-        <th class="px-4 py-3">Last analyst</th>
-        <th class="px-4 py-3">Repo</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for p in projects %}
-      <tr class="border-b border-gray-100 hover:bg-gray-50">
-        <td class="px-4 py-3">
-          <a href="/p/{{ p.project_key }}" class="text-indigo-600 font-medium">{{ p.project_key }}</a>
-        </td>
-        <td class="px-4 py-3 text-sm">{{ p.skill_count }}</td>
-        <td class="px-4 py-3 text-sm">{{ p.thesis_day_count }}</td>
-        <td class="px-4 py-3 text-sm">
-          {% if p.claude_md_size %}
-            {{ "%.1f"|format(p.claude_md_size/1024) }} KB
-          {% else %}<span class="text-gray-400">—</span>{% endif %}
-        </td>
-        <td class="px-4 py-3 text-sm text-gray-600">{{ p.last_analyst_day or "—" }}</td>
-        <td class="px-4 py-3 text-xs text-gray-500 font-mono">{{ p.source_repo|replace("/Users/batuhanaktas", "~") }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% else %}
-<div class="bg-white rounded p-6 text-gray-600 text-sm border border-gray-200">
-  No tracked projects yet. Run <code>watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
-</div>
+<!-- ═══ Impact strip ═══════════════════════════════════════════════════ -->
+{# Three KPI cards: skill calls, tool errors/session, active repos.
+   Comparison window is this-7d vs prior-7d.  delta_pct is None when the
+   prior window was empty — template renders "—" in that case.            #}
+{% macro fmt_delta(d, polarity='up_is_good') -%}
+  {%- if d.delta_pct is none -%}
+    <span class="wm-kpi__delta wm-kpi__delta--flat">—</span>
+  {%- elif d.delta_pct == 0 -%}
+    <span class="wm-kpi__delta wm-kpi__delta--flat">±0%</span>
+  {%- else -%}
+    {%- set up = d.delta_pct > 0 -%}
+    {%- if polarity == 'up_is_good' -%}
+      {%- set cls = 'wm-kpi__delta--up' if up else 'wm-kpi__delta--down' -%}
+    {%- else -%}
+      {%- set cls = 'wm-kpi__delta--bad-up' if up else 'wm-kpi__delta--good-down' -%}
+    {%- endif -%}
+    <span class="wm-kpi__delta {{ cls }}">{{ '↑' if up else '↓' }} {{ '%+.0f'|format(d.delta_pct) }}%</span>
+  {%- endif -%}
+{%- endmacro %}
+
+<section class="mb-8">
+  <div class="wm-kpi-grid">
+    <div class="wm-kpi">
+      <div class="wm-kpi__label">Skill calls · 7d</div>
+      <div class="wm-kpi__value">{{ impact.skill_calls.this }}</div>
+      <div class="wm-kpi__sub">
+        prior week {{ impact.skill_calls.prior }} · {{ fmt_delta(impact.skill_calls, 'up_is_good') }}
+      </div>
+    </div>
+    <div class="wm-kpi">
+      <div class="wm-kpi__label">Tool errors · per session</div>
+      <div class="wm-kpi__value">{{ '%.2f'|format(impact.tool_errors.this) }}</div>
+      <div class="wm-kpi__sub">
+        prior week {{ '%.2f'|format(impact.tool_errors.prior) }} · {{ fmt_delta(impact.tool_errors, 'down_is_good') }}
+      </div>
+    </div>
+    <div class="wm-kpi">
+      <div class="wm-kpi__label">Active repos · 7d</div>
+      <div class="wm-kpi__value">{{ impact.active_repos.this }}</div>
+      <div class="wm-kpi__sub">
+        prior week {{ impact.active_repos.prior }} · {{ fmt_delta(impact.active_repos, 'up_is_good') }}
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ Skill leaderboard ══════════════════════════════════════════════ -->
+{% if leaderboard %}
+<section class="mb-8">
+  <div class="flex items-baseline justify-between mb-3">
+    <h2 class="text-lg font-semibold">Skill activity · last 7 days</h2>
+    <div class="text-xs text-gray-500">
+      {{ leaderboard|sum(attribute='count') }} invocations across {{ leaderboard|length }} repo{{ 's' if leaderboard|length != 1 else '' }}
+    </div>
+  </div>
+  <div class="wm-card">
+    {% for r in leaderboard %}
+    <div class="wm-leader-row">
+      <div class="wm-leader-row__name">
+        {% if r.project_key %}
+        <a href="/p/{{ r.project_key }}" class="text-blue-600 hover:underline">{{ r.project_name }}</a>
+        {% else %}
+        <span class="text-gray-700">{{ r.project_name }}</span>
+        {% endif %}
+      </div>
+      <div class="wm-leader-row__bar">
+        <span style="width: {{ ((r.count / r.max_count) * 100)|round(0, 'floor') }}%"></span>
+      </div>
+      <div class="wm-leader-row__count">
+        <strong>{{ r.count }}</strong> calls · {{ r.skills_curated }} skill{{ 's' if r.skills_curated != 1 else '' }}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
 {% endif %}
 
-<h2 class="text-lg font-semibold mb-3 mt-8">Recent runs</h2>
-{% if runs %}
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-  <table class="w-full">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
-        <th class="px-4 py-2">Started</th>
-        <th class="px-4 py-2">Project</th>
-        <th class="px-4 py-2">Kind</th>
-        <th class="px-4 py-2">Status</th>
-        <th class="px-4 py-2">Notes</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in runs %}
-      <tr class="border-b border-gray-100">
-        <td class="px-4 py-2 text-xs text-gray-600 font-mono">{{ r.started_at[:19] }}</td>
-        <td class="px-4 py-2 text-sm"><a href="/p/{{ r.project_key }}" class="text-indigo-600">{{ r.project_key }}</a></td>
-        <td class="px-4 py-2 text-sm">{{ r.kind }}</td>
-        <td class="px-4 py-2 text-sm">
-          {% if r.status == 'ok' %}<span class="text-green-700">✓ ok</span>
-          {% elif r.status == 'running' %}<span class="text-yellow-700">● running</span>
-          {% else %}<span class="text-red-700">✗ {{ r.status }}</span>{% endif %}
-        </td>
-        <td class="px-4 py-2 text-xs text-gray-600">{{ r.notes or "" }}</td>
-      </tr>
+<!-- ═══ Weekly trend ═══════════════════════════════════════════════════ -->
+{% if sparkline_data.skill_calls or sparkline_data.tool_errors %}
+<section class="mb-8">
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div class="wm-card">
+      <div class="text-sm font-semibold mb-2 text-gray-800">Skill calls · 12 weeks</div>
+      <div class="text-xs text-gray-500 mb-3">Total <code>Skill</code> tool invocations per ISO week.</div>
+      {% if sparkline_data.skill_calls %}
+      <div class="wm-chart" style="height: 140px;"
+           data-wm-chart="area"
+           data-color="hsl(var(--accent))" data-label="Skill calls" data-value-fmt="int"
+           data-points='{{ sparkline_data.skill_calls|tojson }}'></div>
+      {% else %}
+      <div class="text-sm text-gray-400 italic">No skill invocations yet.</div>
+      {% endif %}
+    </div>
+    <div class="wm-card">
+      <div class="text-sm font-semibold mb-2 text-gray-800">Tool errors per session · 12 weeks</div>
+      <div class="text-xs text-gray-500 mb-3">Weekly mean across all tracked sessions. Lower is better.</div>
+      {% if sparkline_data.tool_errors %}
+      <div class="wm-chart" style="height: 140px;"
+           data-wm-chart="area"
+           data-color="hsl(0 84% 58%)" data-label="Errors / session" data-value-fmt="float"
+           data-points='{{ sparkline_data.tool_errors|tojson }}'></div>
+      {% else %}
+      <div class="text-sm text-gray-400 italic">No sessions captured yet.</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<!-- ═══ Action queue + Status tiles, side by side ═════════════════════ -->
+<section class="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-8">
+  <div class="lg:col-span-2">
+    <div class="flex items-baseline justify-between mb-3">
+      <h2 class="text-lg font-semibold">Next actions</h2>
+      <span class="text-xs text-gray-500">{{ next_actions|length }} queued</span>
+    </div>
+    <div class="wm-card">
+      {% if next_actions %}
+      {% for a in next_actions %}
+      <div class="wm-action-row">
+        <div class="wm-action-row__sev wm-action-row__sev--{{ a.severity }}"></div>
+        <div class="flex-1">
+          <div class="wm-action-row__title">
+            {% if a.href %}<a href="{{ a.href }}" class="text-blue-600 hover:underline">{{ a.title }}</a>
+            {% else %}{{ a.title }}{% endif %}
+          </div>
+          <div class="wm-action-row__reason">{{ a.reason }}</div>
+        </div>
+        {% if a.run_action %}
+        <form method="post" action="/run/{{ a.run_action }}/{{ a.project_key }}" class="flex-shrink-0">
+          <button type="submit"
+                  class="text-xs px-2.5 py-1 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+            Run
+          </button>
+        </form>
+        {% endif %}
+      </div>
       {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% else %}
-<div class="text-sm text-gray-500">No runs recorded yet.</div>
+      {% else %}
+      <div class="text-sm text-gray-500 italic py-2">
+        Nothing pending. Every tracked project is up to date.
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="lg:col-span-3">
+    <div class="flex items-baseline justify-between mb-3">
+      <h2 class="text-lg font-semibold">Tracked projects</h2>
+      <span class="text-xs text-gray-500">
+        Run <code class="bg-gray-100 px-1 rounded">watchmen track &lt;key&gt;</code> to add more
+      </span>
+    </div>
+    {% if status_tiles %}
+    <div class="wm-tile-grid">
+      {% for t in status_tiles %}
+      <a href="/p/{{ t.project_key }}" class="wm-tile wm-tile--{{ t.status }}">
+        <span class="wm-tile__dot"
+              title="{{ t.status }}{% if t.days_since_curator is not none %} · last curate {{ t.days_since_curator }}d ago{% endif %}"></span>
+        <div class="wm-tile__name">{{ t.project_key }}</div>
+        <div class="wm-tile__stats">
+          {{ t.skills_n }} skill{{ 's' if t.skills_n != 1 else '' }}{% if t.pending_n %} · {{ t.pending_n }} pending{% endif %}<br>
+          {{ t.sessions_7d }} session{{ 's' if t.sessions_7d != 1 else '' }} · 7d
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="wm-card text-gray-600 text-sm">
+      No tracked projects yet. Run <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<!-- ═══ Recent activity ════════════════════════════════════════════════ -->
+{% if runs %}
+<section class="mb-8">
+  <h2 class="text-lg font-semibold mb-3">Recent runs</h2>
+  <div class="wm-card wm-card-table tabular">
+    <table>
+      <thead>
+        <tr>
+          <th>Started</th>
+          <th>Project</th>
+          <th>Kind</th>
+          <th>Status</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+        <tr>
+          <td class="text-xs text-gray-600 font-mono">{{ r.started_at[:19] }}</td>
+          <td class="text-sm"><a href="/p/{{ r.project_key }}" class="text-blue-600">{{ r.project_key }}</a></td>
+          <td class="text-sm">{{ r.kind }}</td>
+          <td class="text-sm">
+            {% if r.status == 'ok' %}<span class="wm-pill wm-pill-ok">✓ ok</span>
+            {% elif r.status == 'running' %}<span class="wm-pill wm-pill-running">● running</span>
+            {% else %}<span class="wm-pill wm-pill-fail">✗ {{ r.status }}</span>{% endif %}
+          </td>
+          <td class="text-xs text-gray-600">{{ r.notes or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endif %}
 
 {% endblock %}

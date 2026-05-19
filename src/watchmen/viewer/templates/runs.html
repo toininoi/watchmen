@@ -1,39 +1,39 @@
 {% extends "base.html" %}
-{% block title %}runs — watchmen{% endblock %}
+{% block title %}runs · watchmen{% endblock %}
 {% block content %}
 
 <h1 class="text-2xl font-semibold mb-6">Run history</h1>
 
 {% if runs %}
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-  <table class="w-full">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
-        <th class="px-4 py-2">#</th>
-        <th class="px-4 py-2">Started</th>
-        <th class="px-4 py-2">Ended</th>
-        <th class="px-4 py-2">Project</th>
-        <th class="px-4 py-2">Kind</th>
-        <th class="px-4 py-2">Status</th>
-        <th class="px-4 py-2">Cost</th>
-        <th class="px-4 py-2">Notes</th>
+<div class="wm-card wm-card-table tabular">
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Started</th>
+        <th>Ended</th>
+        <th>Project</th>
+        <th>Kind</th>
+        <th>Status</th>
+        <th>Cost</th>
+        <th>Notes</th>
       </tr>
     </thead>
     <tbody>
       {% for r in runs %}
-      <tr class="border-b border-gray-100">
-        <td class="px-4 py-2 text-xs text-gray-500">{{ r.id }}</td>
-        <td class="px-4 py-2 text-xs text-gray-700 font-mono">{{ r.started_at[:19] }}</td>
-        <td class="px-4 py-2 text-xs text-gray-700 font-mono">{{ r.ended_at[:19] if r.ended_at else "running" }}</td>
-        <td class="px-4 py-2 text-sm"><a href="/p/{{ r.project_key }}" class="text-indigo-600">{{ r.project_key }}</a></td>
-        <td class="px-4 py-2 text-sm">{{ r.kind }}</td>
-        <td class="px-4 py-2 text-sm">
-          {% if r.status == 'ok' %}<span class="text-green-700">✓ ok</span>
-          {% elif r.status == 'running' %}<span class="text-yellow-700">● running</span>
-          {% else %}<span class="text-red-700">✗ {{ r.status }}</span>{% endif %}
+      <tr>
+        <td class="text-xs text-gray-500">{{ r.id }}</td>
+        <td class="text-xs text-gray-700 font-mono">{{ r.started_at[:19] }}</td>
+        <td class="text-xs text-gray-700 font-mono">{{ r.ended_at[:19] if r.ended_at else "running" }}</td>
+        <td class="text-sm"><a href="/p/{{ r.project_key }}" class="text-blue-600">{{ r.project_key }}</a></td>
+        <td class="text-sm">{{ r.kind }}</td>
+        <td class="text-sm">
+          {% if r.status == 'ok' %}<span class="wm-pill wm-pill-ok">✓ ok</span>
+          {% elif r.status == 'running' %}<span class="wm-pill wm-pill-running">● running</span>
+          {% else %}<span class="wm-pill wm-pill-fail">✗ {{ r.status }}</span>{% endif %}
         </td>
-        <td class="px-4 py-2 text-xs text-gray-600">{{ "$%.2f"|format(r.cost_estimate_usd) if r.cost_estimate_usd else "" }}</td>
-        <td class="px-4 py-2 text-xs text-gray-600">{{ r.notes or "" }}</td>
+        <td class="text-xs text-gray-600">{{ "$%.2f"|format(r.cost_estimate_usd) if r.cost_estimate_usd else "" }}</td>
+        <td class="text-xs text-gray-600">{{ r.notes or "" }}</td>
       </tr>
       {% endfor %}
     </tbody>

@@ -25,6 +25,19 @@ from watchmen.model_prices import price_for_model as price_for_model_from_api, t
 ROOT = Path(__file__).parent
 SUGGESTIONS_LOG = Path.home() / ".watchmen" / "suggestions.jsonl"
 
+# Friendly labels for the `agent` column in corpus.db. The DB stores adapter
+# slugs (claude_code, codex, pi); UI surfaces want display names. Fall through
+# to the raw slug for unknown adapters so future ones still render.
+ADAPTER_LABELS = {
+    "claude_code": "Claude Code",
+    "codex": "Codex",
+    "pi": "pi.dev",
+}
+
+
+def adapter_label(slug: str) -> str:
+    return ADAPTER_LABELS.get(slug, slug)
+
 # Default price used when model is unknown (matches sonnet-4.6 hardcoded fallback)
 DEFAULT_PRICE = (3.00, 3.75, 6.00, 0.30, 15.00)
 
@@ -392,6 +405,260 @@ def daily_metrics_all(days: int = 30, tracked_only: bool = False) -> list[dict]:
     return out
 
 
+def adapter_breakdown_all(days: int = 30, tracked_only: bool = False) -> list[dict]:
+    """Per-coding-agent rollup over the last `days` calendar days.
+
+    Returns one row per `agent` value in corpus.db.sessions, ordered by
+    session count desc. Surfaces are the viewer's /metrics page and the
+    CLI's `By coding agent` table.
+
+    Note: distinct from `util.adapter_breakdown(project_key)`, which does a
+    per-project quick lookup. This is the global cross-project rollup with
+    cost / errors / projects-touched alongside session counts.
+
+    Empty list when corpus.db doesn't exist yet or no sessions in window.
+    """
+    if not CORPUS_DB.exists():
+        return []
+    cutoff = date.today() - timedelta(days=days - 1)
+    base_sql = """
+        SELECT agent,
+               COUNT(*)                       AS sessions,
+               COUNT(DISTINCT project_dir)    AS projects,
+               COALESCE(SUM(user_prompt_count), 0)     AS prompts,
+               COALESCE(SUM(tool_error_count), 0)      AS tool_errors,
+               COALESCE(SUM(input_tokens), 0)          AS input_tokens,
+               COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+               COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
+               COALESCE(SUM(output_tokens), 0)         AS output_tokens,
+               COALESCE(SUM(cost_usd), 0.0)            AS cost_usd
+          FROM sessions
+         WHERE is_subagent = 0
+           AND date(started_at, 'localtime') >= ?
+    """
+    params: list = [cutoff.isoformat()]
+    if tracked_only:
+        tracked_dirs = _tracked_project_dirs()
+        if not tracked_dirs:
+            return []
+        placeholders = ",".join("?" for _ in tracked_dirs)
+        base_sql += f" AND project_dir IN ({placeholders})"
+        params.extend(tracked_dirs)
+    base_sql += " GROUP BY agent ORDER BY sessions DESC, agent ASC"
+    out: list[dict] = []
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        for r in conn.execute(base_sql, params).fetchall():
+            out.append({
+                "agent": r["agent"],
+                "label": adapter_label(r["agent"]),
+                "sessions": r["sessions"],
+                "projects": r["projects"],
+                "prompts": r["prompts"],
+                "tool_errors": r["tool_errors"],
+                "input_tokens": r["input_tokens"],
+                "cache_creation_tokens": r["cache_creation_tokens"],
+                "cache_read_tokens": r["cache_read_tokens"],
+                "output_tokens": r["output_tokens"],
+                "cost_usd": r["cost_usd"],
+            })
+    return out
+
+
+def agent_comparison_facts(days: int = 90, tracked_only: bool = False) -> dict:
+    """Per-adapter rollup rich enough to feed the cross-agent comparison LLM
+    narrative AND a deterministic side-by-side render. Extends
+    `adapter_breakdown_all` with derived ratios (cost/prompt, error rate,
+    cache hit, prompts/session), session-shape (active days, avg duration),
+    behavioral mix (top tools, top projects, dominant model), and a
+    suggestions-fired counter scoped per adapter.
+
+    Returns a dict ready to JSON-stringify into a prompt:
+
+        {
+          "window_days": 90,
+          "since": "2026-02-15",
+          "adapters": [{...}, ...],   # one per agent with sessions in window
+        }
+
+    Empty `adapters` when corpus.db is absent or no sessions in window.
+    The function never raises — corrupt rows are skipped silently."""
+    out: dict = {"window_days": days, "since": None, "adapters": []}
+    if not CORPUS_DB.exists():
+        return out
+
+    cutoff = date.today() - timedelta(days=days - 1)
+    out["since"] = cutoff.isoformat()
+
+    tracked_filter = ""
+    tracked_params: list = []
+    if tracked_only:
+        tracked_dirs = _tracked_project_dirs()
+        if not tracked_dirs:
+            return out
+        ph = ",".join("?" for _ in tracked_dirs)
+        tracked_filter = f" AND s.project_dir IN ({ph})"
+        tracked_params = list(tracked_dirs)
+
+    # Q1 — base aggregate per adapter. Active days uses COUNT DISTINCT on the
+    # localtime calendar day; avg session duration is over duration_seconds
+    # (NULL when a session never closed → AVG drops it, which is the right
+    # behavior — half-finished sessions shouldn't pull the average down).
+    base_sql = f"""
+        SELECT s.agent                                 AS agent,
+               COUNT(*)                                AS sessions,
+               COUNT(DISTINCT date(s.started_at, 'localtime')) AS active_days,
+               COUNT(DISTINCT s.project_dir)           AS projects,
+               COALESCE(SUM(s.user_prompt_count), 0)   AS prompts,
+               COALESCE(SUM(s.tool_use_count), 0)      AS tool_calls,
+               COALESCE(SUM(s.tool_error_count), 0)    AS tool_errors,
+               COALESCE(SUM(s.input_tokens), 0)        AS input_tokens,
+               COALESCE(SUM(s.cache_creation_tokens), 0) AS cache_creation_tokens,
+               COALESCE(SUM(s.cache_read_tokens), 0)   AS cache_read_tokens,
+               COALESCE(SUM(s.output_tokens), 0)       AS output_tokens,
+               COALESCE(SUM(s.cost_usd), 0.0)          AS cost_usd,
+               AVG(s.duration_seconds)                 AS avg_duration_seconds
+          FROM sessions s
+         WHERE s.is_subagent = 0
+           AND date(s.started_at, 'localtime') >= ?
+           {tracked_filter}
+         GROUP BY s.agent
+         ORDER BY sessions DESC
+    """
+    params: list = [cutoff.isoformat()] + tracked_params
+
+    rows: list[dict] = []
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(base_sql, params).fetchall()]
+
+        # Q2 — top 5 tools per adapter (excluding subagent sessions, same
+        # window). JOIN on session_id so we can scope tool_calls to a given
+        # agent. We don't store agent on tool_calls directly; this join is
+        # cheap thanks to idx_tool_calls_session.
+        tools_sql = f"""
+            SELECT s.agent AS agent, t.tool_name AS tool_name, COUNT(*) AS n
+              FROM tool_calls t
+              JOIN sessions s ON t.session_id = s.session_id
+             WHERE s.is_subagent = 0
+               AND date(s.started_at, 'localtime') >= ?
+               {tracked_filter}
+               AND t.tool_name IS NOT NULL AND t.tool_name <> ''
+             GROUP BY s.agent, t.tool_name
+             ORDER BY s.agent ASC, n DESC
+        """
+        top_tools: dict[str, list[tuple[str, int]]] = {}
+        for r in conn.execute(tools_sql, params).fetchall():
+            top_tools.setdefault(r["agent"], []).append((r["tool_name"], r["n"]))
+
+        # Q3 — top 3 projects per adapter (where the agent gets used most).
+        # Translates project_dir → human label via tracked project index
+        # (`util.adapter_breakdown`-style) so the narrative can name "kai"
+        # instead of "/Users/foo/dev/kai".
+        projects_sql = f"""
+            SELECT s.agent AS agent, s.project_dir AS project_dir, COUNT(*) AS n
+              FROM sessions s
+             WHERE s.is_subagent = 0
+               AND date(s.started_at, 'localtime') >= ?
+               {tracked_filter}
+               AND s.project_dir IS NOT NULL AND s.project_dir <> ''
+             GROUP BY s.agent, s.project_dir
+             ORDER BY s.agent ASC, n DESC
+        """
+        top_projects: dict[str, list[tuple[str, int]]] = {}
+        for r in conn.execute(projects_sql, params).fetchall():
+            top_projects.setdefault(r["agent"], []).append((r["project_dir"], r["n"]))
+
+        # Q4 — dominant model per adapter. We trust sessions.model_dominant
+        # (already chosen as max-output-tokens model in that session). Tally
+        # session counts per (agent, dominant model) and pick the top one.
+        models_sql = f"""
+            SELECT s.agent AS agent, s.model_dominant AS model, COUNT(*) AS n
+              FROM sessions s
+             WHERE s.is_subagent = 0
+               AND date(s.started_at, 'localtime') >= ?
+               {tracked_filter}
+               AND s.model_dominant IS NOT NULL AND s.model_dominant <> ''
+             GROUP BY s.agent, s.model_dominant
+             ORDER BY s.agent ASC, n DESC
+        """
+        dominant_model: dict[str, str] = {}
+        for r in conn.execute(models_sql, params).fetchall():
+            dominant_model.setdefault(r["agent"], r["model"])
+
+    # Skill-suggestion firings per adapter. Read the plugin's append-only
+    # suggestions log and join to sessions.agent in memory. Best-effort:
+    # missing log → all zero; malformed lines skipped silently.
+    suggestions_fired: dict[str, int] = {}
+    sugg_path = Path.home() / ".watchmen" / "suggestions.jsonl"
+    if sugg_path.exists() and rows:
+        agent_by_session: dict[str, str] = {}
+        with sqlite3.connect(str(CORPUS_DB)) as conn2:
+            conn2.row_factory = sqlite3.Row
+            for r in conn2.execute(
+                "SELECT session_id, agent FROM sessions WHERE date(started_at, 'localtime') >= ?",
+                (cutoff.isoformat(),),
+            ).fetchall():
+                if r["session_id"]:
+                    agent_by_session[r["session_id"]] = r["agent"]
+        try:
+            with sugg_path.open() as fh:
+                for line in fh:
+                    try:
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sid = evt.get("session_id")
+                    a = agent_by_session.get(sid)
+                    if a:
+                        suggestions_fired[a] = suggestions_fired.get(a, 0) + 1
+        except OSError:
+            pass
+
+    # Derive ratios + attach behavioral lists. Guard each division so a
+    # zero-activity adapter doesn't NaN out the whole comparison.
+    adapters: list[dict] = []
+    for row in rows:
+        agent = row["agent"]
+        prompts = row["prompts"] or 0
+        sessions = row["sessions"] or 0
+        tool_calls = row["tool_calls"] or 0
+        cost = float(row["cost_usd"] or 0.0)
+        input_t = row["input_tokens"] or 0
+        cache_r = row["cache_read_tokens"] or 0
+        adapters.append({
+            "agent": agent,
+            "label": adapter_label(agent),
+            "sessions": sessions,
+            "active_days": row["active_days"] or 0,
+            "projects": row["projects"] or 0,
+            "prompts": prompts,
+            "tool_calls": tool_calls,
+            "tool_errors": row["tool_errors"] or 0,
+            "cost_usd": round(cost, 4),
+            "input_tokens": input_t,
+            "cache_creation_tokens": row["cache_creation_tokens"] or 0,
+            "cache_read_tokens": cache_r,
+            "output_tokens": row["output_tokens"] or 0,
+            # Derived ratios
+            "cost_per_prompt":     round(cost / prompts, 4) if prompts > 0 else 0.0,
+            "cost_per_session":    round(cost / sessions, 4) if sessions > 0 else 0.0,
+            "prompts_per_session": round(prompts / sessions, 2) if sessions > 0 else 0.0,
+            "tool_calls_per_session": round(tool_calls / sessions, 2) if sessions > 0 else 0.0,
+            "tool_error_rate":     round(row["tool_errors"] / tool_calls, 4) if tool_calls > 0 else 0.0,
+            "cache_hit_rate":      round(cache_r / (input_t + cache_r), 4) if (input_t + cache_r) > 0 else 0.0,
+            "avg_session_seconds": round(row["avg_duration_seconds"] or 0.0, 1),
+            # Behavioral
+            "top_tools":    top_tools.get(agent, [])[:5],
+            "top_projects": top_projects.get(agent, [])[:3],
+            "dominant_model": dominant_model.get(agent),
+            "suggestions_fired": suggestions_fired.get(agent, 0),
+        })
+
+    out["adapters"] = adapters
+    return out
+
+
 def activity_calendar_all(weeks: int = 26, tracked_only: bool = False) -> list[tuple[str, int]]:
     """Calendar across all activity, optionally restricted to tracked projects."""
     if not CORPUS_DB.exists():
@@ -726,7 +993,7 @@ def hbar_chart_svg(
     width: int = 360,
     bar_height: int = 18,
     gap: int = 4,
-    color: str = "#4f46e5",
+    color: str = "#2563eb",
     label_width: int = 110,
     value_fmt: str = "{:,.0f}",
 ) -> str:
@@ -768,7 +1035,7 @@ def _xml_escape(s) -> str:
     )
 
 
-def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, color: str = "#4f46e5") -> str:
+def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, color: str = "#2563eb") -> str:
     """Tiny inline-SVG line/area sparkline. Zero-deps, renders in any browser."""
     vals = list(values)
     if not vals:
@@ -792,6 +1059,566 @@ def sparkline_svg(values: Iterable[float], width: int = 220, height: int = 40, c
         f'<polyline points="{pts_str}" fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'
         f'</svg>'
     )
+
+
+# ─── Profile card (per-user spider stats) ────────────────────────────────
+#
+# Shown at the top of /metrics. Six axes computed from corpus.db and the
+# bundles directory, normalized 0..1 against tunable elite caps, then
+# rendered as a Football Manager–style stat card: 3-column color-coded
+# attribute grid, hex spider chart with tinted green→yellow→red rings,
+# procedural "player traits" derived from the stats.
+#
+# The caps are deliberately reachable — fresh users still get a card
+# (Newcomer archetype, rating 40), and a power user with months of
+# tracked sessions ends up in the 80s/90s.
+
+CARD_AXES = ("throughput", "frugality", "reliability", "curiosity", "range", "mastery")
+
+# Elite caps for normalization. A user hitting all six caps lands at 99.
+# Tuned against my own ~3-month corpus to put a heavy user in the 85-95 band.
+_CARD_CAPS = {
+    "throughput":    40.0,   # prompts per active day
+    "frugality":     0.04,   # USD per prompt — LOWER is better (inverted below)
+    "reliability":   1.0,    # 1 - error rate; already 0..1
+    "curiosity":     30.0,   # distinct tool names used
+    "range":         12.0,   # distinct project dirs touched
+    "mastery":       25.0,   # curated skills across all bundles
+}
+
+# Archetype name + 1-line flavor, keyed by the dominant axis.
+_ARCHETYPES = {
+    "throughput":   ("Speedrunner",   "Volume player. Ships in bursts, iterates fast."),
+    "frugality":    ("Minimalist",    "Wastes no tokens. Surgical prompts."),
+    "reliability":  ("Perfectionist", "Tool calls land. Errors are rare."),
+    "curiosity":    ("Explorer",      "Reaches for new tools instead of the same hammer."),
+    "range":        ("Polyglot",      "Hops repos without losing context."),
+    "mastery":      ("Curator",       "Turns sessions into reusable skill bundles."),
+}
+
+# Returned when every axis is below 0.15 — no data yet to characterize.
+_NEWCOMER = ("Newcomer", "Brand new corpus. Stats sharpen as you use it.")
+_GENERALIST = ("Generalist", "Balanced across the board. No single dominant strength.")
+
+
+def _normalize(value: float, cap: float, *, invert: bool = False) -> float:
+    """Map a raw axis value into 0..1, capped. `invert=True` is for axes
+    where lower is better (cost-per-prompt → frugality)."""
+    if cap <= 0:
+        return 0.0
+    if invert:
+        if value <= 0:
+            return 1.0
+        return max(0.0, min(1.0, cap / value))
+    return max(0.0, min(1.0, value / cap))
+
+
+def _kind_from_norm(score: float) -> str:
+    """Bucket a 0..1 normalized score into the 3 color tiers used by the
+    profile card's stat columns. Tuned so most stats fall into "mid"
+    rather than the extremes — green should feel earned."""
+    if score >= 0.7:
+        return "elite"
+    if score >= 0.4:
+        return "mid"
+    return "low"
+
+
+def compute_card_stats(days: int = 90) -> dict:
+    """Inputs for the Football Manager–style profile card shown on
+    /metrics. Pulls from corpus.db over the last `days` days plus the
+    BUNDLES_DIR for the always-current mastery axis. Returns a dict
+    with:
+
+      - axes:           {axis → 0..1 normalized}
+      - axes_raw:       {axis → human-readable raw value}
+      - rating:         int 40..99 (FIFA convention; floor so a Newcomer
+                        still gets a respectable card)
+      - archetype:      (name, flavor) tuple
+      - attribute_groups: list of 3 dicts (Volume / Efficiency / Breadth)
+                          each with {label, stats: [{label, raw, kind}]}.
+                          kind is "elite" / "mid" / "low" / "neutral"; the
+                          template just renders, no math. The key name is
+                          "stats" rather than "items" because Jinja's
+                          `group.items` resolves to dict.items() first.
+      - traits:         list of strings — procedural badges like
+                        "Codex-first", "Tool collector".
+      - sessions, prompts, cost_usd, active_days, tool_calls, tool_errors,
+        projects, distinct_tools, distinct_agents, agents (dict),
+        cache_hit_ratio, prompts_per_session, cost_per_session
+      - first_seen, last_seen, top_agent, top_tool
+
+    Empty corpus → Newcomer card, rating 40, every axis 0.
+    """
+    from watchmen.paths import BUNDLES_DIR
+
+    out: dict = {
+        "axes": {a: 0.0 for a in CARD_AXES},
+        "axes_raw": {a: 0.0 for a in CARD_AXES},
+        "sessions": 0, "prompts": 0, "cost_usd": 0.0,
+        "active_days": 0, "tool_calls": 0, "tool_errors": 0,
+        "projects": 0, "distinct_tools": 0, "distinct_agents": 0,
+        "input_tokens": 0, "cache_creation_tokens": 0,
+        "cache_read_tokens": 0, "output_tokens": 0,
+        "agents": {},
+        "top_tools": [],
+        "first_seen": None, "last_seen": None,
+        "top_agent": None, "top_tool": None,
+    }
+
+    if CORPUS_DB.exists():
+        cutoff = (date.today() - timedelta(days=days - 1)).isoformat()
+        with sqlite3.connect(str(CORPUS_DB)) as conn:
+            conn.row_factory = sqlite3.Row
+            agg = conn.execute(
+                """SELECT COUNT(*)                                  AS sessions,
+                          COALESCE(SUM(user_prompt_count),0)        AS prompts,
+                          COALESCE(SUM(tool_use_count),0)           AS tool_calls,
+                          COALESCE(SUM(tool_error_count),0)         AS tool_errors,
+                          COALESCE(SUM(cost_usd),0.0)               AS cost_usd,
+                          COALESCE(SUM(input_tokens),0)             AS input_tokens,
+                          COALESCE(SUM(cache_creation_tokens),0)    AS cache_creation_tokens,
+                          COALESCE(SUM(cache_read_tokens),0)        AS cache_read_tokens,
+                          COALESCE(SUM(output_tokens),0)            AS output_tokens,
+                          COUNT(DISTINCT project_dir)               AS projects,
+                          COUNT(DISTINCT date(started_at, 'localtime')) AS active_days,
+                          COUNT(DISTINCT agent)                     AS distinct_agents,
+                          MIN(date(started_at, 'localtime'))        AS first_seen,
+                          MAX(date(started_at, 'localtime'))        AS last_seen
+                     FROM sessions
+                    WHERE is_subagent = 0
+                      AND date(started_at, 'localtime') >= ?""",
+                [cutoff],
+            ).fetchone()
+            for k in ("sessions", "prompts", "tool_calls", "tool_errors",
+                      "cost_usd", "input_tokens", "cache_creation_tokens",
+                      "cache_read_tokens", "output_tokens", "projects",
+                      "active_days", "distinct_agents",
+                      "first_seen", "last_seen"):
+                out[k] = (agg[k] if agg[k] is not None
+                          else (0.0 if k == "cost_usd" else 0))
+            out["distinct_tools"] = conn.execute(
+                """SELECT COUNT(DISTINCT tc.tool_name) AS n
+                     FROM tool_calls tc
+                     JOIN sessions s ON s.session_id = tc.session_id
+                    WHERE s.is_subagent = 0
+                      AND date(s.started_at, 'localtime') >= ?""",
+                [cutoff],
+            ).fetchone()["n"] or 0
+            agent_rows = conn.execute(
+                """SELECT agent, COUNT(*) AS n
+                     FROM sessions
+                    WHERE is_subagent = 0
+                      AND date(started_at, 'localtime') >= ?
+                 GROUP BY agent ORDER BY n DESC""",
+                [cutoff],
+            ).fetchall()
+            out["agents"] = {r["agent"]: r["n"] for r in agent_rows}
+            if agent_rows:
+                out["top_agent"] = (agent_rows[0]["agent"], agent_rows[0]["n"])
+            tool_rows = conn.execute(
+                """SELECT tc.tool_name AS t, COUNT(*) AS n
+                     FROM tool_calls tc
+                     JOIN sessions s ON s.session_id = tc.session_id
+                    WHERE s.is_subagent = 0
+                      AND date(s.started_at, 'localtime') >= ?
+                 GROUP BY tc.tool_name ORDER BY n DESC LIMIT 8""",
+                [cutoff],
+            ).fetchall()
+            out["top_tools"] = [(r["t"], r["n"]) for r in tool_rows]
+            if tool_rows:
+                out["top_tool"] = (tool_rows[0]["t"], tool_rows[0]["n"])
+
+    # Mastery from on-disk bundles, independent of the corpus window. A
+    # curated skill stays curated even if the source sessions aged out.
+    curated_skills = 0
+    if BUNDLES_DIR.exists():
+        for proj_dir in BUNDLES_DIR.iterdir():
+            skills_dir = proj_dir / "skills"
+            if skills_dir.is_dir():
+                curated_skills += sum(1 for d in skills_dir.iterdir() if d.is_dir())
+    out["curated_skills"] = curated_skills
+
+    # Derived stats used by the 3-column attribute grid.
+    out["prompts_per_session"] = (out["prompts"] / out["sessions"]) if out["sessions"] else 0.0
+    out["cost_per_session"]    = (out["cost_usd"] / out["sessions"]) if out["sessions"] else 0.0
+    total_in = out["input_tokens"] + out["cache_creation_tokens"] + out["cache_read_tokens"]
+    out["cache_hit_ratio"]     = (out["cache_read_tokens"] / total_in) if total_in else 0.0
+
+    # Raw axis values.
+    throughput   = (out["prompts"] / out["active_days"]) if out["active_days"] else 0.0
+    cost_per_prm = (out["cost_usd"] / out["prompts"]) if out["prompts"] else 0.0
+    reliability  = (1.0 - out["tool_errors"] / out["tool_calls"]) if out["tool_calls"] else 0.0
+
+    out["axes_raw"] = {
+        "throughput":  round(throughput, 1),
+        "frugality":   round(cost_per_prm, 4),
+        "reliability": round(reliability, 3),
+        "curiosity":   out["distinct_tools"],
+        "range":       out["projects"],
+        "mastery":     curated_skills,
+    }
+    # Frugality + reliability only register when there's source data. A
+    # corpus with zero spend or zero tool calls is missing-data, not
+    # perfect frugality / perfect reliability — otherwise Newcomers
+    # would falsely score 1.0 on both axes from a divide-by-zero.
+    frugality_axis = (
+        _normalize(cost_per_prm, _CARD_CAPS["frugality"], invert=True)
+        if out["prompts"] > 0 and out["cost_usd"] > 0 else 0.0
+    )
+    reliability_axis = (
+        _normalize(reliability, _CARD_CAPS["reliability"])
+        if out["tool_calls"] > 0 else 0.0
+    )
+    out["axes"] = {
+        "throughput":  _normalize(throughput,  _CARD_CAPS["throughput"]),
+        "frugality":   frugality_axis,
+        "reliability": reliability_axis,
+        "curiosity":   _normalize(out["distinct_tools"], _CARD_CAPS["curiosity"]),
+        "range":       _normalize(out["projects"],       _CARD_CAPS["range"]),
+        "mastery":     _normalize(curated_skills,        _CARD_CAPS["mastery"]),
+    }
+
+    # Rating: weighted average mapped to 40..99 (FIFA convention).
+    avg = sum(out["axes"].values()) / len(out["axes"])
+    out["rating"] = max(40, min(99, round(40 + 59 * avg)))
+
+    # Archetype: dominant axis if it's clearly ahead, else Generalist.
+    if max(out["axes"].values()) < 0.15 and out["sessions"] < 5:
+        out["archetype"] = _NEWCOMER
+    else:
+        top_axis = max(out["axes"], key=out["axes"].get)
+        top_val = out["axes"][top_axis]
+        runner_up = sorted(out["axes"].values(), reverse=True)[1]
+        if top_val >= 0.4 and (runner_up == 0 or top_val / runner_up >= 1.25):
+            out["archetype"] = _ARCHETYPES[top_axis]
+        else:
+            out["archetype"] = _GENERALIST
+
+    out["attribute_groups"] = _compute_attribute_groups(out, days)
+    out["traits"] = _compute_traits(out)
+    return out
+
+
+def _compute_attribute_groups(stats: dict, window_days: int) -> list[dict]:
+    """Split derived stats into 3 FM-style columns. Each item gets a
+    `kind` ("elite" / "mid" / "low" / "neutral") so the template just
+    renders without recomputing thresholds. Thresholds scale with the
+    window so a 30-day card and a 365-day card both have meaningful
+    color coding."""
+    # Window-scaled targets — at the elite tier, the user is "on" most
+    # days of the window with substantial volume.
+    elite_active   = max(7,   window_days * 0.55)
+    elite_sessions = max(20,  window_days * 1.1)
+    elite_toolcalls = max(500, window_days * 35)
+
+    def stat(label, raw, score, *, neutral=False):
+        return {
+            "label": label,
+            "raw": raw,
+            "kind": "neutral" if neutral else _kind_from_norm(score),
+        }
+
+    axes = stats["axes"]
+    volume = [
+        stat("Throughput",
+             f"{stats['axes_raw']['throughput']}/d",  axes["throughput"]),
+        stat("Sessions",
+             f"{stats['sessions']:,}",
+             _normalize(stats["sessions"], elite_sessions)),
+        stat("Active days",
+             f"{stats['active_days']}",
+             _normalize(stats["active_days"], elite_active)),
+        stat("Tool calls",
+             _format_kn(stats["tool_calls"]),
+             _normalize(stats["tool_calls"], elite_toolcalls)),
+        stat("Prompts / sess",
+             f"{stats['prompts_per_session']:.1f}",
+             _normalize(stats["prompts_per_session"], 25.0)),
+    ]
+    efficiency = [
+        stat("Reliability",
+             f"{int(stats['axes_raw']['reliability'] * 100)}%" if stats["tool_calls"] else "—",
+             axes["reliability"]),
+        stat("Frugality",
+             f"${stats['axes_raw']['frugality']:.3f}/prm" if stats["prompts"] and stats["cost_usd"] else "—",
+             axes["frugality"]),
+        stat("Cache hit",
+             f"{int(stats['cache_hit_ratio'] * 100)}%" if stats["cache_hit_ratio"] else "—",
+             _normalize(stats["cache_hit_ratio"], 0.7)),
+        stat("Cost / sess",
+             f"${stats['cost_per_session']:.2f}" if stats["sessions"] else "—",
+             _normalize(stats["cost_per_session"], 5.0, invert=True) if stats["cost_per_session"] else 0.0),
+        stat("Total spend",
+             f"${stats['cost_usd']:,.2f}", 0.0, neutral=True),
+    ]
+    top_agent_label = adapter_label(stats["top_agent"][0]) if stats["top_agent"] else "—"
+    breadth = [
+        stat("Curiosity",
+             f"{stats['axes_raw']['curiosity']} tools", axes["curiosity"]),
+        stat("Range",
+             f"{stats['axes_raw']['range']} repos",     axes["range"]),
+        stat("Mastery",
+             f"{stats['axes_raw']['mastery']} skills",  axes["mastery"]),
+        stat("Agents",
+             f"{stats['distinct_agents']}",
+             _normalize(stats["distinct_agents"], 3.0)),
+        stat("Top agent",
+             top_agent_label, 0.0, neutral=True),
+    ]
+    return [
+        {"label": "Volume",     "stats": volume},
+        {"label": "Efficiency", "stats": efficiency},
+        {"label": "Breadth",    "stats": breadth},
+    ]
+
+
+def _compute_traits(stats: dict) -> list[str]:
+    """Procedural one-line badges derived from the stats. Mirrors FM's
+    'player traits' field. Order is stable (most distinctive first) and
+    duplicates filter out so we never claim two contradicting flavors."""
+    out: list[str] = []
+    axes = stats["axes"]
+    if stats["sessions"] < 5 and max(axes.values()) < 0.15:
+        return ["Newcomer"]
+
+    # Agent allegiance — if one agent owns the majority of sessions.
+    if stats["top_agent"]:
+        slug, n = stats["top_agent"]
+        if stats["sessions"] and n / stats["sessions"] >= 0.55:
+            out.append(f"{adapter_label(slug)}-first")
+    if stats["distinct_agents"] >= 3:
+        out.append("Multi-agent")
+
+    if axes["throughput"] >= 0.7:
+        out.append("Speedrunner")
+    if axes["curiosity"] >= 0.7:
+        out.append("Tool collector")
+    if axes["range"] >= 0.7:
+        out.append("Multi-repo hopper")
+    if axes["reliability"] >= 0.95:
+        out.append("Reliability master")
+    if axes["mastery"] >= 0.5:
+        out.append("Curator")
+    if stats["cache_hit_ratio"] >= 0.7:
+        out.append("Cache wizard")
+    if axes["frugality"] > 0 and axes["frugality"] < 0.3:
+        out.append("Heavy spender")
+    elif axes["frugality"] >= 0.7:
+        out.append("Frugal")
+
+    if not out:
+        out = ["Generalist"]
+    # Cap at 5 so the row doesn't wrap awkwardly.
+    return out[:5]
+
+
+def _format_kn(n: int) -> str:
+    """Compact integer formatter: 1500 → 1.5k, 1500000 → 1.5M."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n / 1_000:.0f}k"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n:,}"
+
+
+def agent_donut_svg(agent_counts: dict, *, size: int = 220, total_label: str = "sessions") -> str:
+    """Donut chart of per-agent session shares. Each agent is a colored
+    segment, center shows the total + label. Empty input renders a
+    muted "no data" donut so the layout doesn't collapse on empty
+    corpora."""
+    import math
+    cx = cy = size / 2
+    r_outer = size * 0.42
+    r_inner = size * 0.28
+
+    # Adapter palette tuned to match the page's blue/cyan/teal accent
+    # trio rather than the prior indigo-everywhere look.
+    colors = {
+        "claude_code": "#3b82f6",   # blue-500
+        "codex":       "#06b6d4",   # cyan-500
+        "pi":          "#14b8a6",   # teal-500
+    }
+    fallback_palette = ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
+
+    total = sum(agent_counts.values())
+    if total == 0:
+        return (
+            f'<svg viewBox="0 0 {size} {size}" xmlns="http://www.w3.org/2000/svg" role="img">'
+            f'<circle cx="{cx}" cy="{cy}" r="{r_outer}" fill="hsl(var(--muted))"/>'
+            f'<circle cx="{cx}" cy="{cy}" r="{r_inner}" fill="white"/>'
+            f'<text x="{cx}" y="{cy + 4}" text-anchor="middle" font-size="11" '
+            f'fill="hsl(var(--muted-foreground))">no data</text>'
+            f'</svg>'
+        )
+
+    segs: list[str] = []
+    angle = -math.pi / 2
+    fallback_i = 0
+    sorted_agents = sorted(agent_counts.items(), key=lambda kv: kv[1], reverse=True)
+    for slug, n in sorted_agents:
+        if not n:
+            continue
+        frac = n / total
+        next_angle = angle + 2 * math.pi * frac
+        # Avoid a single-segment "Z" arc rendering as nothing — when one
+        # agent owns 100%, force a tiny gap so the path is well-formed.
+        if frac >= 0.9999:
+            next_angle = angle + 2 * math.pi * 0.9999
+        large_arc = 1 if frac > 0.5 else 0
+        x1 = cx + r_outer * math.cos(angle);    y1 = cy + r_outer * math.sin(angle)
+        x2 = cx + r_outer * math.cos(next_angle); y2 = cy + r_outer * math.sin(next_angle)
+        ix1 = cx + r_inner * math.cos(next_angle); iy1 = cy + r_inner * math.sin(next_angle)
+        ix2 = cx + r_inner * math.cos(angle);    iy2 = cy + r_inner * math.sin(angle)
+        color = colors.get(slug)
+        if not color:
+            color = fallback_palette[fallback_i % len(fallback_palette)]
+            fallback_i += 1
+        path = (
+            f"M {x1:.1f},{y1:.1f} "
+            f"A {r_outer:.1f},{r_outer:.1f} 0 {large_arc} 1 {x2:.1f},{y2:.1f} "
+            f"L {ix1:.1f},{iy1:.1f} "
+            f"A {r_inner:.1f},{r_inner:.1f} 0 {large_arc} 0 {ix2:.1f},{iy2:.1f} Z"
+        )
+        segs.append(f'<path d="{path}" fill="{color}" stroke="white" stroke-width="2"/>')
+        angle = next_angle
+
+    total_str = _format_kn(total)
+    return (
+        f'<svg viewBox="0 0 {size} {size}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="agent mix donut">'
+        f'{"".join(segs)}'
+        f'<text x="{cx}" y="{cy - 4}" text-anchor="middle" font-size="24" font-weight="700" '
+        f'fill="hsl(220 9% 18%)" font-variant-numeric="tabular-nums">{total_str}</text>'
+        f'<text x="{cx}" y="{cy + 14}" text-anchor="middle" font-size="9" font-weight="600" '
+        f'fill="hsl(220 9% 46%)" letter-spacing="0.14em">{total_label.upper()}</text>'
+        f'</svg>'
+    )
+
+
+def agent_donut_legend(agent_counts: dict) -> list[dict]:
+    """Companion data for the donut: list of dicts with slug, label,
+    count, share (0..1), color. Template renders the legend with the
+    same color order the donut uses."""
+    total = sum(agent_counts.values()) or 1
+    colors = {"claude_code": "#3b82f6", "codex": "#06b6d4", "pi": "#14b8a6"}
+    fallback = ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
+    out, fb_i = [], 0
+    for slug, n in sorted(agent_counts.items(), key=lambda kv: kv[1], reverse=True):
+        if not n:
+            continue
+        if slug in colors:
+            color = colors[slug]
+        else:
+            color = fallback[fb_i % len(fallback)]
+            fb_i += 1
+        out.append({
+            "slug": slug, "label": adapter_label(slug),
+            "count": n, "share": n / total, "color": color,
+        })
+    return out
+
+
+def card_svg(stats: dict, *, size: int = 440) -> str:
+    """Hex spider chart with FM-style tinted concentric rings.
+
+    Red core (0.0–0.25) → orange (0.25–0.5) → yellow (0.5–0.75) →
+    green outer ring (0.75–1.0). The user's polygon is drawn on top in
+    white with an indigo border so it pops against the tinted rings.
+
+    No header / footer / rating in the SVG — those moved into HTML on
+    the profile section of /metrics so labels stay copy-pasteable and
+    the SVG fits any column width.
+    """
+    import math
+
+    cx, cy = size / 2, size / 2
+    r = size * 0.42  # outer ring radius
+    n = len(CARD_AXES)
+    angles = [(-math.pi / 2) + (2 * math.pi * i / n) for i in range(n)]
+
+    def _ring_points(scale: float) -> str:
+        return " ".join(
+            f"{cx + r * scale * math.cos(a):.1f},{cy + r * scale * math.sin(a):.1f}"
+            for a in angles
+        )
+
+    # Tinted ring colors, outer → inner. Each band is the area between
+    # one ring and the next; we draw the OUTER one first as a green
+    # background, then layer smaller polygons of warmer colors on top.
+    # That gives the FM "elite zone is green, weak zone is red" effect.
+    ring_polys = [
+        f'<polygon points="{_ring_points(1.00)}" fill="hsl(142 60% 86%)" stroke="hsl(220 13% 86%)" stroke-width="1"/>',
+        f'<polygon points="{_ring_points(0.75)}" fill="hsl(45  90% 90%)" stroke="hsl(220 13% 86%)" stroke-width="1"/>',
+        f'<polygon points="{_ring_points(0.50)}" fill="hsl(25  95% 90%)" stroke="hsl(220 13% 86%)" stroke-width="1"/>',
+        f'<polygon points="{_ring_points(0.25)}" fill="hsl(0   75% 92%)" stroke="hsl(220 13% 86%)" stroke-width="1"/>',
+    ]
+
+    # Spokes from center to outer ring.
+    spokes: list[str] = []
+    labels: list[str] = []
+    for i, a in enumerate(angles):
+        x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+        spokes.append(
+            f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x:.1f}" y2="{y:.1f}" '
+            f'stroke="white" stroke-width="1.4" stroke-opacity="0.8"/>'
+        )
+        # Label sits just past the outer ring.
+        lx, ly = cx + (r + 18) * math.cos(a), cy + (r + 18) * math.sin(a)
+        if abs(math.cos(a)) < 0.1:
+            anchor = "middle"
+        elif math.cos(a) > 0:
+            anchor = "start"
+        else:
+            anchor = "end"
+        labels.append(
+            f'<text x="{lx:.1f}" y="{ly + 4:.1f}" text-anchor="{anchor}" '
+            f'font-size="10" font-weight="700" fill="hsl(220 9% 25%)" '
+            f'letter-spacing="0.08em">{CARD_AXES[i].upper()}</text>'
+        )
+
+    # The user's polygon, on top of the rings.
+    user_pts = []
+    for i, a in enumerate(angles):
+        v = max(0.02, stats["axes"][CARD_AXES[i]])
+        x = cx + r * v * math.cos(a)
+        y = cy + r * v * math.sin(a)
+        user_pts.append(f"{x:.1f},{y:.1f}")
+    user_poly = " ".join(user_pts)
+
+    return f'''<svg viewBox="0 0 {size} {size + 36}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="watchmen profile spider chart">
+  <defs>
+    <linearGradient id="spider-fill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="hsl(217 91% 60%)" stop-opacity="0.75"/>
+      <stop offset="100%" stop-color="hsl(189 94% 50%)" stop-opacity="0.55"/>
+    </linearGradient>
+  </defs>
+  {''.join(ring_polys)}
+  {''.join(spokes)}
+  <polygon points="{user_poly}" data-user="1"
+           fill="url(#spider-fill)"
+           stroke="hsl(217 91% 50%)" stroke-width="2.5" stroke-linejoin="round"/>
+  {''.join(f'<circle cx="{cx + r * max(0.02, stats["axes"][CARD_AXES[i]]) * math.cos(a):.1f}" cy="{cy + r * max(0.02, stats["axes"][CARD_AXES[i]]) * math.sin(a):.1f}" r="3.5" fill="white" stroke="hsl(217 91% 50%)" stroke-width="2"/>' for i, a in enumerate(angles))}
+  {''.join(labels)}
+</svg>'''
+
+
+def card_tier_colors(rating: int) -> dict:
+    """Return CSS-ready color tokens for the rating tier so the template
+    can render the header strip + rating number with matching tints.
+    Mirrors FIFA: gold / silver / bronze / indigo (default)."""
+    if rating >= 90:
+        return {"name": "gold", "from": "#fef3c7", "to": "#f59e0b",
+                "text": "#78350f", "border": "#d97706"}
+    if rating >= 80:
+        return {"name": "silver", "from": "#f3f4f6", "to": "#9ca3af",
+                "text": "#1f2937", "border": "#6b7280"}
+    if rating >= 70:
+        return {"name": "bronze", "from": "#fed7aa", "to": "#c2410c",
+                "text": "#7c2d12", "border": "#9a3412"}
+    return {"name": "indigo", "from": "#e0e7ff", "to": "#3b82f6",
+            "text": "#3730a3", "border": "#2563eb"}
 
 
 if __name__ == "__main__":

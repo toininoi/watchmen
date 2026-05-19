@@ -40,7 +40,18 @@ from watchmen.paths import BUNDLES_DIR
 from watchmen.tools_lib import make_tools
 
 ROOT = Path(__file__).parent
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+
+
+def _default_model() -> str:
+    """Resolve the curator's default model from the active provider."""
+    from watchmen import config
+    return config.default_model()
+
+
+# Resolved at import time. argparse picks it up via `default=DEFAULT_MODEL`
+# in main() — no callsite churn needed since the resolution still happens
+# before parser-build through the import-time call above.
+DEFAULT_MODEL = _default_model()
 
 
 # ─── Filesystem helpers ─────────────────────────────────────────────────────

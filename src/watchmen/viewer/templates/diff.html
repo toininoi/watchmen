@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ commit.short }} — {{ project.project_key }} — watchmen{% endblock %}
+{% block title %}{{ commit.short }} · {{ project.project_key }} · watchmen{% endblock %}
 {% block content %}
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html@3.4.48/bundles/css/diff2html.min.css" />
@@ -27,7 +27,7 @@
       <div class="text-sm text-gray-600 mt-1 font-mono">{{ commit.ts }}</div>
     </div>
     <div class="flex items-center gap-2">
-      <button id="view-side" class="px-3 py-1.5 text-sm rounded-md bg-indigo-600 text-white hover:bg-indigo-700">Side-by-side</button>
+      <button id="view-side" class="px-3 py-1.5 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700">Side-by-side</button>
       <button id="view-unified" class="px-3 py-1.5 text-sm rounded-md bg-white border border-gray-300 hover:bg-gray-50">Unified</button>
     </div>
   </div>
@@ -35,7 +35,7 @@
 
 {% if is_initial %}
 <div class="mb-4 px-4 py-3 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
-  <strong>Baseline snapshot.</strong> This is the first commit for this project — git has no parent to compare against, so the renderer shows every file as added. The content was already on disk before this; we just took the initial snapshot here. The <em>next</em> curator run will produce a real diff against this baseline.
+  <strong>Baseline snapshot.</strong> This is the first commit for this project, so git has no parent to compare against and the renderer shows every file as added. The content was already on disk before this; we just took the initial snapshot here. The <em>next</em> curator run will produce a real diff against this baseline.
 </div>
 {% endif %}
 
@@ -49,7 +49,7 @@
 
 <div class="mt-6 flex items-center gap-4 text-sm">
   {% if prev_sha %}
-    <a href="/p/{{ project.project_key }}/diff/{{ prev_sha }}" class="text-indigo-600 hover:underline">← previous run</a>
+    <a href="/p/{{ project.project_key }}/diff/{{ prev_sha }}" class="text-blue-600 hover:underline">← previous run</a>
   {% endif %}
   <a href="/p/{{ project.project_key }}/runs" class="text-gray-600 hover:underline">all runs</a>
 </div>
@@ -74,10 +74,10 @@
       ui.draw();
       ui.highlightCode();
       btnSide.className = (mode === 'side-by-side')
-        ? 'px-3 py-1.5 text-sm rounded-md bg-indigo-600 text-white hover:bg-indigo-700'
+        ? 'px-3 py-1.5 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700'
         : 'px-3 py-1.5 text-sm rounded-md bg-white border border-gray-300 hover:bg-gray-50';
       btnUni.className = (mode === 'line-by-line')
-        ? 'px-3 py-1.5 text-sm rounded-md bg-indigo-600 text-white hover:bg-indigo-700'
+        ? 'px-3 py-1.5 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700'
         : 'px-3 py-1.5 text-sm rounded-md bg-white border border-gray-300 hover:bg-gray-50';
     }
 

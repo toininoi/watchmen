@@ -1,5 +1,6 @@
 """watchmen viewer — local FastAPI dashboard for browsing analyses + skill bundles + CLAUDE.md."""
 
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -8,9 +9,20 @@ from pathlib import Path
 import bleach
 import markdown as md
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, STATE_DB
+from watchmen.util import (
+    ADAPTER_SHORT,
+    BLOCKLIST_FILE,
+    PINNED_FILE,
+    read_skill_list,
+    write_skill_list,
+)
+from watchmen.viewer import actions as wm_actions
+from watchmen.viewer import homepage as wm_homepage
+from watchmen.viewer import diagnostics as wm_diag
 
 ROOT = Path(__file__).parent.parent  # src/watchmen/
 ANALYSES = ANALYSES_DIR
@@ -124,9 +136,145 @@ def list_recent_runs(limit: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _curation_log_excerpt(proj_dir: Path, skill_slug: str, skill_name: str) -> str:
+    """Pull the relevant block from _curation_log.md for a given skill.
+    Mirrors commands.inspect._curation_log_excerpt; copied here to keep the
+    viewer module standalone (no cross-imports into commands/)."""
+    log = proj_dir / "_curation_log.md"
+    if not log.exists():
+        return ""
+    lines = log.read_text().splitlines()
+    needles = (skill_slug.lower(), skill_name.lower())
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and any(n in line.lower() for n in needles):
+            body = [line]
+            for j in range(i + 1, min(len(lines), i + 30)):
+                if lines[j].startswith("## "):
+                    break
+                body.append(lines[j])
+            return "\n".join(body).strip()
+    return ""
+
+
+def get_skill_provenance(project_key: str, skill_slug: str) -> dict:
+    """Why does this skill exist? Returns the candidate's stated triggers,
+    source files (with existence check), source sessions cross-referenced
+    against corpus.db, and the curator's rationale excerpt.
+
+    Returns {} when there's no candidate match — callers should treat that
+    as "no provenance available" and skip the section in the template."""
+    proj_dir = BUNDLES / project_key
+    candidates_path = proj_dir / "_candidates.json"
+    if not candidates_path.exists():
+        return {}
+    try:
+        cands = json.loads(candidates_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    match = next(
+        (c for c in cands if c.get("slug") == skill_slug
+         or c.get("name", "").lower() == skill_slug.lower()),
+        None,
+    )
+    if not match:
+        return {}
+
+    name = match.get("name", skill_slug)
+    slug = match.get("slug", skill_slug)
+    when_to_use = match.get("when_to_use") or []
+    if isinstance(when_to_use, str):
+        when_to_use = [when_to_use]
+    source_files = match.get("source_files") or []
+    source_files_resolved = [
+        {"path": f, "exists": Path(f).exists()} for f in source_files
+    ]
+
+    # Cross-reference session ids with corpus.db. Tolerates free-form
+    # labels (codex/pi sessions sometimes include annotations) by matching
+    # on the first whitespace/paren-delimited token via LIKE prefix.
+    sessions: list[dict] = []
+    raw_ids = match.get("session_ids") or []
+    if raw_ids and CORPUS_DB.exists():
+        try:
+            cc = sqlite3.connect(str(CORPUS_DB))
+            cc.row_factory = sqlite3.Row
+            try:
+                cc.execute("SELECT 1 FROM sessions LIMIT 1")
+            except sqlite3.OperationalError:
+                cc.close()
+                cc = None
+        except sqlite3.Error:
+            cc = None
+        if cc is not None:
+            for sid in raw_ids:
+                short = (
+                    sid.split()[0].split("(")[0].strip()
+                    if isinstance(sid, str) else str(sid)
+                )
+                row = cc.execute(
+                    """SELECT s.session_id, s.agent, s.started_at,
+                              (SELECT text FROM prompts
+                               WHERE session_id = s.session_id
+                               ORDER BY rowid LIMIT 1) AS first_prompt
+                       FROM sessions s
+                       WHERE s.session_id LIKE ? || '%' LIMIT 1""",
+                    (short,),
+                ).fetchone()
+                if row:
+                    snippet = (row["first_prompt"] or "").replace("\n", " ")[:120]
+                    sessions.append({
+                        "id": short[:14],
+                        "agent": ADAPTER_SHORT.get(row["agent"], row["agent"]),
+                        "agent_full": row["agent"],
+                        "date": (row["started_at"] or "")[:10],
+                        "snippet": snippet,
+                        "found": True,
+                    })
+                else:
+                    sessions.append({
+                        "id": short[:14],
+                        "agent": "?",
+                        "agent_full": "",
+                        "date": "",
+                        "snippet": str(sid)[:120],
+                        "found": False,
+                    })
+            cc.close()
+
+    excerpt = _curation_log_excerpt(proj_dir, slug, name)
+    return {
+        "name": name,
+        "slug": slug,
+        "description": match.get("description", ""),
+        "when_to_use": list(when_to_use)[:8],
+        "when_to_use_more": max(0, len(when_to_use) - 8),
+        "source_files": source_files_resolved,
+        "sessions": sessions,
+        "curator_excerpt": excerpt,
+    }
+
+
+def get_skill_status(project_key: str, skill_slug: str) -> dict:
+    """Pinned / blocked status of a skill. Drives the control buttons:
+    Pin vs Unpin label, Drop confirm prompt, restore-from-blocklist hint."""
+    pinned = read_skill_list(project_key, PINNED_FILE)
+    blocked = read_skill_list(project_key, BLOCKLIST_FILE)
+    return {
+        "pinned": skill_slug in pinned,
+        "blocked": skill_slug in blocked,
+    }
+
+
 # ─── App ────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="watchmen viewer")
+
+# Static assets — brand mark, future icons. Mounted under /static.
+# `check_dir=False` makes dev installs that haven't built the package yet
+# (no static/ on disk) start cleanly instead of crashing on import.
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
@@ -177,6 +325,14 @@ def dashboard(request: Request):
         "runs": runs,
         "changelog_version": changelog_version,
         "changelog_body_html": changelog_body_html,
+        "next_actions": wm_actions.next_best_actions(limit=6),
+        "active_web_runs": [r for r in wm_actions.list_runs(limit=5) if r["alive"]],
+        # Mission-control surfaces — all degrade to empty/zero when
+        # corpus.db is missing, so a fresh install still renders fine.
+        "impact": wm_homepage.impact_strip(),
+        "leaderboard": wm_homepage.skill_leaderboard(window_days=7, limit=6),
+        "status_tiles": wm_homepage.status_tiles(),
+        "sparkline_data": wm_homepage.weekly_sparkline_data(weeks=12),
     })
 
 
@@ -194,6 +350,15 @@ def project_page(request: Request, project_key: str):
         "claude_md": claude_md_html,
         "skills": skills,
         "thesis_days": days,
+        "next_actions": wm_actions.next_best_actions(project_key=project_key, limit=4),
+        "active_web_runs": [
+            r for r in wm_actions.list_runs(limit=10)
+            if r["alive"] and r.get("project_key") == project_key
+        ],
+        # Per-project before/after view for the Impact card.  Renders an
+        # empty state when treatment_date is None or pre/post N < 3, so
+        # the section is always safe to include.
+        "impact": wm_homepage.project_impact(project_key, weeks=16),
     })
 
 
@@ -211,12 +376,250 @@ def skill_page(request: Request, project_key: str, skill_slug: str):
                 "rel": str(f.relative_to(skill_dir)),
                 "size": f.stat().st_size,
             })
+    provenance = get_skill_provenance(project_key, skill_slug)
+    status = get_skill_status(project_key, skill_slug)
     return TEMPLATES.TemplateResponse(request, "skill.html", {
         "project_key": project_key,
         "skill_slug": skill_slug,
         "skill_md": skill_md_html,
         "files": files,
+        "provenance": provenance,
+        "status": status,
     })
+
+
+# ─── Skill control endpoints ────────────────────────────────────────────────
+# Mutate pin/blocklist state and (for drop) remove the bundle directory.
+# Plain POST → 303 redirect pattern: keeps the browser back-button sane and
+# avoids needing JSON fetch. CLI parity comes from the shared util helpers.
+
+def _skill_or_404(project_key: str, skill_slug: str) -> Path:
+    skill_dir = BUNDLES / project_key / "skills" / skill_slug
+    if not skill_dir.exists():
+        raise HTTPException(404, f"skill {skill_slug} not found")
+    return skill_dir
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/pin")
+def skill_pin(project_key: str, skill_slug: str):
+    _skill_or_404(project_key, skill_slug)
+    pinned = read_skill_list(project_key, PINNED_FILE)
+    pinned.add(skill_slug)
+    write_skill_list(project_key, PINNED_FILE, pinned)
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/unpin")
+def skill_unpin(project_key: str, skill_slug: str):
+    pinned = read_skill_list(project_key, PINNED_FILE)
+    pinned.discard(skill_slug)
+    write_skill_list(project_key, PINNED_FILE, pinned)
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/drop")
+def skill_drop(project_key: str, skill_slug: str):
+    """Add to blocklist + remove the bundle directory. After this the skill
+    page 404s — so redirect to the project page instead."""
+    skill_dir = _skill_or_404(project_key, skill_slug)
+    blocklist = read_skill_list(project_key, BLOCKLIST_FILE)
+    blocklist.add(skill_slug)
+    write_skill_list(project_key, BLOCKLIST_FILE, blocklist)
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
+    return RedirectResponse(url=f"/p/{project_key}", status_code=303)
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/restore")
+def skill_restore(project_key: str, skill_slug: str):
+    """Remove from blocklist; the next curator run can re-propose the slug.
+    Used on a still-present bundle that was *marked* blocked but not dropped."""
+    blocklist = read_skill_list(project_key, BLOCKLIST_FILE)
+    blocklist.discard(skill_slug)
+    write_skill_list(project_key, BLOCKLIST_FILE, blocklist)
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
+
+
+# ─── Web-triggered runs ──────────────────────────────────────────────────────
+# Lets users press "Analyze now" / "Curate now" buttons in the action banner.
+# Spawns a detached subprocess; the page redirects to /actions/run/<id> which
+# tails the log file until the process exits. State files live under
+# ~/.watchmen/web-runs/ alongside the daemon's existing storage.
+
+
+@app.post("/actions/run")
+async def actions_run(request: Request):
+    """Spawn a CLI subprocess. Parses the urlencoded body manually to avoid
+    pulling in python-multipart (FastAPI's Form(...) and request.form() both
+    require it; we don't otherwise need form upload features)."""
+    from urllib.parse import parse_qs
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    fields = parse_qs(raw, keep_blank_values=False)
+    action = (fields.get("action", [""])[0]).strip()
+    project_key = (fields.get("project_key", [""])[0]).strip()
+    if not action or not project_key:
+        raise HTTPException(400, "missing 'action' or 'project_key' form field")
+    try:
+        meta = wm_actions.start_run(action, project_key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return RedirectResponse(url=f"/actions/run/{meta['id']}", status_code=303)
+
+
+@app.get("/actions/run/{run_id}", response_class=HTMLResponse)
+def actions_run_view(request: Request, run_id: str):
+    meta = wm_actions.get_run(run_id)
+    if not meta:
+        raise HTTPException(404, f"run {run_id} not found")
+    return TEMPLATES.TemplateResponse(request, "action_run.html", {
+        "run": meta,
+    })
+
+
+# ─── Doctor + settings (web UI for `watchmen doctor` / `settings`) ───────────
+
+
+@app.get("/doctor", response_class=HTMLResponse)
+def doctor_page(request: Request, check_openrouter: bool = True):
+    """Install-health diagnostic. Mirrors the CLI's `doctor` table — same
+    probes, same severity vocabulary. `?check_openrouter=0` skips the
+    HTTP probe (fastest path for an offline page load)."""
+    result = wm_diag.run_checks(check_openrouter=check_openrouter)
+    return TEMPLATES.TemplateResponse(request, "doctor.html", {
+        "rows": result["rows"],
+        "summary": result["summary"],
+        "check_openrouter": check_openrouter,
+    })
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, flash: str | None = None):
+    """Settings: API key, viewer port, per-project enabled + threshold.
+    Reads via wm_diag.get_settings(); writes go through the POST handlers
+    below. The `flash` query param surfaces the success/error message
+    from the previous POST→303 cycle."""
+    snap = wm_diag.get_settings()
+    return TEMPLATES.TemplateResponse(request, "settings.html", {
+        **snap,
+        "flash": flash,
+    })
+
+
+async def _form_fields(request: Request) -> dict[str, str]:
+    """Tiny urlencoded body parser. Matches the pattern in /actions/run so
+    the viewer stays python-multipart-free."""
+    from urllib.parse import parse_qs
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    fields = parse_qs(raw, keep_blank_values=True)
+    return {k: (v[0] if v else "") for k, v in fields.items()}
+
+
+def _settings_redirect(message: str, ok: bool = True) -> RedirectResponse:
+    prefix = "ok:" if ok else "err:"
+    from urllib.parse import quote
+    return RedirectResponse(
+        url=f"/settings?flash={prefix}{quote(message)}", status_code=303
+    )
+
+
+@app.post("/settings/api-key")
+async def settings_set_api_key(request: Request):
+    fields = await _form_fields(request)
+    # `provider` is optional in the POST body: omitting it targets the
+    # active provider (matches `watchmen settings api-key` no-arg behavior).
+    # Template can render a per-provider <select> when the user has more
+    # than one provider configured.
+    provider = (fields.get("provider") or "").strip() or None
+    try:
+        path = wm_diag.set_api_key(fields.get("value", ""), provider=provider)
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    label = provider or "active provider"
+    return _settings_redirect(f"API key for {label} updated · wrote → {path}")
+
+
+@app.post("/settings/provider")
+async def settings_set_provider(request: Request):
+    """Switch the active LLM provider. The new provider must already have a
+    key configured — the redirect surfaces a flash if not, so the user has
+    one clear next action."""
+    fields = await _form_fields(request)
+    new_provider = (fields.get("value") or "").strip()
+    if not new_provider:
+        return _settings_redirect("provider value required", ok=False)
+    try:
+        path = wm_diag.set_active_provider(new_provider)
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"active provider → {new_provider} · wrote → {path}")
+
+
+@app.post("/settings/model")
+async def settings_set_model(request: Request):
+    """Set or clear WATCHMEN_DEFAULT_MODEL. The form has two submit buttons:
+    one carries `action=set` + a `value` (override the model), the other
+    carries `action=clear` (revert to the active provider's default).
+
+    Splitting the action by submit button keeps the UI single-form (no
+    JS) while letting one HTML element drive both transitions."""
+    fields = await _form_fields(request)
+    action = (fields.get("action") or "set").strip().lower()
+
+    if action == "clear":
+        cleared = wm_diag.clear_default_model()
+        if cleared:
+            from watchmen import config as _config
+            return _settings_redirect(
+                f"model override cleared · using provider default ({_config.default_model()})"
+            )
+        return _settings_redirect("no model override was set", ok=False)
+
+    try:
+        path = wm_diag.set_default_model(fields.get("value", ""))
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"default model updated · wrote → {path}")
+
+
+@app.post("/settings/port")
+async def settings_set_port(request: Request):
+    fields = await _form_fields(request)
+    try:
+        path, port = wm_diag.set_viewer_port(fields.get("value", ""))
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(
+        f"Viewer port set to {port} · wrote → {path} · "
+        f"reinstall the agent for the new port to take effect."
+    )
+
+
+@app.post("/settings/project/{project_key}")
+async def settings_update_project(request: Request, project_key: str):
+    fields = await _form_fields(request)
+    try:
+        enabled_raw = fields.get("enabled")
+        thr_raw = fields.get("threshold_new_prompts", "").strip()
+        enabled: bool | None
+        if enabled_raw is None:
+            enabled = None
+        else:
+            enabled = enabled_raw.lower() in ("1", "true", "on", "yes")
+        threshold = int(thr_raw) if thr_raw else None
+        wm_diag.update_project_settings(
+            project_key, enabled=enabled, threshold_new_prompts=threshold,
+        )
+    except ValueError as e:
+        return _settings_redirect(str(e), ok=False)
+    return _settings_redirect(f"{project_key} updated")
 
 
 @app.get("/p/{project_key}/skills/{skill_slug}/files/{file_rel:path}", response_class=HTMLResponse)
@@ -316,7 +719,7 @@ def insights_page(request: Request):
         adapter = adapter_breakdown(key)
         tool_errors, top_error_tools, frust_count, frust_samples = repo_friction_signals(key)
         daily = _metrics.daily_metrics(key, days=30) or []
-        sess_series = [r["sessions"] for r in reversed(daily)]
+        sess_chronological = list(reversed(daily))
         try:
             prog = _state.get_project_progress(key)
             pending_prompts = prog.get("new_prompts_since_last_analysis", 0) or 0
@@ -331,13 +734,14 @@ def insights_page(request: Request):
             "top_error_tools": top_error_tools,
             "frust_count": frust_count,
             "frust_samples": frust_samples,
-            "sess_spark": _metrics.sparkline_svg(sess_series, color="#4f46e5", width=140, height=30),
+            # Per-repo sparkline payload — same shape as the area-chart helper
+            # in base.html consumes. Renders client-side with the shared theme
+            # so per-row sparks match the profile-card sparks visually.
+            "sess_spark_data": [
+                {"date": r["date"], "value": r["sessions"]} for r in sess_chronological
+            ],
             "pending_prompts": pending_prompts,
             "total_sess": sum(adapter.values()),
-            "tool_chart": _metrics.hbar_chart_svg(
-                [(t, n) for t, n in top_error_tools],
-                color="#dc2626", label_width=110, width=340,
-            ) if top_error_tools else "",
         })
     repos.sort(key=lambda r: (-r["skills_n"], -r["total_sess"]))
 
@@ -366,45 +770,62 @@ def insights_page(request: Request):
     untapped = [(r["key"], r["total_sess"]) for r in repos if r["skills_n"] == 0 and r["total_sess"] > 0]
     untapped.sort(key=lambda x: -x[1])
 
-    # Aggregate per-repo chart for cross-repo comparison (frustration totals).
-    frust_chart = _metrics.hbar_chart_svg(
-        sorted([(r["key"], r["frust_count"]) for r in repos if r["frust_count"] > 0],
-               key=lambda x: -x[1])[:8],
-        color="#eab308", label_width=140, width=440,
-    )
-    errors_chart = _metrics.hbar_chart_svg(
-        sorted([(r["key"], r["tool_errors"]) for r in repos if r["tool_errors"] > 0],
-               key=lambda x: -x[1])[:8],
-        color="#dc2626", label_width=140, width=440,
-    )
+    # Aggregate per-repo charts for cross-repo comparison. Both are bar
+    # charts; payloads pass through the shared ECharts helper in base.html.
+    frust_chart_data = [
+        {"label": k, "value": n}
+        for k, n in sorted([(r["key"], r["frust_count"]) for r in repos if r["frust_count"] > 0],
+                           key=lambda x: -x[1])[:8]
+    ]
+    errors_chart_data = [
+        {"label": k, "value": n}
+        for k, n in sorted([(r["key"], r["tool_errors"]) for r in repos if r["tool_errors"] > 0],
+                           key=lambda x: -x[1])[:8]
+    ]
 
     # Aggregate metrics (rollup window + heatmap) — reuse what /metrics builds.
     aggregate_rows = _metrics.daily_metrics_all(days=30, tracked_only=False)
     last7 = _metrics.summarize_window(aggregate_rows, 7)
     last30 = _metrics.summarize_window(aggregate_rows, 30)
     series = list(reversed(aggregate_rows))
-    sparks = {
-        "sessions":    _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
-        "prompts":     _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
-        "tool_errors": _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
-        "cost_usd":    _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
+    def _series_insights(key: str) -> list[dict]:
+        return [{"date": r["date"], "value": r[key]} for r in series]
+    sparks_data = {
+        "sessions":    _series_insights("sessions"),
+        "prompts":     _series_insights("prompts"),
+        "tool_errors": _series_insights("tool_errors"),
+        "cost_usd":    _series_insights("cost_usd"),
     }
     hour_dow = _metrics.activity_by_hour_dow_all(days=90, tracked_only=False)
-    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+    hour_dow_data = {
+        "points": [
+            {"hour": h, "dow": d, "value": hour_dow[d][h]}
+            for d in range(7) for h in range(24)
+        ],
+    }
 
     # Latest cached deep digest from ~/.watchmen/insights/.
     digest_html = None
     digest_meta: dict = {}
+    cmp_narrative_html = ""
+    cmp_narrative_meta: dict = {}
     try:
         from watchmen.commands.insights import (
             _latest_digest_path,
             _read_digest_metadata,
+            _latest_cross_agent_narrative,
         )
         latest = _latest_digest_path()
         if latest is not None:
             meta, body = _read_digest_metadata(latest)
             digest_meta = meta
             digest_html = render_md(body)
+        # Cross-agent narrative — independent cache file, rendered inline
+        # above the deep digest so users see the per-agent context first.
+        loaded = _latest_cross_agent_narrative()
+        if loaded:
+            cmp_narrative_meta, cmp_body = loaded
+            cmp_narrative_html = render_md(cmp_body)
     except Exception:
         digest_html = None
 
@@ -414,14 +835,16 @@ def insights_page(request: Request):
         "repos": repos,
         "cross": cross,
         "untapped": untapped,
-        "frust_chart": frust_chart,
-        "errors_chart": errors_chart,
+        "frust_chart_data": frust_chart_data,
+        "errors_chart_data": errors_chart_data,
         "last7": last7,
         "last30": last30,
-        "sparks": sparks,
-        "hour_dow_svg": hour_dow_svg,
+        "sparks_data": sparks_data,
+        "hour_dow_data": hour_dow_data,
         "digest_html": digest_html,
         "digest_meta": digest_meta,
+        "cmp_narrative_html": cmp_narrative_html,
+        "cmp_narrative_meta": cmp_narrative_meta,
         "curated_count": sum(1 for r in repos if r["skills_n"] > 0),
         "n_projects": len(projects),
         "total_skills": sum(r["skills_n"] for r in repos),
@@ -439,19 +862,37 @@ def metrics_all(request: Request, tracked: int = 0):
     last7 = _metrics.summarize_window(rows, 7)
     last30 = _metrics.summarize_window(rows, 30)
     series = list(reversed(rows))
-    sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
-        "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
-        "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
-        "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
-        "tool_errors":  _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
-        "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
-        "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
+    # Sparks now ship as raw {date, value} arrays — ECharts area-chart helper
+    # in base.html mounts each one client-side with the same shadcn theme as
+    # the profile card. One helper, one theme, every chart on the page.
+    def _series(key: str) -> list[dict]:
+        return [{"date": r["date"], "value": r[key]} for r in series]
+    sparks_data = {
+        "sessions":     _series("sessions"),
+        "prompts":      _series("prompts"),
+        "input_tokens": _series("input_tokens"),
+        "output_tokens":_series("output_tokens"),
+        "tool_errors":  _series("tool_errors"),
+        "cost_usd":     _series("cost_usd"),
+        "suggestions":  _series("suggestions_fired"),
     }
+    # Calendar heatmap: pass raw [(date, count), ...] as JSON-friendly pairs.
+    # Range derived from first/last date so ECharts' calendar coord system
+    # can lay out exactly the weeks we have data for.
     calendar = _metrics.activity_calendar_all(weeks=26, tracked_only=tracked_only)
+    calendar_data = {
+        "points": [{"date": d, "value": int(n)} for d, n in calendar],
+        "range":  [calendar[0][0], calendar[-1][0]] if calendar else None,
+    }
+    # Hour×DOW heatmap: hour_dow[day_of_week][hour] = count. ECharts heatmap
+    # wants flat [hour, day, value] triples; client helper unpacks.
     hour_dow = _metrics.activity_by_hour_dow_all(days=90, tracked_only=tracked_only)
-    calendar_svg = _metrics.calendar_heatmap_svg(calendar, weeks=26)
-    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+    hour_dow_data = {
+        "points": [
+            {"hour": h, "dow": d, "value": hour_dow[d][h]}
+            for d in range(7) for h in range(24)
+        ],
+    }
     peaks = []
     flat = [(dow, hr, hour_dow[dow][hr]) for dow in range(7) for hr in range(24)]
     flat.sort(key=lambda t: t[2], reverse=True)
@@ -461,19 +902,111 @@ def metrics_all(request: Request, tracked: int = 0):
     per_project = _metrics.per_project_totals(days=30)
     tool_usage = _metrics.tool_usage(project_key=None, days=30, tracked_only=tracked_only)
     streak = _metrics.streak_stats(project_key=None, weeks=26, tracked_only=tracked_only)
+    adapters = _metrics.adapter_breakdown_all(days=30, tracked_only=tracked_only)
+
+    # Profile card lives at the top of /metrics. Tracked-only mode is a
+    # numeric-aggregation filter; the card uses the full corpus (the
+    # window comes from ?card_days=N, default 90 to match the user's
+    # mental model of "the last few months").
+    card_days = int(request.query_params.get("card_days", "90") or "90")
+    card_days = max(7, min(card_days, 730))
+    card_stats = _metrics.compute_card_stats(days=card_days)
+    card_tier = _metrics.card_tier_colors(card_stats["rating"])
+    # Companion visualizations: agent-mix donut, top-tools horizontal
+    # bars, daily activity sparklines, attribute radar. All four are now
+    # client-rendered ECharts mounts fed by JSON; the legend data is
+    # reused for both the donut center label and the side-panel legend.
+    card_donut_legend = _metrics.agent_donut_legend(card_stats["agents"])
+    card_donut_data = [
+        {"label": row["label"], "value": row["count"], "color": row["color"]}
+        for row in card_donut_legend
+    ]
+    card_donut_center_value = sum(card_stats["agents"].values())
+    top_tool_rows = card_stats.get("top_tools", [])[:5]
+    card_top_tools_data = [
+        {"label": name, "value": int(n)} for name, n in top_tool_rows
+    ]
+    # Radar payload: axis names (from CARD_AXES) + scaled values 0..100.
+    # ECharts radar uses indicator.max as the outer ring, so we pass 100
+    # and multiply the 0..1 stats["axes"] by 100 to fill the band system.
+    _axes_raw = card_stats.get("axes") or {}
+    card_radar_data = {
+        "indicators": [{"name": a, "max": 100} for a in _metrics.CARD_AXES],
+        "values": [round(_axes_raw.get(a, 0) * 100, 1) for a in _metrics.CARD_AXES],
+    }
+    # Legend explaining each axis so the radar isn't a "what do these words
+    # mean" puzzle. Kept short — one line per axis, ordered to match the
+    # radar's spoke order so the eye can connect axis → definition by
+    # position. Caps mirrored from _CARD_CAPS in metrics.py for the "elite"
+    # column so the user can see what the outer ring represents per axis.
+    card_axis_legend = [
+        {"name": "Throughput",  "desc": "Prompts per active day",          "elite": "40/d"},
+        {"name": "Frugality",   "desc": "Cost per prompt (lower is better)", "elite": "≤ $0.04"},
+        {"name": "Reliability", "desc": "Tool-call success rate",          "elite": "100%"},
+        {"name": "Curiosity",   "desc": "Distinct tools you reach for",    "elite": "30 tools"},
+        {"name": "Range",       "desc": "Distinct repos you work across",  "elite": "12 repos"},
+        {"name": "Mastery",     "desc": "Curated skill bundles owned",     "elite": "25 skills"},
+    ]
+    # Daily activity series — slice from daily_metrics_all (already loaded
+    # above) so we don't re-query corpus.db just for the sparklines.
+    #
+    # Activity data is now passed as raw JSON arrays to the template; the
+    # client-side ECharts helper in base.html renders each one as a
+    # shadcn-themed area chart with hover tooltips. Replaces the
+    # server-rendered `sparkline_svg` strings that fed the old static layout.
+    activity_window = _metrics.daily_metrics_all(days=card_days, tracked_only=False)
+    activity_series = list(reversed(activity_window))
+    card_activity_data = {
+        "sessions":    [{"date": r["date"], "value": r["sessions"]}    for r in activity_series],
+        "cost":        [{"date": r["date"], "value": r["cost_usd"]}    for r in activity_series],
+        "tool_errors": [{"date": r["date"], "value": r["tool_errors"]} for r in activity_series],
+    }
+
+    # Cross-agent comparison: per-adapter facts (always available, pure SQL)
+    # + LLM-synthesized narrative (cached in ~/.watchmen/insights/, written
+    # by the digest pipeline). The narrative is None when the user hasn't
+    # run `watchmen insights` yet OR when <2 adapters have meaningful data.
+    # Whole section hides itself in the template when there's <2 adapters.
+    cmp_facts = _metrics.agent_comparison_facts(days=card_days)
+    cmp_narrative_html = ""
+    cmp_narrative_meta: dict = {}
+    try:
+        from watchmen.commands.insights import _latest_cross_agent_narrative
+        loaded = _latest_cross_agent_narrative()
+        if loaded:
+            cmp_narrative_meta, cmp_body = loaded
+            cmp_narrative_html = render_md(cmp_body)
+    except Exception:
+        # Worst case: the narrative section just shows the facts table
+        # without the LLM prose. Don't block the whole page.
+        pass
 
     return TEMPLATES.TemplateResponse(request, "metrics_all.html", {
         "rows": rows,
         "last7": last7,
         "last30": last30,
-        "sparks": sparks,
-        "calendar_svg": calendar_svg,
-        "hour_dow_svg": hour_dow_svg,
+        "sparks_data": sparks_data,
+        "calendar_data": calendar_data,
+        "hour_dow_data": hour_dow_data,
         "peaks": peaks,
         "per_project": per_project,
         "tracked_only": tracked_only,
         "tool_usage": tool_usage,
         "streak": streak,
+        "adapters": adapters,
+        "card_stats": card_stats,
+        "card_tier": card_tier,
+        "card_days": card_days,
+        "card_donut_legend": card_donut_legend,
+        "card_donut_data": card_donut_data,
+        "card_donut_center_value": card_donut_center_value,
+        "card_top_tools_data": card_top_tools_data,
+        "card_radar_data": card_radar_data,
+        "card_axis_legend": card_axis_legend,
+        "card_activity_data": card_activity_data,
+        "cmp_facts": cmp_facts,
+        "cmp_narrative_html": cmp_narrative_html,
+        "cmp_narrative_meta": cmp_narrative_meta,
     })
 
 
@@ -485,19 +1018,29 @@ def project_metrics(request: Request, project_key: str):
     last30 = _metrics.summarize_window(rows, 30)
     # Daily series in chronological order for sparklines (rows is newest-first).
     series = list(reversed(rows))
-    sparks = {
-        "sessions":     _metrics.sparkline_svg([r["sessions"] for r in series], color="#4f46e5"),
-        "prompts":      _metrics.sparkline_svg([r["prompts"] for r in series], color="#0891b2"),
-        "input_tokens": _metrics.sparkline_svg([r["input_tokens"] for r in series], color="#0891b2"),
-        "output_tokens":_metrics.sparkline_svg([r["output_tokens"] for r in series], color="#15803d"),
-        "tool_errors":  _metrics.sparkline_svg([r["tool_errors"] for r in series], color="#dc2626"),
-        "cost_usd":     _metrics.sparkline_svg([r["cost_usd"] for r in series], color="#ea580c"),
-        "suggestions":  _metrics.sparkline_svg([r["suggestions_fired"] for r in series], color="#a855f7"),
+    def _series_pm(key: str) -> list[dict]:
+        return [{"date": r["date"], "value": r[key]} for r in series]
+    sparks_data = {
+        "sessions":     _series_pm("sessions"),
+        "prompts":      _series_pm("prompts"),
+        "input_tokens": _series_pm("input_tokens"),
+        "output_tokens":_series_pm("output_tokens"),
+        "tool_errors":  _series_pm("tool_errors"),
+        "cost_usd":     _series_pm("cost_usd"),
+        "suggestions":  _series_pm("suggestions_fired"),
     }
     calendar = _metrics.activity_calendar(project_key, weeks=26)
     hour_dow = _metrics.activity_by_hour_dow(project_key, days=90)
-    calendar_svg = _metrics.calendar_heatmap_svg(calendar, weeks=26)
-    hour_dow_svg = _metrics.hour_dow_heatmap_svg(hour_dow)
+    calendar_data = {
+        "points": [{"date": d, "value": int(n)} for d, n in calendar],
+        "range":  [calendar[0][0], calendar[-1][0]] if calendar else None,
+    }
+    hour_dow_data = {
+        "points": [
+            {"hour": h, "dow": d, "value": hour_dow[d][h]}
+            for d in range(7) for h in range(24)
+        ],
+    }
 
     # Peak hour + day for the summary line under the heatmap
     peaks = []
@@ -515,9 +1058,9 @@ def project_metrics(request: Request, project_key: str):
         "rows": rows,
         "last7": last7,
         "last30": last30,
-        "sparks": sparks,
-        "calendar_svg": calendar_svg,
-        "hour_dow_svg": hour_dow_svg,
+        "sparks_data": sparks_data,
+        "calendar_data": calendar_data,
+        "hour_dow_data": hour_dow_data,
         "peaks": peaks,
         "tool_usage": tool_usage,
         "streak": streak,

@@ -1,37 +1,254 @@
 {% extends "base.html" %}
-{% block title %}metrics — watchmen{% endblock %}
+{% block title %}metrics · watchmen{% endblock %}
 {% block content %}
 
-<div class="mb-6 flex items-end justify-between">
-  <div>
-    <h1 class="text-2xl font-semibold">Aggregated metrics</h1>
-    <div class="text-sm text-gray-600 mt-1">
-      {% if tracked_only %}
-        Summed across your <span class="font-medium">tracked</span> watchmen projects only.
-      {% else %}
-        Summed across <span class="font-medium">every</span> coding-agent session in your corpus (Claude Code, Codex, pi.dev — tracked + untracked).
-      {% endif %}
-    </div>
-  </div>
-  <div class="inline-flex rounded-md shadow-sm" role="group">
-    <a href="/metrics"
-       class="px-3 py-1.5 text-sm rounded-l-md border border-gray-300 {% if not tracked_only %}bg-indigo-600 text-white border-indigo-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">All activity</a>
-    <a href="/metrics?tracked=1"
-       class="px-3 py-1.5 text-sm rounded-r-md border border-gray-300 -ml-px {% if tracked_only %}bg-indigo-600 text-white border-indigo-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">Tracked only</a>
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold">Aggregated metrics</h1>
+  <div class="text-sm text-gray-600 mt-1">
+    Coding-agent activity across your corpus. Profile card and cross-agent
+    panel below always show <span class="font-medium">all</span> activity;
+    the daily breakdowns further down respect the
+    <a href="#by-coding-agent" class="text-blue-600 hover:underline">All&nbsp;activity / Tracked&nbsp;only</a>
+    toggle.
   </div>
 </div>
 
+<!-- ── Profile card (FM-style) ────────────────────────────────────── -->
+<section class="wm-profile mb-8">
+  <div class="wm-profile__header"
+       style="background: linear-gradient(135deg, {{ card_tier.from }} 0%, {{ card_tier.to }} 100%);">
+    <div class="flex items-center gap-6">
+      <div>
+        <div class="wm-profile__rating" style="color: {{ card_tier.text }};">{{ card_stats.rating }}</div>
+        <div class="wm-profile__ovr"    style="color: {{ card_tier.text }};">OVR</div>
+      </div>
+      <div>
+        <div class="wm-profile__arch">{{ card_stats.archetype[0] }}</div>
+        <div class="wm-profile__flavor">{{ card_stats.archetype[1] }}</div>
+        <div class="wm-profile__meta">
+          {{ "{:,}".format(card_stats.sessions) }} sessions
+          {% if card_stats.first_seen and card_stats.last_seen %}
+            · {{ card_stats.first_seen }} → {{ card_stats.last_seen }}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <form method="get" action="/metrics" class="text-xs text-gray-700">
+      {% if tracked_only %}<input type="hidden" name="tracked" value="1">{% endif %}
+      <label class="mr-2 opacity-80">Window:</label>
+      <select name="card_days" onchange="this.form.submit()"
+              class="text-xs border border-white/40 rounded px-2 py-1 bg-white/80">
+        {% for opt in [30, 90, 180, 365, 730] %}
+        <option value="{{ opt }}" {% if opt == card_days %}selected{% endif %}>{{ opt }} days</option>
+        {% endfor %}
+      </select>
+    </form>
+  </div>
+
+  <!-- Hero row: big spider chart on the left, color-coded stat grid on the right. -->
+  <div class="wm-profile__hero">
+    <div class="wm-profile__spider">
+      <div class="wm-chart" style="height: 360px;"
+           data-wm-chart="radar"
+           data-color="hsl(217, 91%, 60%)"
+           data-points='{{ card_radar_data|tojson }}'></div>
+    </div>
+    <div class="wm-profile__grid">
+      {% for group in card_stats.attribute_groups %}
+      <div>
+        <div class="wm-profile__col-label">{{ group.label }}</div>
+        {% for item in group.stats %}
+        <div class="wm-profile__stat">
+          <span class="wm-profile__stat-label">{{ item.label }}</span>
+          <span class="wm-profile__stat-value wm-profile__stat-value--{{ item.kind }}">{{ item.raw }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Axis legend: full-width muted band explaining what each spider spoke
+       measures. Lives BELOW the hero so it doesn't cramp the chart column. -->
+  <details class="wm-axis-legend" open>
+    <summary>What do these axes measure?</summary>
+    <div class="wm-axis-legend__grid">
+      {% for a in card_axis_legend %}
+      <div class="wm-axis-legend__item">
+        <div class="wm-axis-legend__name">{{ a.name }}</div>
+        <div class="wm-axis-legend__desc">{{ a.desc }}</div>
+        <div class="wm-axis-legend__elite">elite ≈ {{ a.elite }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+
+  <!-- Mini-visualization row: agent donut · top tools bars · activity sparklines. -->
+  <div class="wm-profile__visuals">
+    <div class="wm-profile__visual">
+      <div class="wm-profile__visual-label">Agent mix</div>
+      <div class="flex items-center gap-4">
+        <div class="wm-chart" style="width: 130px; height: 130px; flex: 0 0 130px;"
+             data-wm-chart="donut"
+             data-center-value="{{ "{:,}".format(card_donut_center_value) }}"
+             data-center-label="sessions"
+             data-points='{{ card_donut_data|tojson }}'></div>
+        <div class="flex-1 text-xs space-y-1.5">
+          {% for row in card_donut_legend %}
+          <div class="flex items-center gap-2">
+            <span style="width: 10px; height: 10px; border-radius: 2px; background: {{ row.color }}; display: inline-block; flex: 0 0 10px;"></span>
+            <span class="font-medium">{{ row.label }}</span>
+            <span class="text-gray-500 ml-auto tabular">{{ "{:,}".format(row.count) }}</span>
+            <span class="text-gray-400 tabular" style="width: 38px; text-align: right;">{{ "%.0f"|format(row.share * 100) }}%</span>
+          </div>
+          {% else %}
+          <div class="text-gray-400">No sessions in window.</div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="wm-profile__visual">
+      <div class="wm-profile__visual-label">Top tools</div>
+      {% if card_top_tools_data %}
+        <div class="wm-chart" style="height: 150px;"
+             data-wm-chart="bar"
+             data-color="hsl(217, 91%, 60%)"
+             data-points='{{ card_top_tools_data|tojson }}'></div>
+      {% else %}
+        <div class="text-sm text-gray-400">No tool calls recorded in window.</div>
+      {% endif %}
+    </div>
+
+    <div class="wm-profile__visual">
+      <div class="wm-profile__visual-label">Activity ({{ card_days }}d)</div>
+      <div class="space-y-3">
+        <div>
+          <div class="flex items-baseline justify-between text-xs">
+            <span class="text-gray-500">Sessions / day</span>
+            <span class="font-semibold tabular">{{ "{:,}".format(card_stats.sessions) }}</span>
+          </div>
+          <div class="wm-chart wm-chart--sm" data-wm-chart="area"
+               data-color="hsl(217, 91%, 60%)"
+               data-label="Sessions"
+               data-value-fmt="int"
+               data-points='{{ card_activity_data.sessions|tojson }}'></div>
+        </div>
+        <div>
+          <div class="flex items-baseline justify-between text-xs">
+            <span class="text-gray-500">Cost / day</span>
+            <span class="font-semibold tabular">${{ "%.2f"|format(card_stats.cost_usd) }}</span>
+          </div>
+          <div class="wm-chart wm-chart--sm" data-wm-chart="area"
+               data-color="hsl(38, 92%, 50%)"
+               data-label="Cost"
+               data-value-fmt="usd"
+               data-points='{{ card_activity_data.cost|tojson }}'></div>
+        </div>
+        <div>
+          <div class="flex items-baseline justify-between text-xs">
+            <span class="text-gray-500">Tool errors / day</span>
+            <span class="font-semibold tabular {% if card_stats.tool_errors %}text-red-700{% endif %}">{{ "{:,}".format(card_stats.tool_errors) }}</span>
+          </div>
+          <div class="wm-chart wm-chart--sm" data-wm-chart="area"
+               data-color="hsl(0, 84%, 60%)"
+               data-label="Errors"
+               data-value-fmt="int"
+               data-points='{{ card_activity_data.tool_errors|tojson }}'></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="wm-profile__traits">
+    <span class="wm-profile__traits-label">Player traits</span>
+    {% for t in card_stats.traits %}
+      <span class="wm-profile__trait">{{ t }}</span>
+    {% endfor %}
+    {% if card_stats.top_tool %}
+      <span class="wm-profile__trait" style="margin-left: auto;">
+        Top tool: <strong class="ml-1">{{ card_stats.top_tool[0] }}</strong>
+        <span class="ml-1 opacity-60">({{ "{:,}".format(card_stats.top_tool[1]) }})</span>
+      </span>
+    {% endif %}
+  </div>
+</section>
+
+{% if cmp_facts and cmp_facts.adapters and cmp_facts.adapters|length >= 2 %}
+<section class="wm-cmp mb-8">
+  <div class="wm-cmp__header">
+    <h2 class="wm-cmp__title">How you use each agent</h2>
+    <div class="wm-cmp__sub">
+      Comparing {{ cmp_facts.adapters|length }} coding agents over the last
+      {{ cmp_facts.window_days }} days (since {{ cmp_facts.since }}).
+      {% if cmp_narrative_meta and cmp_narrative_meta.generated_at %}
+        Narrative synthesized {{ cmp_narrative_meta.generated_at[:10] }}
+        {% if cmp_narrative_meta.model %}· {{ cmp_narrative_meta.model }}{% endif %}.
+      {% else %}
+        Run <code>watchmen insights</code> to generate the LLM narrative below the facts table.
+      {% endif %}
+    </div>
+  </div>
+
+  {% if cmp_narrative_html %}
+    <div class="wm-cmp__narrative prose prose-sm max-w-none">
+      {{ cmp_narrative_html|safe }}
+    </div>
+  {% endif %}
+
+  <div class="wm-cmp__grid">
+    {% for a in cmp_facts.adapters %}
+      <div class="wm-cmp__card">
+        <div class="wm-cmp__card-header">
+          <span class="wm-cmp__card-label">{{ a.label }}</span>
+          {% if a.dominant_model %}
+            <span class="wm-cmp__card-model">{{ a.dominant_model }}</span>
+          {% endif %}
+        </div>
+        <dl class="wm-cmp__stats">
+          <div><dt>sessions</dt><dd>{{ "{:,}".format(a.sessions) }}</dd></div>
+          <div><dt>active days</dt><dd>{{ a.active_days }}</dd></div>
+          <div><dt>projects</dt><dd>{{ a.projects }}</dd></div>
+          <div><dt>prompts</dt><dd>{{ "{:,}".format(a.prompts) }}</dd></div>
+          <div><dt>prompts / session</dt><dd>{{ a.prompts_per_session }}</dd></div>
+          <div><dt>tool calls / sess</dt><dd>{{ a.tool_calls_per_session }}</dd></div>
+          <div><dt>tool error rate</dt><dd>{{ "{:.1%}".format(a.tool_error_rate) }}</dd></div>
+          <div><dt>cache hit</dt><dd>{{ "{:.0%}".format(a.cache_hit_rate) }}</dd></div>
+          <div><dt>$ / prompt</dt><dd>${{ "%.4f"|format(a.cost_per_prompt) }}</dd></div>
+          <div><dt>$ / session</dt><dd>${{ "%.2f"|format(a.cost_per_session) }}</dd></div>
+          <div><dt>total $</dt><dd>${{ "%.2f"|format(a.cost_usd) }}</dd></div>
+          <div><dt>avg sess</dt><dd>{{ (a.avg_session_seconds / 60)|round|int }}m</dd></div>
+        </dl>
+        {% if a.top_tools %}
+          <div class="wm-cmp__list">
+            <span class="wm-cmp__list-label">Top tools</span>
+            {% for tname, tn in a.top_tools[:5] %}
+              <span class="wm-cmp__pill">{{ tname }} <em>{{ "{:,}".format(tn) }}</em></span>
+            {% endfor %}
+          </div>
+        {% endif %}
+        {% if a.top_projects %}
+          <div class="wm-cmp__list">
+            <span class="wm-cmp__list-label">Top projects</span>
+            {% for pdir, pn in a.top_projects[:3] %}
+              <span class="wm-cmp__pill">{{ pdir.split("/")[-1] }} <em>{{ pn }}</em></span>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <style>
-  .stat-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
-  .stat-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
-  .stat-card .value { font-size: 22px; font-weight: 600; color: #111827; margin-top: 4px; }
-  .stat-card .sub   { font-size: 12px; color: #6b7280; margin-top: 2px; }
-  .stat-card .spark { margin-top: 8px; display: block; }
+  /* `.stat-card` baseline lives in base.html now. Only daily-table styles
+     stay local since they're unique to this page. */
   table.daily { font-size: 13px; }
-  table.daily th { text-align: right; padding: 6px 10px; font-weight: 500; color: #6b7280; background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
-  table.daily td { text-align: right; padding: 6px 10px; border-bottom: 1px solid #f3f4f6; font-variant-numeric: tabular-nums; }
-  table.daily td.left { text-align: left; color: #374151; }
-  table.daily tr.empty td { color: #9ca3af; }
+  table.daily th { text-align: right; padding: 6px 10px; font-weight: 500; color: hsl(var(--muted-foreground)); background: hsl(var(--muted)); border-bottom: 1px solid hsl(var(--border)); }
+  table.daily td { text-align: right; padding: 6px 10px; border-bottom: 1px solid hsl(var(--border)); font-variant-numeric: tabular-nums; }
+  table.daily td.left { text-align: left; color: hsl(var(--foreground)); }
+  table.daily tr.empty td { color: hsl(var(--muted-foreground)); }
 </style>
 
 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
@@ -39,37 +256,49 @@
     <div class="label">Sessions / 7d</div>
     <div class="value">{{ last7.sessions }}</div>
     <div class="sub">{{ last30.sessions }} in last 30d</div>
-    <div class="spark">{{ sparks.sessions|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(217, 91%, 60%)" data-label="Sessions" data-value-fmt="int"
+         data-points='{{ sparks_data.sessions|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Prompts / 7d</div>
     <div class="value">{{ last7.prompts }}</div>
     <div class="sub">{{ "%.1f"|format(last7.prompts / last7.sessions if last7.sessions else 0) }} per session</div>
-    <div class="spark">{{ sparks.prompts|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(189, 94%, 43%)" data-label="Prompts" data-value-fmt="int"
+         data-points='{{ sparks_data.prompts|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Tool errors / 7d</div>
     <div class="value">{{ last7.tool_errors }}</div>
     <div class="sub">{{ "%.2f"|format(last7.tool_errors / last7.sessions if last7.sessions else 0) }} per session</div>
-    <div class="spark">{{ sparks.tool_errors|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(0, 84%, 60%)" data-label="Errors" data-value-fmt="int"
+         data-points='{{ sparks_data.tool_errors|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Cost / 7d</div>
     <div class="value">${{ "%.2f"|format(last7.cost_usd) }}</div>
     <div class="sub">${{ "%.2f"|format(last30.cost_usd) }} in last 30d</div>
-    <div class="spark">{{ sparks.cost_usd|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(25, 95%, 53%)" data-label="Cost" data-value-fmt="usd"
+         data-points='{{ sparks_data.cost_usd|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Input tokens / 7d</div>
     <div class="value">{{ "{:,}".format(last7.input_tokens) }}</div>
     <div class="sub">{{ "{:,}".format(last7.cache_read_tokens) }} from cache</div>
-    <div class="spark">{{ sparks.input_tokens|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(189, 94%, 43%)" data-label="Input tokens" data-value-fmt="int"
+         data-points='{{ sparks_data.input_tokens|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Output tokens / 7d</div>
     <div class="value">{{ "{:,}".format(last7.output_tokens) }}</div>
     <div class="sub">{{ "%.2f"|format(last7.output_tokens / last7.sessions if last7.sessions else 0) }}k per session avg</div>
-    <div class="spark">{{ sparks.output_tokens|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(142, 71%, 35%)" data-label="Output tokens" data-value-fmt="int"
+         data-points='{{ sparks_data.output_tokens|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Skill suggestions / 7d</div>
@@ -81,7 +310,9 @@
         no fires yet
       {% endif %}
     </div>
-    <div class="spark">{{ sparks.suggestions|safe }}</div>
+    <div class="spark wm-chart" style="height: 46px;" data-wm-chart="area"
+         data-color="hsl(280, 70%, 60%)" data-label="Suggestions" data-value-fmt="int"
+         data-points='{{ sparks_data.suggestions|tojson }}'></div>
   </div>
   <div class="stat-card">
     <div class="label">Cache hit ratio / 7d</div>
@@ -90,6 +321,66 @@
     <div class="sub">cache read / total input</div>
   </div>
 </div>
+
+<!-- ── Scope toggle: starts affecting rendering from this row down ─── -->
+<div id="by-coding-agent" class="mb-6 mt-4 flex items-center justify-between gap-3 flex-wrap pt-6 border-t border-gray-200">
+  <div class="text-sm text-gray-600">
+    {% if tracked_only %}
+      Showing <span class="font-medium">tracked</span> watchmen projects only.
+    {% else %}
+      Showing <span class="font-medium">every</span> coding-agent session in your corpus, tracked + untracked.
+    {% endif %}
+    <span class="text-xs text-gray-500 ml-1">(applies to sections below)</span>
+  </div>
+  <div class="inline-flex rounded-md shadow-sm" role="group">
+    <a href="/metrics#by-coding-agent"
+       class="px-3 py-1.5 text-sm rounded-l-md border border-gray-300 {% if not tracked_only %}bg-blue-600 text-white border-blue-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">All activity</a>
+    <a href="/metrics?tracked=1#by-coding-agent"
+       class="px-3 py-1.5 text-sm rounded-r-md border border-gray-300 -ml-px {% if tracked_only %}bg-blue-600 text-white border-blue-600{% else %}bg-white text-gray-700 hover:bg-gray-50{% endif %}">Tracked only</a>
+  </div>
+</div>
+
+{% if adapters %}
+<h2 class="text-lg font-semibold mb-3">By coding agent (last 30 days)</h2>
+<div class="wm-card wm-card-table tabular mb-6">
+  {% set max_sessions = adapters[0].sessions or 1 %}
+  {% set max_cost = adapters|map(attribute='cost_usd')|max %}
+  <table class="w-full text-sm" style="font-variant-numeric: tabular-nums;">
+    <thead class="bg-gray-50 border-b border-gray-200">
+      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
+        <th class="px-4 py-2">Coding agent</th>
+        <th class="px-4 py-2" style="width: 28%;">Sessions</th>
+        <th class="px-4 py-2 text-right">Sessions</th>
+        <th class="px-4 py-2 text-right">Projects</th>
+        <th class="px-4 py-2 text-right">Prompts</th>
+        <th class="px-4 py-2 text-right">Tool errors</th>
+        <th class="px-4 py-2 text-right">Cost (USD)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in adapters %}
+      <tr class="border-b border-gray-100 last:border-b-0 hover:bg-gray-50">
+        <td class="px-4 py-2 font-medium">{{ a.label }} <span class="text-xs text-gray-500">{{ a.agent }}</span></td>
+        <td class="px-4 py-2">
+          <div class="bg-gray-100 rounded-sm h-3 overflow-hidden">
+            <div class="bg-blue-500 h-full" style="width: {{ (100 * a.sessions / max_sessions)|round(1) }}%;"></div>
+          </div>
+        </td>
+        <td class="px-4 py-2 text-right">{{ "{:,}".format(a.sessions) }}</td>
+        <td class="px-4 py-2 text-right text-gray-700">{{ a.projects }}</td>
+        <td class="px-4 py-2 text-right text-gray-700">{{ "{:,}".format(a.prompts) }}</td>
+        <td class="px-4 py-2 text-right {% if a.tool_errors %}text-red-700 font-medium{% else %}text-gray-400{% endif %}">
+          {{ "{:,}".format(a.tool_errors) }}
+        </td>
+        <td class="px-4 py-2 text-right {% if a.cost_usd %}text-amber-700 font-medium{% else %}text-gray-400{% endif %}">
+          ${{ "%.2f"|format(a.cost_usd) }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 
 <h2 class="text-lg font-semibold mb-3">When you work</h2>
 <div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-6">
@@ -106,7 +397,8 @@
       </span>
     </div>
     {% endif %}
-    {{ calendar_svg|safe }}
+    <div class="wm-chart" style="height: 180px;" data-wm-chart="calendar"
+         data-points='{{ calendar_data|tojson }}'></div>
   </div>
   <div class="stat-card overflow-x-auto lg:col-span-3">
     <div class="label">Day × hour (last 90 days)</div>
@@ -117,7 +409,8 @@
         not enough data yet
       {% endif %}
     </div>
-    {{ hour_dow_svg|safe }}
+    <div class="wm-chart" style="height: 200px;" data-wm-chart="hourdow"
+         data-points='{{ hour_dow_data|tojson }}'></div>
   </div>
 </div>
 
@@ -131,7 +424,7 @@
       <td class="py-1.5 pr-3 font-mono text-gray-700 whitespace-nowrap" style="width: 1%;">{{ t.tool }}</td>
       <td class="py-1.5">
         <div class="bg-gray-100 rounded-sm h-3 overflow-hidden relative">
-          <div class="bg-indigo-500 h-full absolute top-0 left-0" style="width: {{ (100 * t.count / top_count)|round(1) }}%;"></div>
+          <div class="bg-blue-500 h-full absolute top-0 left-0" style="width: {{ (100 * t.count / top_count)|round(1) }}%;"></div>
           {% if t.errors %}
           <div class="bg-red-400 h-full absolute top-0" style="left: {{ (100 * (t.count - t.errors) / top_count)|round(1) }}%; width: {{ (100 * t.errors / top_count)|round(1) }}%;"></div>
           {% endif %}
@@ -148,7 +441,7 @@
 {% endif %}
 
 <h2 class="text-lg font-semibold mb-3">By tracked project (last 30 days)</h2>
-<div class="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
+<div class="wm-card wm-card-table tabular mb-6">
   <table class="daily min-w-full">
     <thead>
       <tr>
@@ -167,7 +460,7 @@
       {% for p in per_project %}
       <tr>
         <td class="left">
-          <a href="/p/{{ p.project_key }}/metrics" class="text-indigo-600 hover:underline">{{ p.project_key }}</a>
+          <a href="/p/{{ p.project_key }}/metrics" class="text-blue-600 hover:underline">{{ p.project_key }}</a>
         </td>
         <td>{{ p.sessions or "" }}</td>
         <td>{{ p.prompts or "" }}</td>
@@ -184,7 +477,7 @@
 </div>
 
 <h2 class="text-lg font-semibold mb-3">Daily breakdown (all activity)</h2>
-<div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+<div class="wm-card wm-card-table tabular">
   <table class="daily min-w-full">
     <thead>
       <tr>

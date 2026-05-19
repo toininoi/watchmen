@@ -1,42 +1,1917 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{{ theme_choice|default('comic') }}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}watchmen{% endblock %}</title>
+
+  <!-- Pre-paint theme application. localStorage lookup runs before any CSS
+       loads, so the chosen theme is on <html> before first paint. Avoids
+       a flash from comic → doomsday/rorschach on every page load. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('watchmen.theme');
+        if (t === 'comic' || t === 'doomsday' || t === 'rorschach') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch (_) { /* localStorage disabled — fall back to server value */ }
+    })();
+  </script>
+
+  <!-- Four font families via Bunny Fonts (GDPR-safe Google Fonts mirror):
+       Inter for body, Oswald for comic-theme editorial display, Special
+       Elite for accent (typewriter), JetBrains Mono for doomsday + code
+       accents. All themes pick from this same set via CSS vars below. -->
+  <link rel="preconnect" href="https://fonts.bunny.net" crossorigin />
+  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=inter:400,500,600,700|oswald:500,600,700|special-elite|jetbrains-mono:400,500,600,700&display=swap" />
+
+  <!-- Tailwind config has to be inlined BEFORE the CDN script so the JIT
+       compiler picks up the extended theme on first render. -->
+  <script>
+    window.tailwind = window.tailwind || {};
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans:    ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
+            display: ['Oswald', 'Inter', 'system-ui', 'sans-serif'],
+            elite:   ['"Special Elite"', 'Georgia', 'serif'],
+          },
+          borderRadius: {
+            'card': '4px',  // sharp comic-panel corners, just barely rounded
+          },
+          boxShadow: {
+            'panel':       '3px 3px 0 0 hsl(240 8% 8%)',
+            'panel-hover': '4px 4px 0 0 hsl(240 8% 8%)',
+            'panel-lg':    '5px 5px 0 0 hsl(240 8% 8%)',
+          },
+        },
+      },
+    };
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.7.0/github-markdown-light.css" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/PrismJS/prism@v1.29/themes/prism.min.css" />
+  <!-- ECharts: client-rendered charts styled to match shadcn's chart language
+       (smooth area fills, dashed grid, hover-vertical-line tooltips). Loaded
+       once for every page; helper invoked per-chart in template via data-attrs. -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js" defer></script>
+  {% block head_extra %}{% endblock %}
+
   <style>
-    :root { --max: 1100px; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif; }
-    .markdown-body { box-sizing: border-box; padding: 24px; max-width: var(--max); margin: 0 auto; }
-    .codehilite { background: #f6f8fa; border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 13px; }
+    /* ── Design tokens ────────────────────────────────────────────────
+       Watchmen newsprint-pulp palette. Spot colors (yellow + blood +
+       bruise) appear on brand surfaces; the bulk of the UI sits on
+       warm cream paper over ink-black borders so tables + markdown
+       remain legible. The legacy `--accent` / `--background` / etc.
+       names are preserved so existing components (spider chart, area
+       charts, run-btn) keep rendering without per-call rewrites — they
+       just inherit the new palette. */
+    :root {
+      --max: 1100px;
+
+      /* Spot brand colors */
+      --paper:             42 56% 92%;   /* #F1E8D2 — warm newsprint cream */
+      --paper-2:           40 38% 86%;   /* aged paper for raised panels */
+      --ink:              240  8%  8%;   /* #131316 — near-black with warm tint */
+      --ink-soft:         240  6% 24%;   /* body text on cream */
+      --watch-yellow:      48 95% 53%;   /* #F5C518 — Watchmen smiley */
+      --watch-yellow-2:    46 100% 46%;  /* darker yellow for hover/press */
+      --blood:            358 75% 42%;   /* #BC1D2E — smiley blood-streak / urgency */
+      --blood-soft:       358 60% 88%;   /* pale red tint for stamp backgrounds */
+      --bruise:           273 50% 28%;   /* #3D2566 — bruise purple for accents */
+      --nite-royal:       221 85% 32%;   /* #0E2B96 — Nite Owl blue for links */
+      --manhattan:        185 80% 36%;   /* Doc Manhattan teal — running/active */
+
+      /* Compatibility aliases mapped to the new palette so existing CSS
+         using `hsl(var(--accent))` etc. keeps working without churn. */
+      --background:       var(--paper);
+      --foreground:       var(--ink);
+      --muted:            42 30% 84%;
+      --muted-foreground: 240  6% 32%;
+      --card:             42 56% 96%;   /* slightly brighter cream for raised tiles */
+      --card-foreground:  var(--ink);
+      --border:           240  8% 12%;   /* ink-ish border by default */
+      --border-strong:    240  8%  8%;
+      --accent:           221 85% 32%;   /* nite royal — links + primary CTA */
+      --accent-strong:    221 85% 24%;
+      --accent-soft:      221 50% 90%;   /* pale royal for active pills */
+      --cyan:             185 80% 36%;
+      --teal:             185 80% 36%;
+
+      /* ── Theme variables (overridden per data-theme) ──────────────
+         Every theme-sensitive surface reads its font and decorative
+         treatment through these so the alt themes ([data-theme] blocks
+         at the bottom of this <style>) only have to overwrite the
+         tokens, not duplicate the rules. */
+      --font-body:    'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+      --font-display: 'Oswald', 'Inter', system-ui, sans-serif;
+      --font-accent:  'Special Elite', Georgia, serif;
+      --font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+      /* h1/h2/h3 text-transform per theme — comic uppercases h2/h3 to
+         feel like newspaper section labels; doomsday + rorschach
+         don't. */
+      --h1-transform: none;
+      --h2-transform: uppercase;
+      --h2-letter:    0.02em;
+      --h3-transform: uppercase;
+      --h3-letter:    0.04em;
+      --h1-weight:    700;
+      --h1-letter:    -0.005em;
+
+      /* Page background pattern: halftone dots for comic; flat for
+         doomsday; horizontal ruled lines for rorschach. */
+      --bg-pattern: radial-gradient(circle at 1px 1px, hsl(var(--ink) / 0.06) 1px, transparent 1.2px);
+      --bg-size:    18px 18px;
+
+      /* Panel framing — comic uses sharp ink corners + hard offset
+         shadow; doomsday softens both; rorschach uses a small drop
+         shadow. */
+      --panel-radius:        4px;
+      --panel-border:        1.5px solid hsl(var(--ink));
+      --panel-shadow:        3px 3px 0 0 hsl(var(--ink));
+      --panel-shadow-hover:  4px 4px 0 0 hsl(var(--ink));
+      --panel-shadow-table:  2px 2px 0 0 hsl(var(--ink));
+      --panel-shadow-lg:     4px 4px 0 0 hsl(var(--ink));
+      --panel-shadow-profile:5px 5px 0 0 hsl(var(--ink));
+
+      /* Severity stamp fills — comic uses blood/yellow flat fills;
+         doomsday uses outlined chips; rorschach uses warm stamps. */
+      --sev-high-bg:     hsl(var(--blood));
+      --sev-high-fg:     hsl(var(--paper));
+      --sev-high-border: hsl(var(--ink));
+      --sev-med-bg:      hsl(var(--watch-yellow));
+      --sev-med-fg:      hsl(var(--ink));
+      --sev-med-border:  hsl(var(--ink));
+      --sev-low-bg:      hsl(var(--paper-2));
+      --sev-low-fg:      hsl(var(--ink));
+      --sev-low-border:  hsl(var(--ink));
+
+      /* Primary CTA — comic's ink-on-yellow stamp. */
+      --cta-bg:     hsl(var(--watch-yellow));
+      --cta-fg:     hsl(var(--ink));
+      --cta-border: 1.5px solid hsl(var(--ink));
+      --cta-bg-hover: hsl(var(--watch-yellow-2));
+
+      /* Verdict tile (Doctor) — comic uses a yellow stamp; doomsday
+         uses a thin red left-stripe; rorschach uses a sepia frame. */
+      --verdict-warn-bg:     hsl(var(--watch-yellow));
+      --verdict-warn-fg:     hsl(var(--ink));
+      --verdict-warn-border: hsl(var(--ink));
+      --verdict-fail-bg:     hsl(var(--blood) / 0.18);
+      --verdict-fail-fg:     hsl(var(--ink));
+      --verdict-fail-border: hsl(var(--ink));
+      --verdict-ok-bg:       hsl(142 50% 86%);
+      --verdict-ok-fg:       hsl(var(--ink));
+      --verdict-ok-border:   hsl(var(--ink));
+    }
+
+    /* ── Typography rhythm ──────────────────────────────────────────
+       Body copy stays Inter (highest legibility). Display headings
+       move to Oswald — condensed editorial sans, period-correct for
+       a Watchmen-era pulp poster without veering into kitsch.
+       Special Elite (typewriter) reserved for accent moments only. */
+    body {
+      font-family: var(--font-body);
+      font-feature-settings: 'cv11', 'ss01', 'ss03';
+      letter-spacing: -0.005em;
+      background-color: hsl(var(--paper));
+      /* Per-theme background pattern: halftone dots (comic), flat
+         (doomsday), or horizontal ruled lines (rorschach). Fixed
+         attachment so it doesn't shift on scroll. */
+      background-image: var(--bg-pattern);
+      background-size: var(--bg-size);
+      background-attachment: fixed;
+      color: hsl(var(--ink));
+    }
+    /* Display headings — font-family + transforms come from tokens so
+       each theme can choose its own voice (Oswald for comic, Inter
+       for doomsday, Special Elite for rorschach). */
+    h1, h2, h3 {
+      font-family: var(--font-display);
+      font-weight: 600;
+      letter-spacing: -0.005em;
+      color: hsl(var(--ink));
+    }
+    h1 { line-height: 1.1; font-weight: var(--h1-weight); letter-spacing: var(--h1-letter); text-transform: var(--h1-transform); }
+    h2 { line-height: 1.2; text-transform: var(--h2-transform); letter-spacing: var(--h2-letter); }
+    h3 { line-height: 1.3; text-transform: var(--h3-transform); letter-spacing: var(--h3-letter); font-size: 0.95rem; }
+    /* Markdown body keeps its own header rhythm (github-markdown-css)
+       — restore there so long-form content reads as documentation, not
+       comic panels. */
+    .markdown-body h1, .markdown-body h2, .markdown-body h3,
+    .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+      font-family: 'Inter', system-ui, sans-serif;
+      text-transform: none;
+      letter-spacing: -0.005em;
+      font-weight: 600;
+    }
+
+    .markdown-body {
+      box-sizing: border-box;
+      padding: 24px;
+      max-width: var(--max);
+      margin: 0 auto;
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+    .codehilite {
+      background: hsl(var(--muted));
+      border: 1px solid hsl(var(--border));
+      border-radius: 8px;
+      padding: 12px;
+      overflow-x: auto;
+      font-size: 13px;
+    }
     .codehilite pre { margin: 0; }
-    nav a { color: #4f46e5; }
-    nav a:hover { text-decoration: underline; }
-    .skill-card { transition: background 0.1s; }
-    .skill-card:hover { background: #f3f4f6; }
     table { font-size: 14px; }
     code { font-size: 13px; }
     pre code { font-size: 13px; }
+
+    /* ── Brand: nav wordmark + nav links ──────────────────────────
+       The nav reads as a newspaper masthead: black bar on top of the
+       cream paper, smiley mark + Oswald wordmark + Latin tagline in
+       Special Elite. Active page link gets an ink underline rather
+       than a tinted background — quieter, more editorial. */
+    .wm-brand {
+      display: inline-flex; align-items: center; gap: 10px;
+      text-decoration: none;
+    }
+    .wm-brand__mark {
+      width: 26px; height: 26px;
+      display: inline-block; flex: 0 0 auto;
+    }
+    /* Brand mark swap: each theme picks its own mark.
+       Comic → smiley (the default).
+       Doomsday → minutes-to-midnight clock.
+       Rorschach → symmetric sepia inkblot. */
+    .wm-brand__mark--clock,
+    .wm-brand__mark--inkblot { display: none; }
+    :root[data-theme="doomsday"] .wm-brand__mark--smiley { display: none; }
+    :root[data-theme="doomsday"] .wm-brand__mark--clock  { display: inline-block; }
+    :root[data-theme="rorschach"] .wm-brand__mark--smiley  { display: none; }
+    :root[data-theme="rorschach"] .wm-brand__mark--inkblot { display: inline-block; }
+    .wm-brand__name {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: hsl(var(--ink));
+      line-height: 1;
+    }
+    .wm-brand__tagline {
+      font-family: var(--font-accent);
+      font-size: 10.5px;
+      color: hsl(var(--ink) / 0.6);
+      letter-spacing: 0.02em;
+      margin-left: 4px;
+    }
+    .wm-nav-link {
+      color: hsl(var(--ink) / 0.65);
+      padding: 4px 2px;
+      margin: 0 6px;
+      border-bottom: 2px solid transparent;
+      font-weight: 500;
+      transition: color 120ms ease, border-color 120ms ease;
+    }
+    .wm-nav-link:hover {
+      color: hsl(var(--ink));
+      border-bottom-color: hsl(var(--ink) / 0.35);
+    }
+    .wm-nav-link.is-active {
+      color: hsl(var(--ink));
+      border-bottom-color: hsl(var(--watch-yellow));
+    }
+
+    /* ── Card baseline: comic-panel framing ────────────────────────
+       Cards now read as comic panels: ink border + hard offset shadow.
+       Cream paper sits inside; corners are nearly sharp (4px). Hover
+       lifts the card 1px so it reads as interactive on dashboards
+       without inviting clicks on inert tiles (the lift is small).
+       Tables override below — they keep a quieter, borderless feel
+       so dense data stays legible. */
+    .stat-card, .wm-card {
+      background: hsl(var(--card));
+      color: hsl(var(--ink));
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
+      padding: 16px 18px;
+      box-shadow: var(--panel-shadow);
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+    .stat-card:hover, .wm-card:hover {
+      transform: translate(-1px, -1px);
+      box-shadow: var(--panel-shadow-hover);
+    }
+    /* Table-host cards: no hard offset shadow, just the ink border.
+       Dense rows already create enough rhythm. */
+    .wm-card-table {
+      box-shadow: var(--panel-shadow-table);
+    }
+    .wm-card-table:hover {
+      transform: none;
+      box-shadow: var(--panel-shadow-table);
+    }
+    /* Markdown-body cards (CLAUDE.md, SKILL.md, deep digest) drop the
+       offset shadow entirely — the comic frame would compete with
+       the document content rendered inside. */
+    .wm-card.markdown-body, article.wm-card.markdown-body {
+      box-shadow: none;
+      border-color: hsl(var(--ink) / 0.4);
+    }
+    .wm-card.markdown-body:hover {
+      transform: none;
+      box-shadow: none;
+    }
+    .stat-card .label, .wm-card .label {
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: hsl(var(--muted-foreground));
+    }
+    .stat-card .value, .wm-card .value {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-card .sub, .wm-card .sub {
+      font-size: 12px;
+      color: hsl(var(--muted-foreground));
+      margin-top: 2px;
+    }
+    .stat-card .spark, .wm-card .spark { margin-top: 8px; display: block; }
+
+    /* ── Adapter pills shown on /insights + a few other surfaces ── */
+    .adapter-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: hsl(var(--muted));
+      color: hsl(var(--muted-foreground));
+      font-size: 11px;
+      font-weight: 500;
+      margin-right: 4px;
+      margin-bottom: 2px;
+    }
+
+    /* ── Skill-card hover from the dashboard's per-project list ─── */
+    .skill-card { transition: background 0.12s ease; }
+    .skill-card:hover { background: hsl(var(--muted)); }
+
+    /* ── Tabular numeric columns: we read columns of numbers a lot,
+       this lines them up properly. Cheap; high effect. ── */
+    .tabular { font-variant-numeric: tabular-nums; }
+
+    /* ── Status pills (run tables, skill controls) ────────────────
+       Restyled to read as small stamped chips: uppercase, bordered,
+       slightly heavier weight. Colors map to the new palette. */
+    .wm-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      font-size: 10.5px;
+      font-weight: 700;
+      border-radius: 3px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border: 1px solid currentColor;
+    }
+    .wm-pill-ok      { background: hsl(142 50% 88%); color: hsl(142 75% 22%); }
+    .wm-pill-running { background: hsl(var(--watch-yellow) / 0.55); color: hsl(var(--ink)); }
+    .wm-pill-fail    { background: hsl(var(--blood-soft));     color: hsl(var(--blood)); }
+    .wm-pill-muted   { background: hsl(var(--paper-2));        color: hsl(var(--ink-soft)); }
+
+    /* ── Profile card (top of /metrics) — Football-Manager-style ──
+       Promoted to a hero comic-panel: ink frame + offset shadow.
+       The 64-pt rating stays in Inter (numerals look better in Inter's
+       tabular-nums than Oswald), but the archetype name + OVR label
+       pick up the display font for brand consistency. */
+    .wm-profile {
+      position: relative;
+      background: hsl(var(--card));
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
+      padding: 0;
+      overflow: hidden;
+      box-shadow: var(--panel-shadow-profile);
+    }
+    .wm-profile__header {
+      padding: 22px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1.5px solid hsl(var(--ink));
+    }
+    .wm-profile__rating {
+      font-size: 64px; font-weight: 800; line-height: 1;
+      letter-spacing: -0.04em; font-variant-numeric: tabular-nums;
+    }
+    .wm-profile__ovr {
+      font-family: var(--font-display);
+      font-size: 10.5px; font-weight: 700; letter-spacing: 0.2em;
+      margin-top: 4px; text-transform: uppercase;
+    }
+    .wm-profile__arch {
+      font-family: var(--font-display);
+      font-size: 24px; font-weight: 700;
+      letter-spacing: 0.02em; text-transform: uppercase;
+      color: hsl(var(--ink));
+    }
+    .wm-profile__flavor {
+      font-family: var(--font-accent);
+      font-size: 13px; color: hsl(var(--ink-soft));
+      margin-top: 4px;
+    }
+    .wm-profile__meta { font-size: 11px; letter-spacing: 0.06em; color: hsl(var(--ink-soft)); margin-top: 6px; text-transform: uppercase; }
+    /* Hero row: compact spider chart (~320px) on the left, 3-column
+       stat grid expanding into the freed space on the right. */
+    .wm-profile__hero {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 32px;
+      padding: 24px 28px 12px;
+      align-items: center;
+    }
+    .wm-profile__spider {
+      width: 100%; max-width: 320px;
+      cursor: pointer;
+    }
+    .wm-profile__spider svg { display: block; width: 100%; height: auto; }
+
+    /* All the eye-candy lives on the spider now — no hover/lift on the
+       stat pills or visual tiles, since those should read as
+       informational rather than interactive. */
+    .wm-profile__spider polygon[data-user="1"] {
+      transform-origin: center;
+      animation: wm-spider-load 900ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
+      transition: filter 220ms ease, fill-opacity 220ms ease;
+    }
+    .wm-profile__spider circle {
+      transform-origin: center;
+      transform-box: fill-box;  /* per-circle, so each dot scales around its own center */
+      transition: r 220ms ease, stroke-width 220ms ease;
+      animation: wm-spider-dot-load 900ms cubic-bezier(0.34, 1.4, 0.64, 1) both 200ms;
+    }
+    @keyframes wm-spider-load {
+      0%   { transform: scale(0.45); opacity: 0; }
+      55%  { transform: scale(1.04); opacity: 1; }
+      100% { transform: scale(1.0);  opacity: 1; }
+    }
+    @keyframes wm-spider-dot-load {
+      0%   { opacity: 0; }
+      60%  { opacity: 0; }
+      100% { opacity: 1; }
+    }
+    /* Hover the spider container — polygon brightens + glows, dots
+       enlarge. Pulled into a single hover root so the whole chart
+       responds together. */
+    .wm-profile__spider:hover polygon[data-user="1"] {
+      fill-opacity: 0.9;
+      filter: drop-shadow(0 0 10px hsl(var(--accent) / 0.55));
+    }
+    .wm-profile__spider:hover circle {
+      r: 5;
+      stroke-width: 2.5;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .wm-profile__spider polygon[data-user="1"],
+      .wm-profile__spider circle { animation: none; }
+    }
+
+    .wm-profile__grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 24px;
+    }
+    @media (max-width: 1100px) {
+      .wm-profile__hero { grid-template-columns: 1fr; }
+      .wm-profile__spider { justify-self: center; max-width: 280px; }
+    }
+    @media (max-width: 720px) {
+      .wm-profile__grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    /* Mini-visualization row: agent donut + top tools bars + activity sparks.
+       Static — no hover lift, the spider is the only interactive showpiece. */
+    .wm-profile__visuals {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+      padding: 12px 28px 22px;
+    }
+    @media (max-width: 1000px) {
+      .wm-profile__visuals { grid-template-columns: 1fr; }
+    }
+    .wm-profile__visual {
+      background: hsl(var(--muted) / 0.5);
+      border: 1px solid hsl(var(--border));
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .wm-profile__visual-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground));
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .wm-profile__col-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground));
+      padding-bottom: 8px;
+      border-bottom: 1px solid hsl(var(--border));
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    .wm-profile__stat {
+      display: flex; align-items: baseline; justify-content: space-between;
+      padding: 5px 0;
+      font-size: 13px;
+      gap: 12px;
+    }
+    .wm-profile__stat-label { color: hsl(var(--muted-foreground)); }
+    .wm-profile__stat-value {
+      font-weight: 600; font-variant-numeric: tabular-nums;
+      letter-spacing: -0.01em;
+      padding: 1px 8px; border-radius: 4px;
+      white-space: nowrap;
+      /* Intentionally no hover transform — the spider is the only
+         element on the page meant to respond to interaction. */
+    }
+    .wm-profile__stat-value--elite   { background: hsl(142 60% 92%); color: hsl(142 60% 26%); }
+    .wm-profile__stat-value--mid     { background: hsl(45  90% 92%); color: hsl(35  70% 30%); }
+    .wm-profile__stat-value--low     { background: hsl(0   75% 95%); color: hsl(0   65% 40%); }
+    .wm-profile__stat-value--neutral { color: hsl(var(--foreground)); }
+
+    .wm-profile__traits {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      padding: 16px 28px 22px;
+      border-top: 1px solid hsl(var(--border));
+      background: hsl(var(--muted) / 0.4);
+    }
+    .wm-profile__traits-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      color: hsl(var(--muted-foreground)); text-transform: uppercase;
+      align-self: center; margin-right: 4px;
+    }
+    .wm-profile__trait {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: white;
+      border: 1px solid hsl(var(--border));
+      font-size: 12px; font-weight: 500;
+      color: hsl(var(--foreground));
+    }
+    .wm-profile__spider { display: block; }
+
+    /* ── Table-card variant: a .wm-card that hosts a flush table with
+       no padding around the edge so the table header bg meets the
+       card border cleanly. Used in dashboard + runs + metrics tables. */
+    .wm-card-table { padding: 0; overflow: hidden; }
+    .wm-card-table > table { width: 100%; border-collapse: collapse; }
+    .wm-card-table thead {
+      background: hsl(var(--muted));
+      border-bottom: 1px solid hsl(var(--border));
+    }
+    .wm-card-table thead th {
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: hsl(var(--muted-foreground));
+      padding: 10px 16px;
+    }
+    .wm-card-table tbody td { padding: 10px 16px; border-bottom: 1px solid hsl(var(--border)); }
+    .wm-card-table tbody tr:last-child td { border-bottom: 0; }
+    .wm-card-table tbody tr { transition: background 120ms ease; }
+    .wm-card-table tbody tr:hover { background: hsl(var(--muted) / 0.6); }
+
+    /* Cross-agent comparison panel. Sits between the profile card and the
+       small-stat grid on /metrics, and inline above the deep digest on
+       /insights. Card grid auto-fits 2 columns on desktop, 1 on mobile. */
+    .wm-cmp {
+      background: hsl(var(--card));
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
+      padding: 22px 26px 26px;
+      box-shadow: var(--panel-shadow-lg);
+    }
+    .wm-cmp__header {
+      margin-bottom: 18px;
+      padding-bottom: 10px;
+      border-bottom: 1.5px solid hsl(var(--ink));
+    }
+    .wm-cmp__title {
+      font-family: var(--font-display);
+      font-size: 19px; font-weight: 700;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      color: hsl(var(--ink));
+    }
+    .wm-cmp__sub   { font-size: 12px; color: hsl(var(--ink-soft)); margin-top: 4px; }
+    .wm-cmp__sub code {
+      background: hsl(var(--muted));
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    /* Narrative typography is delegated to .markdown-body (the github-
+       markdown-css class also used by the deep-digest body) so both
+       LLM-rendered sections on /insights match in size + spacing. We
+       only override the outer wrapper margin here. */
+    .wm-cmp__narrative {
+      margin-bottom: 22px;
+    }
+    .wm-cmp__narrative.markdown-body {
+      padding: 0;
+      max-width: 100%;
+      background: transparent;
+    }
+    .wm-cmp__grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .wm-cmp__card {
+      background: hsl(var(--muted) / 0.4);
+      border: 1px solid hsl(var(--border));
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .wm-cmp__card-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid hsl(var(--border));
+    }
+    .wm-cmp__card-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__card-model {
+      font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      color: hsl(var(--muted-foreground));
+      background: hsl(var(--card));
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid hsl(var(--border));
+    }
+    .wm-cmp__stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 14px;
+      margin: 0;
+      font-size: 12px;
+    }
+    .wm-cmp__stats > div {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 3px 0;
+    }
+    .wm-cmp__stats dt { color: hsl(var(--muted-foreground)); margin: 0; }
+    .wm-cmp__stats dd {
+      margin: 0;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__list { margin-top: 12px; }
+    .wm-cmp__list-label {
+      display: block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: hsl(var(--muted-foreground));
+      margin-bottom: 6px;
+    }
+    .wm-cmp__pill {
+      display: inline-block;
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: 4px;
+      padding: 2px 8px;
+      margin: 0 4px 4px 0;
+      font-size: 11px;
+      color: hsl(var(--foreground));
+    }
+    .wm-cmp__pill em {
+      font-style: normal;
+      color: hsl(var(--muted-foreground));
+      font-variant-numeric: tabular-nums;
+      margin-left: 4px;
+    }
+
+    /* ── Charts ─────────────────────────────────────────────────────────
+       Mount points for ECharts-rendered shadcn-style charts. Each chart
+       div carries its data as a data- attribute; window.wmMountAreaChart
+       (defined below) reads it and bootstraps an ECharts instance with
+       a theme tuned to our HSL design tokens (gradient area fill, dashed
+       grid, hover-vertical-line tooltip). Templates only set sizes +
+       optional title/footer wrapper. */
+    /* Axis legend — full-width band below the hero. Sits as a footnote
+       to the spider chart: a quiet, three-column strip that explains
+       each spoke without competing with the chart or the stat grid. */
+    .wm-axis-legend {
+      margin: 4px 28px 18px;
+      padding: 14px 18px;
+      background: hsl(var(--muted) / 0.4);
+      border: 1px solid hsl(var(--border));
+      border-radius: 12px;
+    }
+    .wm-axis-legend > summary {
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: hsl(var(--muted-foreground));
+      list-style: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
+    }
+    .wm-axis-legend > summary::-webkit-details-marker { display: none; }
+    .wm-axis-legend > summary::before {
+      content: "▸";
+      font-size: 10px;
+      transition: transform 160ms ease;
+      color: hsl(var(--muted-foreground));
+    }
+    .wm-axis-legend[open] > summary::before { transform: rotate(90deg); }
+    .wm-axis-legend > summary:hover { color: hsl(var(--foreground)); }
+    .wm-axis-legend__grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px 28px;
+    }
+    @media (max-width: 900px) {
+      .wm-axis-legend__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 560px) {
+      .wm-axis-legend__grid { grid-template-columns: 1fr; }
+    }
+    .wm-axis-legend__item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .wm-axis-legend__name {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+      color: hsl(var(--foreground));
+      text-transform: uppercase;
+    }
+    .wm-axis-legend__desc {
+      font-size: 12px; line-height: 1.4;
+      color: hsl(var(--foreground));
+    }
+    .wm-axis-legend__elite {
+      font-size: 10px;
+      color: hsl(var(--muted-foreground));
+      font-variant-numeric: tabular-nums;
+    }
+
+    .wm-chart { width: 100%; min-height: 60px; }
+    /* Sparkline variant: skips the 60px floor so 32–48px inline heights
+       are honored verbatim, and the JS suppresses x-axis date labels. */
+    .wm-chart.spark { min-height: 0; }
+    .wm-chart--sm  { height: 72px; }
+    .wm-chart--md  { height: 200px; }
+    .wm-chart--lg  { height: 280px; }
+    .wm-chart__empty {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%;
+      color: hsl(var(--muted-foreground));
+      font-size: 12px;
+      font-style: italic;
+    }
+
+    /* ── Next-best-action banner ──────────────────────────────────────
+       The hero surface on dashboards and project pages. Reads as a
+       comic page's top panel: ink border + offset shadow, headline in
+       display font, severity chips stamped into the inset items.
+       Quiet when there's nothing to do (template skips render).      */
+    .wm-actions {
+      background: hsl(var(--card));
+      border: var(--panel-border);
+      border-radius: var(--panel-radius);
+      padding: 16px 18px;
+      box-shadow: var(--panel-shadow-lg);
+    }
+    .wm-actions__header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1.5px solid hsl(var(--ink));
+    }
+    .wm-actions__title {
+      display: flex; align-items: center; gap: 8px;
+      font-family: var(--font-display);
+      font-size: 17px; font-weight: 700;
+      letter-spacing: 0.06em; text-transform: uppercase;
+      color: hsl(var(--ink));
+    }
+    .wm-actions__sub {
+      font-size: 11px; color: hsl(var(--muted-foreground));
+    }
+    .wm-actions__running {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      margin-bottom: 10px;
+    }
+    .wm-actions__run-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 10.5px; font-weight: 700;
+      letter-spacing: 0.05em; text-transform: uppercase;
+      padding: 3px 10px;
+      border: 1px solid hsl(var(--ink));
+      border-radius: 3px;
+      background: hsl(var(--watch-yellow));
+      color: hsl(var(--ink));
+      text-decoration: none;
+    }
+    .wm-actions__run-pill:hover { background: hsl(var(--watch-yellow-2)); }
+    .wm-actions__run-dur {
+      font-variant-numeric: tabular-nums;
+      opacity: 0.7;
+      margin-left: 4px;
+    }
+    .wm-actions__run-spinner {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: hsl(var(--blood));
+      animation: wm-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes wm-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: 0.4; transform: scale(0.85); }
+    }
+    .wm-actions__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .wm-actions__item {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid hsl(var(--ink) / 0.25);
+      border-radius: 3px;
+      background: hsl(var(--paper) / 0.5);
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    .wm-actions__item:hover {
+      border-color: hsl(var(--ink) / 0.6);
+      background: hsl(var(--paper) / 0.8);
+    }
+    .wm-actions__item-left {
+      display: flex; align-items: flex-start; gap: 10px;
+      min-width: 0; flex: 1;
+    }
+    /* Severity chips read as stamped warnings: black ink frames + flat
+       paint-fill backgrounds. High → blood crimson. Medium → Watchmen
+       yellow. Low → cream paper. */
+    .wm-actions__sev {
+      font-family: var(--font-display);
+      font-size: 10px; font-weight: 700;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      padding: 2px 7px;
+      border: 1.5px solid hsl(var(--ink));
+      border-radius: 2px;
+      margin-top: 2px;
+      flex: 0 0 auto;
+      line-height: 1.3;
+    }
+    .wm-actions__sev--high   { background: var(--sev-high-bg); color: var(--sev-high-fg); border-color: var(--sev-high-border); }
+    .wm-actions__sev--medium { background: var(--sev-med-bg);  color: var(--sev-med-fg);  border-color: var(--sev-med-border); }
+    .wm-actions__sev--low    { background: var(--sev-low-bg);  color: var(--sev-low-fg);  border-color: var(--sev-low-border); }
+    .wm-actions__item-title {
+      font-size: 13px; font-weight: 600;
+      color: hsl(var(--foreground));
+      line-height: 1.3;
+    }
+    .wm-actions__item-reason {
+      font-size: 12px;
+      color: hsl(var(--muted-foreground));
+      line-height: 1.4;
+      margin-top: 2px;
+    }
+    .wm-actions__item-right {
+      display: flex; align-items: center; gap: 8px;
+      flex-shrink: 0;
+    }
+    .wm-actions__cmd {
+      display: inline-block;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 11px;
+      padding: 4px 8px;
+      background: hsl(var(--paper-2) / 0.7);
+      border: 1px solid hsl(var(--ink) / 0.3);
+      border-radius: 3px;
+      color: hsl(var(--ink));
+      cursor: pointer;
+      user-select: all;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    .wm-actions__cmd:hover {
+      border-color: hsl(var(--ink));
+      background: hsl(var(--paper-2));
+    }
+    .wm-actions__cmd--copied {
+      color: hsl(142 75% 22%);
+      border-color: hsl(142 60% 35%);
+      background: hsl(142 50% 88%);
+    }
+    /* Primary CTA — ink-on-yellow, the Watchmen palette signature.
+       The flat fill + ink border make it read as a stamped button
+       rather than a glossy material button. */
+    .wm-actions__run-btn {
+      display: inline-block;
+      font-family: var(--font-display);
+      font-size: 12px; font-weight: 700;
+      letter-spacing: 0.06em; text-transform: uppercase;
+      padding: 5px 12px;
+      border-radius: 3px;
+      background: var(--cta-bg);
+      color: var(--cta-fg);
+      border: var(--cta-border);
+      cursor: pointer;
+      text-decoration: none;
+      transition: background 120ms ease, transform 80ms ease;
+    }
+    .wm-actions__run-btn:hover {
+      background: var(--cta-bg-hover);
+      transform: translateY(-1px);
+    }
+    .wm-actions__run-btn:active { transform: translateY(0); }
+    .wm-actions__run-btn--link {
+      background: hsl(var(--paper));
+      color: hsl(var(--ink));
+      border-color: hsl(var(--ink));
+    }
+    .wm-actions__run-btn--link:hover { background: hsl(var(--paper-2)); }
+    @media (max-width: 720px) {
+      .wm-actions__item { flex-direction: column; align-items: stretch; }
+      .wm-actions__item-right { justify-content: flex-start; flex-wrap: wrap; }
+    }
+
+    /* ── Doctor verdict tile ────────────────────────────────────────
+       Stamped-report card: ink frame + offset shadow + Oswald label +
+       Special-Elite mood line (typewriter accent, like a Rorschach
+       journal one-liner). The colored fill carries the verdict. */
+    .wm-doctor-verdict {
+      border-radius: var(--panel-radius);
+      padding: 16px 20px;
+      border: var(--panel-border);
+      box-shadow: var(--panel-shadow-lg);
+    }
+    .wm-doctor-verdict--ok   { background: var(--verdict-ok-bg);   color: var(--verdict-ok-fg);   border-color: var(--verdict-ok-border); }
+    .wm-doctor-verdict--warn { background: var(--verdict-warn-bg); color: var(--verdict-warn-fg); border-color: var(--verdict-warn-border); }
+    .wm-doctor-verdict--fail { background: var(--verdict-fail-bg); color: var(--verdict-fail-fg); border-color: var(--verdict-fail-border); }
+    .wm-doctor-verdict__icon {
+      font-size: 22px; font-weight: 700;
+      width: 36px; height: 36px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 3px;
+      border: 1.5px solid hsl(var(--ink));
+      background: hsl(var(--paper));
+    }
+    .wm-doctor-verdict__label {
+      font-family: var(--font-display);
+      font-size: 15px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    .wm-doctor-verdict__mood {
+      font-family: var(--font-accent);
+      font-size: 12.5px;
+      opacity: 0.9;
+      margin-top: 2px;
+    }
+
+    /* ── Action run log viewer ────────────────────────────────────── */
+    .wm-action-run-log {
+      background: hsl(220 9% 12%);
+      color: hsl(220 9% 92%);
+      border-radius: 10px;
+      padding: 16px 18px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+
+    /* ═════════════════════════════════════════════════════════════════
+       Theme: Doomsday (pure noir / nightwatch — dark mode)
+       ═════════════════════════════════════════════════════════════════
+       Charcoal + warm dark grays, cool white body type, sparing blood
+       red for "minute to midnight" criticality. No yellow — kept
+       exclusive to the comic theme so they don't compete. Inter for
+       body + display, JetBrains Mono only for technical accents.       */
+    :root[data-theme="doomsday"] {
+      /* Color tokens */
+      --paper:             225  8%  8%;    /* #0E0F13 — slate-black w/ warm undertone */
+      --paper-2:           225  9% 14%;    /* raised panels */
+      --ink:               220 13% 92%;    /* cool white body */
+      --ink-soft:          222  8% 65%;
+      --card:              225  9% 11%;
+      --card-foreground:   220 13% 92%;
+      --background:        225  8%  8%;
+      --foreground:        220 13% 92%;
+      --muted:             225  8% 16%;
+      --muted-foreground:  222  8% 56%;
+      --border:            225  9% 22%;
+      --border-strong:     225  9% 30%;
+      --accent:            355 75% 50%;    /* Watchmen blood — links + CTA */
+      --accent-strong:     355 75% 42%;
+      --accent-soft:       355 75% 18%;
+      --blood:             355 75% 50%;
+      --blood-soft:        355 60% 18%;
+      --watch-yellow:      225  9% 14%;    /* re-mapped: anywhere yellow was used now reads as raised dark surface */
+      --watch-yellow-2:    225  9% 18%;
+
+      /* Fonts */
+      --font-display: 'Inter', -apple-system, system-ui, sans-serif;
+      --font-accent:  'JetBrains Mono', ui-monospace, monospace;
+      --font-mono:    'JetBrains Mono', ui-monospace, monospace;
+
+      /* Headings — no uppercase shouting; clean editorial sans. */
+      --h1-transform: none;
+      --h1-weight:    700;
+      --h1-letter:    -0.012em;
+      --h2-transform: uppercase;
+      --h2-letter:    0.14em;
+      --h3-transform: uppercase;
+      --h3-letter:    0.16em;
+
+      /* Background: flat dark — no halftone dots. */
+      --bg-pattern: none;
+      --bg-size:    100%;
+
+      /* Panel framing: subtle 1px border + soft drop shadow, NOT
+         hard-offset (would look out of place on dark). */
+      --panel-radius:        6px;
+      --panel-border:        1px solid hsl(var(--border));
+      --panel-shadow:        none;
+      --panel-shadow-hover:  0 4px 14px -4px hsl(0 0% 0% / 0.5);
+      --panel-shadow-table:  none;
+      --panel-shadow-lg:     none;
+      --panel-shadow-profile:none;
+
+      /* Severity stamps — outlined chips, not flat fills. High = blood
+         outline on dark; medium = muted gray; low = pale paper. */
+      --sev-high-bg:     hsl(var(--blood-soft));
+      --sev-high-fg:     hsl(var(--blood));
+      --sev-high-border: hsl(var(--blood));
+      --sev-med-bg:      hsl(var(--muted));
+      --sev-med-fg:      hsl(var(--ink-soft));
+      --sev-med-border:  hsl(var(--border-strong));
+      --sev-low-bg:      hsl(var(--paper-2));
+      --sev-low-fg:      hsl(var(--ink-soft));
+      --sev-low-border:  hsl(var(--border-strong));
+
+      /* Primary CTA — subtle dark with red border-on-hover (not a
+         shouting yellow stamp). */
+      --cta-bg:        hsl(var(--paper-2));
+      --cta-fg:        hsl(var(--ink));
+      --cta-border:    1px solid hsl(var(--border-strong));
+      --cta-bg-hover:  hsl(var(--blood-soft));
+
+      /* Verdict tile — red left stripe + dark surface. The colored
+         fills become subtle tinted backgrounds. */
+      --verdict-warn-bg:     hsl(var(--paper-2));
+      --verdict-warn-fg:     hsl(var(--ink));
+      --verdict-warn-border: hsl(var(--blood));
+      --verdict-fail-bg:     hsl(var(--blood-soft));
+      --verdict-fail-fg:     hsl(var(--blood));
+      --verdict-fail-border: hsl(var(--blood));
+      --verdict-ok-bg:       hsl(var(--paper-2));
+      --verdict-ok-fg:       hsl(var(--ink));
+      --verdict-ok-border:   hsl(142 50% 40%);
+    }
+    /* Doomsday: nav bar matches the page (no comic-style ink underline). */
+    :root[data-theme="doomsday"] body > nav,
+    :root[data-theme="doomsday"] nav.px-6 {
+      background: hsl(var(--card)) !important;
+      border-bottom: 1px solid hsl(var(--border)) !important;
+    }
+    /* Doomsday: brand wordmark stays clean Inter (not Oswald). */
+    :root[data-theme="doomsday"] .wm-brand__name {
+      font-family: var(--font-display);
+      font-weight: 700; letter-spacing: 0.16em;
+    }
+    :root[data-theme="doomsday"] .wm-brand__tagline {
+      color: hsl(var(--blood));
+      font-weight: 500;
+    }
+    /* Doomsday: pill stamps in run tables get outlined treatment. */
+    :root[data-theme="doomsday"] .wm-pill-ok { background: hsl(142 40% 18%); color: hsl(142 60% 65%); }
+    :root[data-theme="doomsday"] .wm-pill-running { background: hsl(var(--blood-soft)); color: hsl(var(--blood)); }
+    :root[data-theme="doomsday"] .wm-pill-fail { background: hsl(var(--blood-soft)); color: hsl(var(--blood)); }
+    :root[data-theme="doomsday"] .wm-pill-muted { background: hsl(var(--muted)); color: hsl(var(--ink-soft)); }
+    /* Doomsday: doctor verdict left-stripe accent. */
+    :root[data-theme="doomsday"] .wm-doctor-verdict--warn,
+    :root[data-theme="doomsday"] .wm-doctor-verdict--fail {
+      border-left-width: 3px;
+      border-left-color: hsl(var(--blood));
+    }
+    :root[data-theme="doomsday"] .wm-doctor-verdict__icon {
+      background: hsl(var(--blood-soft));
+      color: hsl(var(--blood));
+      border-color: hsl(var(--blood));
+      border-radius: 50%;
+    }
+    /* Doomsday: tone down the markdown-body — github-markdown-light
+       reads poorly on dark. Swap to a brighter foreground. */
+    :root[data-theme="doomsday"] .markdown-body {
+      color: hsl(var(--ink));
+      background: transparent;
+    }
+    :root[data-theme="doomsday"] .markdown-body code,
+    :root[data-theme="doomsday"] .markdown-body pre {
+      background: hsl(var(--muted));
+      color: hsl(var(--ink));
+    }
+    :root[data-theme="doomsday"] .markdown-body a { color: hsl(var(--blood)); }
+    :root[data-theme="doomsday"] .markdown-body table { color: hsl(var(--ink)); }
+    :root[data-theme="doomsday"] .markdown-body table tr {
+      background: transparent;
+      border-color: hsl(var(--border));
+    }
+    :root[data-theme="doomsday"] .markdown-body table tr:nth-child(2n) { background: hsl(var(--muted) / 0.5); }
+    :root[data-theme="doomsday"] .markdown-body th { border-color: hsl(var(--border)); }
+    :root[data-theme="doomsday"] .markdown-body td { border-color: hsl(var(--border)); }
+    :root[data-theme="doomsday"] .markdown-body h1,
+    :root[data-theme="doomsday"] .markdown-body h2 { border-bottom-color: hsl(var(--border)); }
+
+    /* Doomsday: form inputs — kill the pure-white Tailwind bg so fields
+       sit on the dark page instead of stamping out as glaring white
+       blocks. Raised dark surface, light text, strong border. Outranks
+       `.bg-white` / `.border-gray-300` via root[data-theme] specificity. */
+    :root[data-theme="doomsday"] input[type="text"],
+    :root[data-theme="doomsday"] input[type="password"],
+    :root[data-theme="doomsday"] input[type="number"],
+    :root[data-theme="doomsday"] input[type="search"],
+    :root[data-theme="doomsday"] input[type="email"],
+    :root[data-theme="doomsday"] input[type="url"],
+    :root[data-theme="doomsday"] textarea,
+    :root[data-theme="doomsday"] select {
+      background-color: hsl(var(--paper-2));
+      color: hsl(var(--ink));
+      border-color: hsl(var(--border-strong));
+    }
+    :root[data-theme="doomsday"] input::placeholder,
+    :root[data-theme="doomsday"] textarea::placeholder {
+      color: hsl(var(--ink-soft));
+      opacity: 0.7;
+    }
+    :root[data-theme="doomsday"] input:focus,
+    :root[data-theme="doomsday"] textarea:focus,
+    :root[data-theme="doomsday"] select:focus {
+      border-color: hsl(var(--blood));
+      outline: none;
+    }
+    /* Doomsday: inline-code chips (bg-gray-100) → muted raised surface. */
+    :root[data-theme="doomsday"] code.bg-gray-100,
+    :root[data-theme="doomsday"] code.bg-gray-200 {
+      background-color: hsl(var(--muted));
+      color: hsl(var(--ink));
+    }
+
+    /* ═════════════════════════════════════════════════════════════════
+       Theme: Rorschach (sepia notebook — diary mode)
+       ═════════════════════════════════════════════════════════════════
+       Aged paper, sepia ink, Special Elite typewriter as the primary
+       voice (body AND display), faint horizontal ruled-line bg, no
+       uppercase transforms (handwritten feel).                          */
+    :root[data-theme="rorschach"] {
+      /* Color tokens */
+      --paper:             40 38% 86%;    /* #EFE4CC — aged paper */
+      --paper-2:           38 30% 78%;
+      --ink:               28 40% 16%;    /* #3D2C1A — sepia ink */
+      --ink-soft:          28 30% 36%;
+      --card:              40 45% 90%;    /* slightly brighter parchment for tiles */
+      --card-foreground:   28 40% 16%;
+      --background:        40 38% 86%;
+      --foreground:        28 40% 16%;
+      --muted:             38 30% 80%;
+      --muted-foreground:  28 30% 36%;
+      --border:            28 35% 36%;
+      --border-strong:     28 40% 22%;
+      --accent:            355 60% 32%;   /* deep crimson — sparingly */
+      --accent-strong:     355 65% 24%;
+      --accent-soft:       28 35% 76%;
+      --blood:             355 60% 32%;
+      --blood-soft:        355 35% 80%;
+      --watch-yellow:       25 50% 42%;   /* re-mapped to a warm rust for "warn" */
+      --watch-yellow-2:     25 55% 36%;
+
+      /* Fonts — Special Elite typewriter everywhere, even body. */
+      --font-body:    'Special Elite', Georgia, serif;
+      --font-display: 'Special Elite', Georgia, serif;
+      --font-accent:  'Special Elite', Georgia, serif;
+      --font-mono:    'Special Elite', Georgia, serif;
+
+      /* No uppercase shouting; period-punctuated handwritten feel. */
+      --h1-transform: none;
+      --h1-weight:    400;
+      --h1-letter:    0;
+      --h2-transform: none;
+      --h2-letter:    0;
+      --h3-transform: none;
+      --h3-letter:    0;
+
+      /* Background: faint horizontal ruled lines (legal-pad feel). */
+      --bg-pattern: repeating-linear-gradient(
+                      0deg,
+                      transparent 0px,
+                      transparent 22px,
+                      hsl(28 40% 16% / 0.05) 22px,
+                      hsl(28 40% 16% / 0.05) 23px
+                    );
+      --bg-size:    100% 23px;
+
+      /* Panel framing — thin sepia border + subtle drop shadow, not
+         hard offset (would feel too crisp for a journal). */
+      --panel-radius:        2px;
+      --panel-border:        1px solid hsl(var(--border));
+      --panel-shadow:        2px 2px 0 0 hsl(var(--ink) / 0.4);
+      --panel-shadow-hover:  3px 3px 0 0 hsl(var(--ink) / 0.5);
+      --panel-shadow-table:  1px 1px 0 0 hsl(var(--ink) / 0.3);
+      --panel-shadow-lg:     2px 2px 0 0 hsl(var(--ink) / 0.45);
+      --panel-shadow-profile:3px 3px 0 0 hsl(var(--ink) / 0.45);
+
+      /* Severity stamps — crimson + rust (warm warning) + cream low. */
+      --sev-high-bg:     hsl(var(--blood));
+      --sev-high-fg:     hsl(var(--paper));
+      --sev-high-border: hsl(var(--blood));
+      --sev-med-bg:      hsl(var(--watch-yellow));
+      --sev-med-fg:      hsl(var(--paper));
+      --sev-med-border:  hsl(var(--watch-yellow));
+      --sev-low-bg:      hsl(var(--card));
+      --sev-low-fg:      hsl(var(--ink));
+      --sev-low-border:  hsl(var(--ink));
+
+      /* Primary CTA — dark sepia stamp on parchment. */
+      --cta-bg:        hsl(var(--ink));
+      --cta-fg:        hsl(var(--paper));
+      --cta-border:    1px solid hsl(var(--ink));
+      --cta-bg-hover:  hsl(var(--ink-soft));
+
+      /* Verdict tile — colored fills, sepia frame. */
+      --verdict-warn-bg:     hsl(var(--watch-yellow) / 0.25);
+      --verdict-warn-fg:     hsl(var(--ink));
+      --verdict-warn-border: hsl(var(--ink));
+      --verdict-fail-bg:     hsl(var(--blood) / 0.18);
+      --verdict-fail-fg:     hsl(var(--ink));
+      --verdict-fail-border: hsl(var(--blood));
+      --verdict-ok-bg:       hsl(140 30% 75%);
+      --verdict-ok-fg:       hsl(var(--ink));
+      --verdict-ok-border:   hsl(var(--ink));
+    }
+    /* Rorschach: nav stays parchment; everything in typewriter. */
+    :root[data-theme="rorschach"] body > nav,
+    :root[data-theme="rorschach"] nav.px-6 {
+      background: hsl(var(--paper)) !important;
+      border-bottom: 1px solid hsl(var(--ink)) !important;
+    }
+    :root[data-theme="rorschach"] .wm-brand__name {
+      font-weight: 400; letter-spacing: 0.02em; text-transform: lowercase;
+      font-size: 19px;
+    }
+    :root[data-theme="rorschach"] .wm-brand__name::after { content: "."; }
+    :root[data-theme="rorschach"] .wm-brand__tagline { font-style: italic; }
+    :root[data-theme="rorschach"] .wm-nav-link { text-transform: lowercase; }
+    /* Rorschach: section/banner labels stay sentence-case, not yelling. */
+    :root[data-theme="rorschach"] .wm-actions__title,
+    :root[data-theme="rorschach"] .wm-cmp__title,
+    :root[data-theme="rorschach"] .wm-doctor-verdict__label,
+    :root[data-theme="rorschach"] .wm-profile__arch {
+      text-transform: none;
+      letter-spacing: 0.01em;
+      font-weight: 400;
+    }
+    :root[data-theme="rorschach"] .wm-actions__sev,
+    :root[data-theme="rorschach"] .wm-actions__run-btn {
+      text-transform: lowercase;
+      letter-spacing: 0.02em;
+      font-weight: 400;
+    }
+    :root[data-theme="rorschach"] .wm-profile__flavor { font-style: italic; }
+    /* Rorschach: pill stamps for run tables. */
+    :root[data-theme="rorschach"] .wm-pill { text-transform: lowercase; letter-spacing: 0.02em; font-weight: 400; }
+    :root[data-theme="rorschach"] .wm-pill-ok { background: hsl(140 30% 70%); color: hsl(var(--ink)); }
+    :root[data-theme="rorschach"] .wm-pill-running { background: hsl(var(--watch-yellow) / 0.3); color: hsl(var(--ink)); }
+    :root[data-theme="rorschach"] .wm-pill-fail { background: hsl(var(--blood) / 0.25); color: hsl(var(--blood)); }
   </style>
 </head>
-<body class="bg-gray-50 text-gray-900">
-  <nav class="bg-white border-b border-gray-200 px-6 py-3">
-    <div class="max-w-7xl mx-auto flex items-center justify-between">
-      <div class="flex items-center space-x-6">
-        <a href="/" class="font-semibold text-gray-800 text-lg">watchmen</a>
-        <a href="/" class="text-sm text-gray-600 hover:text-gray-900">Dashboard</a>
-        <a href="/insights" class="text-sm text-gray-600 hover:text-gray-900">Insights</a>
-        <a href="/metrics" class="text-sm text-gray-600 hover:text-gray-900">Metrics</a>
-        <a href="/runs" class="text-sm text-gray-600 hover:text-gray-900">Runs</a>
+<body class="text-[hsl(var(--ink))]">
+  <nav class="px-6 py-3" style="background: hsl(var(--paper)); border-bottom: 2px solid hsl(var(--ink));">
+    <div class="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-3">
+      <div class="flex items-center gap-3 flex-wrap">
+        <a href="/" class="wm-brand mr-2" aria-label="watchmen — home">
+          <!-- Smiley with blood streak: the iconic Watchmen mark. Served
+               from /static rather than inlined so we don't ship the
+               raster-in-SVG payload on every page. Hidden under Doomsday
+               and Rorschach themes via the CSS rules below. -->
+          <img class="wm-brand__mark wm-brand__mark--smiley"
+               src="/static/watchmen-logo.svg"
+               alt=""
+               aria-hidden="true">
+          <!-- Doomsday clock: minutes-to-midnight. Cool-white ring on a
+               dark face, blood-red minute hand at 12, hour hand at 11.
+               Only shown under [data-theme="doomsday"]. -->
+          <svg class="wm-brand__mark wm-brand__mark--clock" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="12" cy="12" r="11" fill="#16171D" stroke="#E8E9EE" stroke-width="1.4"/>
+            <line x1="12" y1="2.4" x2="12" y2="4.2" stroke="#E8E9EE" stroke-width="1.4" stroke-linecap="round"/>
+            <line x1="21.6" y1="12" x2="19.8" y2="12" stroke="#E8E9EE" stroke-width="1" stroke-linecap="round" opacity="0.55"/>
+            <line x1="12" y1="21.6" x2="12" y2="19.8" stroke="#E8E9EE" stroke-width="1" stroke-linecap="round" opacity="0.55"/>
+            <line x1="2.4" y1="12" x2="4.2" y2="12" stroke="#E8E9EE" stroke-width="1" stroke-linecap="round" opacity="0.55"/>
+            <line x1="12" y1="12" x2="9.25" y2="7.25" stroke="#E8E9EE" stroke-width="1.8" stroke-linecap="round"/>
+            <line x1="12" y1="12" x2="12" y2="3.6" stroke="#DC2832" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="12" cy="12" r="1.2" fill="#DC2832"/>
+          </svg>
+          <!-- Rorschach inkblot: symmetric sepia stain, the iconic
+               Rorschach-mask silhouette. Stacked ellipses + satellite
+               droplets read as an organic blot at 26px. Only shown
+               under [data-theme="rorschach"]. -->
+          <svg class="wm-brand__mark wm-brand__mark--inkblot" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <g fill="#3D2C1A">
+              <ellipse cx="12" cy="12" rx="4.6" ry="7"/>
+              <ellipse cx="6.8" cy="11" rx="3.4" ry="4.4" transform="rotate(-15 6.8 11)"/>
+              <ellipse cx="17.2" cy="11" rx="3.4" ry="4.4" transform="rotate(15 17.2 11)"/>
+              <ellipse cx="7.8" cy="18.6" rx="2.4" ry="1.9"/>
+              <ellipse cx="16.2" cy="18.6" rx="2.4" ry="1.9"/>
+              <circle cx="9.4" cy="3.6" r="0.85"/>
+              <circle cx="14.6" cy="3.6" r="0.85"/>
+              <circle cx="3.1" cy="6.8" r="0.6"/>
+              <circle cx="20.9" cy="6.8" r="0.6"/>
+            </g>
+          </svg>
+          <span class="wm-brand__name">WATCHMEN</span>
+          <span class="wm-brand__tagline" title="Quis custodiet ipsos custodes? — Juvenal, c. 100 AD">Who watches the watchmen?</span>
+        </a>
+        {% set path = request.url.path if request else '' %}
+        <a href="/"         class="wm-nav-link text-sm {% if path == '/' %}is-active{% endif %}">Dashboard</a>
+        <a href="/insights" class="wm-nav-link text-sm {% if path.startswith('/insights') %}is-active{% endif %}">Insights</a>
+        <a href="/metrics"  class="wm-nav-link text-sm {% if path.startswith('/metrics') %}is-active{% endif %}">Metrics</a>
+        <a href="/runs"     class="wm-nav-link text-sm {% if path.startswith('/runs') %}is-active{% endif %}">Runs</a>
+        <a href="/doctor"   class="wm-nav-link text-sm {% if path.startswith('/doctor') %}is-active{% endif %}">Doctor</a>
+        <a href="/settings" class="wm-nav-link text-sm {% if path.startswith('/settings') %}is-active{% endif %}">Settings</a>
       </div>
-      <div class="text-xs text-gray-500">local viewer</div>
+      <div></div>
     </div>
   </nav>
   <main class="max-w-7xl mx-auto px-6 py-6">
     {% block content %}{% endblock %}
   </main>
+
+  <!-- Chart bootstrap: scans for [data-wm-chart] elements and renders each one
+       with ECharts using a shared shadcn-style theme. Runs after ECharts has
+       loaded (the CDN script in <head> is `defer`d so this DOMContentLoaded
+       handler fires after it). Idempotent: re-running won't double-mount,
+       since echarts.init binds the canvas to the DOM node. -->
+  <script>
+    (function () {
+      // Soft alpha applied to the area fill's top stop — picked to read as
+      // "presence" without competing with the line stroke. shadcn area chart
+      // uses ~0.4 for the same effect.
+      const AREA_TOP_ALPHA = 0.28;
+      const AXIS_LABEL = 'hsl(220, 9%, 46%)';
+      const GRID_LINE  = 'hsl(220, 13%, 91%)';
+      const CARD_BG    = '#ffffff';
+      const TEXT_FG    = 'hsl(222, 9%, 15%)';
+
+      function hslToRgba(hsl, alpha) {
+        // Minimal HSL→RGBA — only handles "hsl(H, S%, L%)" (the form we ship).
+        const m = hsl.match(/hsl\(\s*([\d.]+)[ ,]+([\d.]+)%[ ,]+([\d.]+)%\s*\)/);
+        if (!m) return hsl;
+        const h = +m[1] / 360, s = +m[2] / 100, l = +m[3] / 100;
+        const a = s * Math.min(l, 1 - l);
+        const f = (n) => {
+          const k = (n + h * 12) % 12;
+          return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+        };
+        const r = Math.round(f(0) * 255), g = Math.round(f(8) * 255), b = Math.round(f(4) * 255);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      }
+
+      function fmtDate(iso) {
+        // 'YYYY-MM-DD' → 'May 16' for axis, 'May 16, 2026' for tooltip.
+        // Plain JS Date parses 'YYYY-MM-DD' as UTC midnight, which can show
+        // off-by-one in negative-UTC zones; we slice the string instead.
+        if (!iso) return '';
+        const [y, m, d] = iso.split('-').map(Number);
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        return { short: `${months[m-1]} ${d}`, long: `${months[m-1]} ${d}, ${y}` };
+      }
+
+      window.wmMountAreaChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let points;
+        try {
+          points = JSON.parse(el.dataset.points || '[]');
+        } catch { points = []; }
+        if (!points.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No data in this window.</div>';
+          return;
+        }
+        const color = el.dataset.color || 'hsl(217, 91%, 60%)';
+        const label = el.dataset.label || 'value';
+        const valueFmt = el.dataset.valueFmt || 'int';  // 'int' | 'usd' | 'float'
+
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+
+        // Sparklines (height < 60px) hide their x-axis tick labels because the
+        // canvas is too narrow for any meaningful date ticks — they'd overlap
+        // into "Apr 28Apr 28May 8May 8" mush. Hover tooltip still surfaces the
+        // exact date, so users never lose access to the temporal anchor.
+        const isSparkline = el.classList.contains('spark') || (el.clientHeight || 0) < 60;
+        const labelInterval = Math.max(0, Math.floor(points.length / 6) - 1);
+
+        chart.setOption({
+          animation: false,
+          grid: { left: 4, right: 4, top: 4, bottom: isSparkline ? 4 : 22, containLabel: false },
+          xAxis: {
+            type: 'category',
+            data: points.map(p => p.date),
+            boundaryGap: false,
+            axisLine:  { show: false },
+            axisTick:  { show: false },
+            axisLabel: isSparkline
+              ? { show: false }
+              : { color: AXIS_LABEL, fontSize: 10, interval: labelInterval,
+                  formatter: (v) => fmtDate(v).short },
+          },
+          yAxis: {
+            type: 'value',
+            show: false,
+            splitLine: { show: true, lineStyle: { color: GRID_LINE, type: 'dashed' } },
+          },
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'line',
+                           lineStyle: { color: 'hsl(220, 9%, 60%)', width: 1, type: 'dashed' } },
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (params) => {
+              const p = params[0];
+              const v = p.value;
+              const vstr = valueFmt === 'usd' ? `$${(+v).toFixed(2)}`
+                         : valueFmt === 'float' ? (+v).toFixed(1)
+                         : Math.round(+v).toLocaleString();
+              const date = fmtDate(p.name).long;
+              return `<div style="font-size:11px;color:${AXIS_LABEL};letter-spacing:0.02em;">${date}</div>
+                      <div style="font-size:13px;font-weight:600;margin-top:2px;color:${TEXT_FG};">
+                        ${label} <span style="color:${color};margin-left:6px;">${vstr}</span>
+                      </div>`;
+            },
+          },
+          series: [{
+            type: 'line',
+            data: points.map(p => p.value),
+            smooth: true,
+            symbol: 'none',
+            sampling: 'lttb',
+            lineStyle: { color: color, width: 1.8 },
+            areaStyle: {
+              color: {
+                type: 'linear',
+                x: 0, y: 0, x2: 0, y2: 1,
+                colorStops: [
+                  { offset: 0, color: hslToRgba(color, AREA_TOP_ALPHA) },
+                  { offset: 1, color: hslToRgba(color, 0) },
+                ],
+              },
+            },
+            // Optional treatment annotation: a vertical dashed line at the
+            // category whose label matches `data-mark-date` on the host
+            // element.  Used by the per-project Impact card to mark the
+            // first-curator-landed date.  Silent so it never steals the
+            // tooltip; sits *behind* the line series via z=0.
+            ...(el.dataset.markDate && points.some(p => p.date === el.dataset.markDate) ? {
+              markLine: {
+                symbol: 'none',
+                silent: true,
+                animation: false,
+                lineStyle: { color: 'hsl(355 75% 50%)', type: 'dashed', width: 1.4 },
+                label: {
+                  show: true,
+                  position: 'insideStartTop',
+                  formatter: el.dataset.markLabel || 'curated',
+                  color: 'hsl(355 75% 50%)',
+                  fontSize: 10,
+                  fontWeight: 600,
+                },
+                data: [{ xAxis: el.dataset.markDate }],
+              },
+            } : {}),
+            emphasis: { focus: 'series' },
+          }],
+        });
+
+        attachResize(chart, el);
+      };
+
+      function attachResize(chart, el) {
+        if (window.ResizeObserver) {
+          new ResizeObserver(() => chart.resize()).observe(el);
+        }
+      }
+
+      // ── Donut (agent mix) ─────────────────────────────────────────────
+      // Data: array of {label, value, color}. Center text comes from
+      // data-center-value + data-center-label attributes on the mount div.
+      window.wmMountDonutChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let slices;
+        try { slices = JSON.parse(el.dataset.points || '[]'); } catch { slices = []; }
+        if (!slices.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No sessions in window.</div>';
+          return;
+        }
+        const centerValue = el.dataset.centerValue || '';
+        const centerLabel = (el.dataset.centerLabel || '').toUpperCase();
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const pct = (p.percent || 0).toFixed(0);
+              return `<div style="font-size:13px;font-weight:600;color:${TEXT_FG};">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${p.color};margin-right:6px;vertical-align:1px;"></span>
+                        ${p.name}
+                      </div>
+                      <div style="font-size:11px;color:${AXIS_LABEL};margin-top:2px;">
+                        ${Math.round(p.value).toLocaleString()} sessions · ${pct}%
+                      </div>`;
+            },
+          },
+          series: [{
+            type: 'pie',
+            radius: ['62%', '92%'],
+            center: ['50%', '50%'],
+            avoidLabelOverlap: false,
+            startAngle: 90,
+            label: { show: false },
+            labelLine: { show: false },
+            itemStyle: {
+              borderColor: CARD_BG,
+              borderWidth: 2,
+              borderRadius: 3,
+            },
+            emphasis: {
+              scale: true,
+              scaleSize: 4,
+              itemStyle: { shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.12)' },
+            },
+            data: slices.map(s => ({
+              name: s.label, value: s.value,
+              itemStyle: { color: s.color },
+            })),
+          }],
+          graphic: centerValue ? [{
+            type: 'group',
+            left: 'center', top: 'center',
+            children: [
+              { type: 'text', top: -10, left: 'center',
+                style: { text: centerValue, font: 'bold 22px Inter, system-ui',
+                         fill: TEXT_FG, textAlign: 'center' } },
+              { type: 'text', top: 16, left: 'center',
+                style: { text: centerLabel, font: 'bold 9px Inter, system-ui',
+                         fill: AXIS_LABEL, textAlign: 'center' } },
+            ],
+          }] : [],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Horizontal bar (top tools) ────────────────────────────────────
+      // Data: array of {label, value}. data-color sets the bar fill.
+      window.wmMountBarChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let rows;
+        try { rows = JSON.parse(el.dataset.points || '[]'); } catch { rows = []; }
+        if (!rows.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No tool calls in window.</div>';
+          return;
+        }
+        const color = el.dataset.color || 'hsl(217, 91%, 60%)';
+        const valueFmt = el.dataset.valueFmt || 'int';
+        const labels = rows.map(r => r.label);
+        const values = rows.map(r => r.value);
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          grid: { left: 4, right: 50, top: 4, bottom: 4, containLabel: true },
+          xAxis: {
+            type: 'value',
+            show: false,
+            splitLine: { show: false },
+          },
+          yAxis: {
+            type: 'category',
+            data: labels,
+            inverse: true,
+            axisLine: { show: false },
+            axisTick: { show: false },
+            axisLabel: { color: TEXT_FG, fontSize: 12, fontWeight: 500 },
+          },
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow', shadowStyle: { color: 'hsl(220, 13%, 95%)' } },
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [6, 10],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (params) => {
+              const p = params[0];
+              const v = valueFmt === 'usd' ? `$${(+p.value).toFixed(2)}`
+                      : Math.round(+p.value).toLocaleString();
+              return `<div style="font-size:13px;font-weight:600;color:${TEXT_FG};">${p.name}</div>
+                      <div style="font-size:11px;color:${AXIS_LABEL};">${v} calls</div>`;
+            },
+          },
+          series: [{
+            type: 'bar',
+            data: values,
+            barWidth: 16,
+            itemStyle: { color: color, borderRadius: [3, 3, 3, 3] },
+            label: {
+              show: true, position: 'right', distance: 6,
+              color: AXIS_LABEL, fontSize: 11, fontWeight: 500,
+              formatter: (p) => (valueFmt === 'usd' ? `$${(+p.value).toFixed(2)}`
+                                : Math.round(+p.value).toLocaleString()),
+            },
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Radar (spider stat card) ──────────────────────────────────────
+      // Data: { indicators: [{name, max}], values: [n,n,n,...] }.
+      // data-color sets the user-polygon color.
+      window.wmMountRadarChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let payload;
+        try { payload = JSON.parse(el.dataset.points || '{}'); } catch { payload = {}; }
+        const indicators = payload.indicators || [];
+        const values = payload.values || [];
+        if (!indicators.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No spider data.</div>';
+          return;
+        }
+        const color = el.dataset.color || 'hsl(217, 91%, 60%)';
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        // Tinted concentric bands (red → orange → yellow → green) to keep
+        // the FM-style "elite outer zone" feel from the old SVG.
+        chart.setOption({
+          animation: false,
+          radar: {
+            shape: 'polygon',
+            radius: '68%',
+            center: ['50%', '54%'],
+            indicator: indicators,
+            splitNumber: 4,
+            axisName: {
+              color: 'hsl(220, 9%, 25%)',
+              fontSize: 10,
+              fontWeight: 700,
+              formatter: (n) => n.toUpperCase(),
+            },
+            splitArea: {
+              show: true,
+              areaStyle: {
+                color: ['hsl(0, 75%, 92%)', 'hsl(25, 95%, 90%)', 'hsl(45, 90%, 90%)', 'hsl(142, 60%, 86%)'].reverse(),
+              },
+            },
+            splitLine: { lineStyle: { color: GRID_LINE, type: 'solid' } },
+            axisLine:  { lineStyle: { color: GRID_LINE, opacity: 0.5 } },
+          },
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const lines = (p.value || []).map((v, i) =>
+                `<div style="font-size:11px;color:${AXIS_LABEL};">${indicators[i].name}: <span style="color:${TEXT_FG};font-weight:600;">${Math.round(v)}</span></div>`
+              ).join('');
+              return `<div style="font-size:12px;font-weight:600;color:${TEXT_FG};margin-bottom:4px;">Attribute scores</div>${lines}`;
+            },
+          },
+          series: [{
+            type: 'radar',
+            symbol: 'circle',
+            symbolSize: 4,
+            lineStyle: { color: color, width: 2 },
+            itemStyle: { color: color, borderColor: '#fff', borderWidth: 1.5 },
+            areaStyle: { color: hslToRgba(color, 0.18) },
+            data: [{ value: values }],
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // Percentile of the non-zero values — used as the color-ramp max so
+      // a single 100x outlier (one mega-day) doesn't compress every other
+      // cell into a nearly-grey wash. Anything ≥ this percentile saturates
+      // at the top color, which is what we want for heatmap legibility.
+      function pNonZero(values, p) {
+        const nz = values.filter(v => v > 0).sort((a, b) => a - b);
+        if (!nz.length) return 1;
+        const i = Math.min(nz.length - 1, Math.floor(nz.length * p));
+        return Math.max(1, nz[i]);
+      }
+
+      // ── Calendar heatmap (26-week activity grid) ──────────────────────
+      // Data: { points: [{date, value}], range: [firstDate, lastDate] }.
+      // Renders GitHub-style cells with a sequential blue color ramp.
+      window.wmMountCalendarChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let payload;
+        try { payload = JSON.parse(el.dataset.points || '{}'); } catch { payload = {}; }
+        const points = payload.points || [];
+        const range = payload.range;
+        if (!points.length || !range) {
+          el.innerHTML = '<div class="wm-chart__empty">No activity in window.</div>';
+          return;
+        }
+        // p85 of non-zero days — anything higher saturates to full blue, which
+        // is correct (it WAS a peak day) without dragging every typical day
+        // down to near-grey because of one 100× outlier.
+        const maxV = pNonZero(points.map(p => p.value), 0.85);
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [6, 10],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const v = p.data ? p.data[1] : 0;
+              const d = p.data ? fmtDate(p.data[0]).long : '';
+              return `<div style="font-size:11px;color:${AXIS_LABEL};">${d}</div>
+                      <div style="font-size:13px;font-weight:600;color:${TEXT_FG};">${Math.round(v)} sessions</div>`;
+            },
+          },
+          visualMap: {
+            show: false,
+            min: 0, max: maxV,
+            inRange: { color: ['hsl(220, 13%, 95%)', 'hsl(217, 91%, 60%)'] },
+          },
+          calendar: {
+            range: range,
+            cellSize: ['auto', 14],
+            top: 28, left: 28, right: 8,
+            splitLine: { show: false },
+            itemStyle: {
+              color: 'hsl(220, 13%, 96%)',
+              borderColor: CARD_BG,
+              borderWidth: 2,
+            },
+            yearLabel: { show: false },
+            monthLabel: { color: AXIS_LABEL, fontSize: 10, nameMap: 'en' },
+            dayLabel: { color: AXIS_LABEL, fontSize: 9, firstDay: 1,
+                        nameMap: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'] },
+          },
+          series: [{
+            type: 'heatmap',
+            coordinateSystem: 'calendar',
+            data: points.map(p => [p.date, p.value]),
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Hour×DOW heatmap (7×24 grid) ──────────────────────────────────
+      // Data: { points: [{hour, dow, value}] } — dow 0=Sun..6=Sat.
+      window.wmMountHourDowChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let payload;
+        try { payload = JSON.parse(el.dataset.points || '{}'); } catch { payload = {}; }
+        const points = payload.points || [];
+        if (!points.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No activity in window.</div>';
+          return;
+        }
+        const dowNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const hours = Array.from({length: 24}, (_, i) => `${String(i).padStart(2,'0')}:00`);
+        // p85 clamp — see calendar chart for rationale. The hour×DOW grid
+        // is even more sensitive: one peak hour (e.g. Thu 15:00 with 6008
+        // prompts) used to make the entire rest of the week look empty.
+        const maxV = pNonZero(points.map(p => p.value), 0.85);
+        const data = points.map(p => [p.hour, p.dow, p.value]);
+        const chart = echarts.init(el, null, { renderer: 'svg' });
+        el.__wmChart = chart;
+        chart.setOption({
+          animation: false,
+          grid: { left: 36, right: 8, top: 8, bottom: 28, containLabel: false },
+          tooltip: {
+            position: 'top',
+            backgroundColor: CARD_BG,
+            borderColor: GRID_LINE,
+            borderWidth: 1,
+            padding: [6, 10],
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-radius: 8px;',
+            formatter: (p) => {
+              const [h, d, v] = p.data;
+              return `<div style="font-size:11px;color:${AXIS_LABEL};">${dowNames[d]} · ${hours[h]}</div>
+                      <div style="font-size:13px;font-weight:600;color:${TEXT_FG};">${Math.round(v)} sessions</div>`;
+            },
+          },
+          xAxis: {
+            type: 'category', data: hours,
+            axisLine: { show: false }, axisTick: { show: false },
+            axisLabel: { color: AXIS_LABEL, fontSize: 9, interval: 2 },
+            splitArea: { show: false },
+          },
+          yAxis: {
+            type: 'category', data: dowNames, inverse: true,
+            axisLine: { show: false }, axisTick: { show: false },
+            axisLabel: { color: AXIS_LABEL, fontSize: 10, fontWeight: 600 },
+            splitArea: { show: false },
+          },
+          visualMap: {
+            show: false,
+            min: 0, max: maxV,
+            inRange: { color: ['hsl(220, 13%, 95%)', 'hsl(217, 91%, 60%)'] },
+          },
+          series: [{
+            type: 'heatmap',
+            data: data,
+            itemStyle: { borderColor: CARD_BG, borderWidth: 2 },
+            emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.18)' } },
+          }],
+        });
+        attachResize(chart, el);
+      };
+
+      // ── Dispatch ──────────────────────────────────────────────────────
+      const MOUNTERS = {
+        area:     window.wmMountAreaChart,
+        donut:    window.wmMountDonutChart,
+        bar:      window.wmMountBarChart,
+        radar:    window.wmMountRadarChart,
+        calendar: window.wmMountCalendarChart,
+        hourdow:  window.wmMountHourDowChart,
+      };
+
+      function mountAll() {
+        document.querySelectorAll('[data-wm-chart]').forEach((el) => {
+          const fn = MOUNTERS[el.dataset.wmChart];
+          if (fn) fn(el);
+        });
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', mountAll);
+      } else {
+        // ECharts script is `defer`, so it loads after DOMContentLoaded already
+        // fired in some race orderings. Wait for `load` as the safe lower bound.
+        window.addEventListener('load', mountAll);
+      }
+    })();
+  </script>
 </body>
 </html>

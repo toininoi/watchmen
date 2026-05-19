@@ -1,88 +1,42 @@
 {% extends "base.html" %}
-{% block title %}insights — watchmen{% endblock %}
+{% block title %}insights · watchmen{% endblock %}
 {% block content %}
 
 <style>
-  .stat-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
-  .stat-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
-  .stat-card .value { font-size: 22px; font-weight: 600; color: #111827; margin-top: 4px; }
-  .stat-card .sub   { font-size: 12px; color: #6b7280; margin-top: 2px; }
-  .stat-card .spark { margin-top: 8px; display: block; }
+  /* `.stat-card` + `.adapter-pill` baseline live in base.html now. Only
+     page-specific bits stay here. */
   .repo-row td { vertical-align: middle; }
-  .badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 999px; font-size: 11px; font-weight: 500; }
-  .badge-curated { background: #ecfdf5; color: #047857; }
-  .badge-candidate { background: #fef3c7; color: #92400e; }
-  .adapter-pill { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #eef2ff; color: #4338ca; margin-right: 4px; font-variant-numeric: tabular-nums; }
+  .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; margin-right: 4px; }
+  .badge-curated { background: hsl(142 60% 94%); color: hsl(142 60% 26%); }
+  .badge-candidate { background: hsl(45 90% 92%); color: hsl(35 70% 32%); }
   details summary { cursor: pointer; }
-  .frust-sample { font-style: italic; color: #4b5563; border-left: 2px solid #e5e7eb; padding-left: 8px; margin: 4px 0; font-size: 12px; }
-  .digest-body { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 24px; }
+  .frust-sample { font-style: italic; color: hsl(var(--muted-foreground)); border-left: 2px solid hsl(var(--border)); padding-left: 10px; margin: 4px 0; font-size: 12px; }
+  .digest-body { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 12px; padding: 8px 24px; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04); }
   .digest-body .markdown-body { background: transparent; padding: 16px 0; max-width: 100%; }
 </style>
 
 <div class="mb-6 flex items-end justify-between">
   <div>
-    <h1 class="text-2xl font-semibold">◷ Watchmen — insights</h1>
+    <h1 class="text-2xl font-semibold">Watchmen insights</h1>
     <div class="text-sm text-gray-600 mt-1">
-      Cross-repo digest grounded in your corpus across Claude Code, Codex,
-      and pi.dev. Multi-adapter coverage, per-repo friction signals, and a
-      deep-digest pipeline output. Complements Claude Code's
+      LLM-synthesized digest grounded in your corpus across Claude Code,
+      Codex, and pi.dev. Cross-repo patterns, friction signals, untapped
+      coverage. Complements Claude Code's
       <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">/insights</code>
       single-agent view.
     </div>
-  </div>
-  <div class="text-xs text-gray-500">
-    {{ n_projects }} repos · {{ curated_count }} curated · {{ total_sessions }} sessions
-  </div>
-</div>
-
-<!-- Stats tiles ─────────────────────────────────────────────────────── -->
-<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-  <div class="stat-card">
-    <div class="label">Sessions / 7d</div>
-    <div class="value">{{ last7.sessions }}</div>
-    <div class="sub">{{ last30.sessions }} in last 30d</div>
-    <div class="spark">{{ sparks.sessions|safe }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="label">Tool errors / 7d</div>
-    <div class="value">{{ last7.tool_errors }}</div>
-    <div class="sub">{{ total_errors }} total across repos</div>
-    <div class="spark">{{ sparks.tool_errors|safe }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="label">Frustration markers</div>
-    <div class="value">{{ total_frustration }}</div>
-    <div class="sub">prompts matching `no wait / bruh / :( / wtf / nope / …`</div>
-  </div>
-  <div class="stat-card">
-    <div class="label">Cost / 7d</div>
-    <div class="value">${{ "%.2f"|format(last7.cost_usd) }}</div>
-    <div class="sub">${{ "%.2f"|format(last30.cost_usd) }} in last 30d</div>
-    <div class="spark">{{ sparks.cost_usd|safe }}</div>
-  </div>
-</div>
-
-<!-- Adapter mix + skills coverage ──────────────────────────────────── -->
-<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
-  <div class="stat-card">
-    <div class="label">Adapter mix</div>
-    <div class="mt-2 text-sm">
-      {% if adapter_totals %}
-        {% for agent, n in adapter_totals.items() %}
-          <span class="adapter-pill">{{ agent }}: {{ n }}</span>
-        {% endfor %}
-        <div class="text-xs text-gray-500 mt-2">{{ total_sessions }} total non-subagent sessions in corpus.db</div>
-      {% else %}
-        <span class="text-gray-400">no sessions in corpus.db yet</span>
-      {% endif %}
+    <div class="text-xs text-gray-500 mt-2">
+      Looking for raw numbers? See
+      <a href="/metrics" class="text-blue-600 font-medium hover:underline">↗ aggregated metrics</a>
+      for sessions, cost, tool errors, per-agent breakdown.
     </div>
   </div>
-  <div class="stat-card">
-    <div class="label">Skill bundles</div>
-    <div class="mt-2 text-sm">
-      <span class="font-semibold">{{ total_skills }}</span> approved across {{ curated_count }} / {{ n_projects }} repos
+  <div class="text-xs text-gray-500 text-right">
+    <div>{{ n_projects }} repos · {{ curated_count }} curated · {{ total_sessions }} sessions</div>
+    <div class="mt-1">
+      <span class="font-semibold">{{ total_skills }}</span> approved skills
       {% if total_pending %}
-        · <span class="text-amber-700 font-semibold">{{ total_pending }}</span> pending review
+        · <span class="text-amber-700 font-semibold">{{ total_pending }}</span> pending
       {% endif %}
     </div>
   </div>
@@ -90,10 +44,10 @@
 
 <!-- Per-repo table ─────────────────────────────────────────────────── -->
 <h2 class="text-lg font-semibold mb-3">Repos</h2>
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-8">
-  <table class="w-full">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr class="text-left text-xs text-gray-600 uppercase tracking-wide">
+<div class="wm-card wm-card-table mb-8 tabular">
+  <table>
+    <thead>
+      <tr>
         <th class="px-4 py-2">Project</th>
         <th class="px-4 py-2">Skills</th>
         <th class="px-4 py-2">Pending</th>
@@ -106,52 +60,37 @@
     </thead>
     <tbody>
     {% for r in repos %}
-      <tr class="border-b border-gray-100 hover:bg-gray-50 repo-row">
-        <td class="px-4 py-3">
-          <a href="/p/{{ r.key }}" class="text-indigo-600 font-medium">{{ r.key }}</a>
+      <tr class="repo-row">
+        <td>
+          <a href="/p/{{ r.key }}" class="text-blue-600 font-medium">{{ r.key }}</a>
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.skills_n %}
-            <span class="font-semibold">{{ r.skills_n }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.skills_n %}<span class="font-semibold">{{ r.skills_n }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.pending_n %}
-            <span class="text-amber-700 font-semibold">{{ r.pending_n }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.pending_n %}<span class="text-amber-700 font-semibold">{{ r.pending_n }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3">{{ r.sess_spark|safe }}</td>
-        <td class="px-4 py-3 text-xs">
+        <td>
+          <div class="wm-chart spark" style="width: 140px; height: 32px;"
+               data-wm-chart="area"
+               data-color="hsl(217, 91%, 60%)" data-label="Sessions" data-value-fmt="int"
+               data-points='{{ r.sess_spark_data|tojson }}'></div>
+        </td>
+        <td class="text-xs">
           {% for agent in ["claude_code", "codex", "pi"] %}
             {% if r.adapter.get(agent, 0) %}
               <span class="adapter-pill">{{ {"claude_code":"cc","codex":"cd","pi":"pi"}[agent] }}: {{ r.adapter[agent] }}</span>
             {% endif %}
           {% endfor %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.tool_errors %}
-            <span class="text-red-700 font-semibold">{{ r.tool_errors }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.tool_errors %}<span class="text-red-700 font-semibold">{{ r.tool_errors }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.frust_count %}
-            <span class="text-amber-700 font-semibold">{{ r.frust_count }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.frust_count %}<span class="text-amber-700 font-semibold">{{ r.frust_count }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-sm">
-          {% if r.pending_prompts %}
-            <span class="text-gray-700">{{ r.pending_prompts }}</span>
-          {% else %}
-            <span class="text-gray-400">0</span>
-          {% endif %}
+        <td class="text-sm">
+          {% if r.pending_prompts %}<span class="text-gray-700">{{ r.pending_prompts }}</span>{% else %}<span class="text-gray-400">0</span>{% endif %}
         </td>
       </tr>
     {% endfor %}
@@ -161,20 +100,26 @@
 
 <!-- Friction signal charts ─────────────────────────────────────────── -->
 <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
-  <div class="bg-white border border-gray-200 rounded-lg p-4">
+  <div class="wm-card">
     <div class="text-sm font-semibold mb-2 text-gray-800">Tool errors by repo</div>
     <div class="text-xs text-gray-500 mb-3">From <code>sessions.tool_error_count</code> in corpus.db.</div>
-    {% if errors_chart %}
-      {{ errors_chart|safe }}
+    {% if errors_chart_data %}
+      <div class="wm-chart" style="height: 220px;"
+           data-wm-chart="bar"
+           data-color="hsl(0, 84%, 60%)"
+           data-points='{{ errors_chart_data|tojson }}'></div>
     {% else %}
       <div class="text-sm text-gray-400">No tool errors recorded.</div>
     {% endif %}
   </div>
-  <div class="bg-white border border-gray-200 rounded-lg p-4">
+  <div class="wm-card">
     <div class="text-sm font-semibold mb-2 text-gray-800">Frustration markers by repo</div>
     <div class="text-xs text-gray-500 mb-3">Prompts matching <code>no wait / bruh / :( / wtf / nope / …</code></div>
-    {% if frust_chart %}
-      {{ frust_chart|safe }}
+    {% if frust_chart_data %}
+      <div class="wm-chart" style="height: 220px;"
+           data-wm-chart="bar"
+           data-color="hsl(45, 93%, 47%)"
+           data-points='{{ frust_chart_data|tojson }}'></div>
     {% else %}
       <div class="text-sm text-gray-400">No frustration markers detected.</div>
     {% endif %}
@@ -185,13 +130,13 @@
 {% if cross %}
 <h2 class="text-lg font-semibold mb-3">Cross-repo patterns</h2>
 <div class="text-xs text-gray-500 mb-3">Candidate slugs that appear in two or more repos' <code>_candidates.json</code>. Curated in some, only proposed in others.</div>
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-8">
-  <table class="w-full">
+<div class="wm-card wm-card-table mb-8">
+  <table>
     <tbody>
     {% for slug, hits in cross[:12] %}
-      <tr class="border-b border-gray-100 last:border-b-0">
-        <td class="px-4 py-2 font-mono text-sm font-semibold">{{ slug }}</td>
-        <td class="px-4 py-2 text-sm">
+      <tr>
+        <td class="font-mono text-sm font-semibold">{{ slug }}</td>
+        <td class="text-sm">
           {% for key, status in hits %}
             {% if status == "curated" %}
               <span class="badge badge-curated">✓ {{ key }}</span>
@@ -228,8 +173,8 @@
 {% set frust_repos = repos | selectattr("frust_samples") | list %}
 {% if frust_repos %}
 <details class="mb-8">
-  <summary class="text-sm font-semibold text-gray-800 mb-2">Frustration samples (click to expand)</summary>
-  <div class="bg-white border border-gray-200 rounded-lg p-4 mt-2">
+  <summary class="text-sm font-semibold text-gray-800 mb-2 cursor-pointer">Frustration samples (click to expand)</summary>
+  <div class="wm-card mt-2">
     {% for r in frust_repos %}
       <div class="mb-3">
         <div class="text-sm font-semibold">{{ r.key }} <span class="text-gray-500 font-normal">({{ r.frust_count }} markers)</span></div>
@@ -245,9 +190,29 @@
 <!-- Hour-of-day heatmap ────────────────────────────────────────────── -->
 <h2 class="text-lg font-semibold mb-3">Activity by hour & day-of-week</h2>
 <div class="text-xs text-gray-500 mb-3">Last 90 days, every coding-agent session in your corpus.</div>
-<div class="bg-white border border-gray-200 rounded-lg p-4 mb-8 overflow-x-auto">
-  {{ hour_dow_svg|safe }}
+<div class="wm-card mb-8 overflow-x-auto">
+  <div class="wm-chart" style="height: 200px;" data-wm-chart="hourdow"
+       data-points='{{ hour_dow_data|tojson }}'></div>
 </div>
+
+<!-- Cross-agent narrative ──────────────────────────────────────────── -->
+{% if cmp_narrative_html %}
+<section class="wm-cmp mb-8">
+  <div class="wm-cmp__header">
+    <h2 class="wm-cmp__title">How you use each agent</h2>
+    <div class="wm-cmp__sub">
+      {% if cmp_narrative_meta and cmp_narrative_meta.generated_at %}
+        Synthesized {{ cmp_narrative_meta.generated_at[:10] }}
+        {% if cmp_narrative_meta.model %}with <code>{{ cmp_narrative_meta.model }}</code>{% endif %}
+        · regenerate from the CLI with <code>watchmen insights --regenerate</code>
+      {% endif %}
+    </div>
+  </div>
+  <div class="wm-cmp__narrative markdown-body">
+    {{ cmp_narrative_html|safe }}
+  </div>
+</section>
+{% endif %}
 
 <!-- Latest deep digest ─────────────────────────────────────────────── -->
 {% if digest_html %}
@@ -264,7 +229,7 @@
 </div>
 {% else %}
 <div class="bg-gray-50 border border-gray-200 rounded-lg p-6 text-sm text-gray-600 mb-8">
-  No cached deep digest yet. Run <code class="bg-white px-1.5 py-0.5 rounded border">watchmen insights</code> from the CLI to generate one — it'll cache under <code>~/.watchmen/insights/</code> and appear here on next page load.
+  No cached deep digest yet. Run <code class="bg-white px-1.5 py-0.5 rounded border">watchmen insights</code> from the CLI to generate one. It'll cache under <code>~/.watchmen/insights/</code> and appear here on next page load.
 </div>
 {% endif %}
 

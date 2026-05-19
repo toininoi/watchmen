@@ -6,7 +6,7 @@
 # string changes. See CONTRIBUTING.md "Releasing" for details.
 name = "dria-watchmen"
 version = "0.5.0"
-description = "Local Claude Code session intelligence — observe, analyze, and generate skills + CLAUDE.md per project, autonomously"
+description = "Local coding-agent session intelligence: observe, analyze, and generate skills plus workspace briefs per project"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -19,6 +19,10 @@ dependencies = [
     "markdown>=3.7",
     "pygments>=2.18",
     "rich>=13.7",
+    # Arrow-key prompts for the `watchmen settings` interactive menu.
+    # Built on prompt_toolkit which Rich already depends on transitively,
+    # so the install footprint is essentially nil.
+    "questionary>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -55,9 +59,18 @@ packages = ["src/watchmen"]
 include = [
     "src/watchmen",
     "plugin",
+    "plugin-codex",
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
     "tests",
+    "docs/images",
+    ".github/ISSUE_TEMPLATE",
+    ".github/pull_request_template.md",
     "README.md",
+    "CONTRIBUTING.md",
     "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
     "LICENSE",
     "pyproject.toml",
 ]

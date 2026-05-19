@@ -1,0 +1,381 @@
+{% extends "base.html" %}
+{% block title %}settings · watchmen{% endblock %}
+
+{% block head_extra %}
+<style>
+  /* Theme picker grid — 3 cards on desktop, stacks on mobile. The
+     swatch row is a flat horizontal strip showing the four spot
+     colors of each theme, so users can scan palettes at a glance.
+     Currently-active card gets a yellow check + accent ring. */
+  .wm-theme-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .wm-theme-card {
+    position: relative;
+    text-align: left;
+    padding: 14px 16px 16px;
+    background: hsl(var(--card));
+    border: 1.5px solid hsl(var(--ink) / 0.25);
+    border-radius: var(--panel-radius, 4px);
+    cursor: pointer;
+    transition: border-color 120ms ease, transform 120ms ease;
+    font-family: inherit;
+    color: inherit;
+  }
+  .wm-theme-card:hover {
+    border-color: hsl(var(--ink));
+    transform: translateY(-1px);
+  }
+  .wm-theme-card.is-active {
+    border-color: hsl(var(--ink));
+    box-shadow: 3px 3px 0 0 hsl(var(--ink));
+  }
+  .wm-theme-card__swatches {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    height: 28px;
+    border: 1px solid hsl(var(--ink) / 0.3);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+  .wm-theme-card__swatches > span { display: block; }
+  .wm-theme-card__name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: var(--h3-letter, 0.04em);
+    text-transform: var(--h3-transform, uppercase);
+    display: block;
+    color: hsl(var(--ink));
+  }
+  .wm-theme-card__desc {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: hsl(var(--ink-soft));
+    line-height: 1.45;
+  }
+  .wm-theme-card__check {
+    position: absolute;
+    top: 10px; right: 12px;
+    width: 22px; height: 22px;
+    display: none;
+    align-items: center; justify-content: center;
+    background: hsl(var(--watch-yellow));
+    color: hsl(var(--ink));
+    border: 1.5px solid hsl(var(--ink));
+    border-radius: 2px;
+    font-size: 14px; font-weight: 700;
+  }
+  .wm-theme-card.is-active .wm-theme-card__check { display: flex; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold">Settings</h1>
+  <div class="text-sm text-gray-600 mt-1">
+    Configure provider auth, default model, viewer port, and per-project
+    cadence. Mirrors <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">watchmen settings</code>:
+    edits write to <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">~/.config/watchmen/.env</code>
+    and <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">state.db</code>, the same paths the CLI uses.
+  </div>
+</div>
+
+{% if flash %}
+  {% if flash.startswith("ok:") %}
+  <div class="mb-6 rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">
+    ✓ {{ flash[3:] }}
+  </div>
+  {% elif flash.startswith("err:") %}
+  <div class="mb-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+    ✗ {{ flash[4:] }}
+  </div>
+  {% endif %}
+{% endif %}
+
+<!-- ── Providers + API keys ──────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">LLM provider</h2>
+
+<div class="wm-card mb-4">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Active provider</div>
+  <div class="mb-3 text-sm text-gray-700">
+    Currently using <span class="font-mono">{{ active_provider }}</span>
+    <span class="text-xs text-gray-500">({{ active_provider_display }})</span>.
+    Switch below; the LLM passes (analyst + curator + insights) will route
+    through the new provider on the next run.
+  </div>
+  <form method="post" action="/settings/provider" class="flex gap-2 items-center">
+    <select name="value" required
+            class="text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+      {% for p in providers %}
+      <option value="{{ p.name }}" {% if p.active %}selected{% endif %}>
+        {{ p.display_name }}{% if not p.set %} (no key set){% endif %}
+      </option>
+      {% endfor %}
+    </select>
+    <button type="submit"
+            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+      Switch
+    </button>
+  </form>
+  <div class="text-xs text-gray-500 mt-2">
+    Switching to a provider with no key configured won't fail immediately —
+    the next LLM pass will, with a clear error. Set the key below first.
+  </div>
+</div>
+
+<!-- Per-provider credential cards — one card each so the user can see which
+     credentials exist on disk at a glance and update any one without touching
+     the others. Env-var-based providers get a password form; OAuth providers
+     are read-only (their credential comes from `claude` / `codex login`). -->
+{% for p in providers %}
+<div class="wm-card mb-4">
+  <div class="flex items-center justify-between mb-1">
+    <div class="text-xs text-gray-500 uppercase tracking-wide">
+      {{ p.display_name }} {% if p.auth == "oauth" %}OAuth{% else %}API key{% endif %}
+      {% if p.active %}<span class="ml-2 wm-pill wm-pill-ok">active</span>{% endif %}
+    </div>
+    {% if p.env_var %}<code class="text-[10px] text-gray-400">{{ p.env_var }}</code>{% endif %}
+  </div>
+  <div class="mb-3">
+    {% if p.set %}
+      {% if p.masked %}<span class="font-mono text-sm text-gray-700">{{ p.masked }}</span>{% endif %}
+      <span class="wm-pill wm-pill-ok ml-2">{% if p.auth == "oauth" %}OAuth ready{% else %}set{% endif %}</span>
+    {% else %}
+      <span class="text-sm text-gray-500">{% if p.auth == "oauth" %}not signed in{% else %}not set{% endif %}</span>
+      <span class="wm-pill wm-pill-fail ml-2">missing</span>
+    {% endif %}
+  </div>
+  {% if p.auth == "oauth" %}
+    <div class="text-sm text-gray-600">
+      Credential sourced from <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.source_hint }}</code>.
+      {% if not p.set %}
+        Run <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.login_cmd }}</code> in your shell to sign in,
+        then reload this page.
+      {% else %}
+        Token rotates automatically; nothing to update here.
+        Run <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.login_cmd }}</code> if you need to re-authenticate.
+      {% endif %}
+    </div>
+  {% else %}
+    <form method="post" action="/settings/api-key" class="flex gap-2 items-center">
+      <input type="hidden" name="provider" value="{{ p.name }}">
+      <input type="password" name="value" required
+             placeholder="paste {{ p.name }} API key"
+             autocomplete="off"
+             class="flex-1 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+      <button type="submit"
+              class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+        Save
+      </button>
+    </form>
+  {% endif %}
+  <div class="text-xs text-gray-500 mt-2">
+    Default model on this provider:
+    <code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ p.default_model }}</code>
+  </div>
+</div>
+{% endfor %}
+
+<!-- ── Default model ─────────────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3 mt-6">Default model</h2>
+
+<div class="wm-card mb-6">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Resolved default</div>
+  <div class="mb-3">
+    <span class="font-mono text-sm text-gray-700">{{ model.resolved }}</span>
+    {% if model.override %}
+    <span class="wm-pill ml-2">override</span>
+    <span class="text-xs text-gray-500 ml-1">(WATCHMEN_DEFAULT_MODEL)</span>
+    {% else %}
+    <span class="text-xs text-gray-500 ml-2">(from {{ active_provider }} provider default)</span>
+    {% endif %}
+  </div>
+  <form method="post" action="/settings/model" class="flex gap-2 items-center">
+    <input type="text" name="value"
+           placeholder="e.g. gpt-5, claude-sonnet-4-6, deepseek/deepseek-v4-flash"
+           value="{{ model.override or '' }}"
+           class="flex-1 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+    <button type="submit" name="action" value="set"
+            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+      Set override
+    </button>
+    <button type="submit" name="action" value="clear"
+            {% if not model.override %}disabled{% endif %}
+            class="text-xs px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+      Clear
+    </button>
+  </form>
+  <div class="text-xs text-gray-500 mt-2">
+    Override pins a specific model regardless of provider; clear it to
+    fall back to the active provider's default
+    (<code class="bg-gray-100 px-1.5 py-0.5 rounded font-mono">{{ model.active_provider_default }}</code>).
+    Use any model the active provider supports.
+  </div>
+</div>
+
+<!-- ── Other global settings ────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">Other</h2>
+
+<div class="wm-card mb-6">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Viewer port</div>
+  <div class="mb-3">
+    <span class="font-mono text-sm text-gray-700">{{ viewer_port }}</span>
+    <span class="text-xs text-gray-500 ml-2">({{ viewer_port_source }})</span>
+  </div>
+  <form method="post" action="/settings/port" class="flex gap-2 items-center">
+    <input type="number" name="value" min="1024" max="65535"
+           value="{{ viewer_port }}"
+           class="w-32 text-sm font-mono px-3 py-1.5 border border-gray-300 rounded-md bg-white focus:outline-none focus:border-[hsl(var(--accent))]">
+    <button type="submit"
+            class="text-xs px-3 py-1.5 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+      Save
+    </button>
+  </form>
+  <div class="text-xs text-gray-500 mt-2">
+    Default {{ viewer_port_default }}. Range 1024–65535. After changing,
+    reinstall the launchd/systemd agent with
+    <code class="bg-gray-100 px-1 py-0.5 rounded">watchmen viewer install</code>
+    so the service agent picks up the new port.
+  </div>
+</div>
+
+<!-- ── Appearance / theme picker ─────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">Appearance</h2>
+
+<div class="wm-card mb-6">
+  <div class="text-xs text-gray-500 uppercase tracking-wide mb-3">Theme</div>
+  <div class="text-sm text-gray-600 mb-4">
+    Saved per browser via <code class="bg-gray-100 px-1 rounded">localStorage</code>;
+    applies instantly with no reload.
+  </div>
+
+  <div class="wm-theme-grid">
+    <button type="button" data-wm-theme="comic" class="wm-theme-card">
+      <span class="wm-theme-card__swatches" aria-hidden="true">
+        <span style="background:#F1E8D2"></span>
+        <span style="background:#F5C518"></span>
+        <span style="background:#BC1D2E"></span>
+        <span style="background:#131316"></span>
+      </span>
+      <span class="wm-theme-card__name">Comic Pulp</span>
+      <span class="wm-theme-card__desc">Newsprint cream, ink panels, Watchmen yellow. The default.</span>
+      <span class="wm-theme-card__check" aria-hidden="true">✓</span>
+    </button>
+
+    <button type="button" data-wm-theme="doomsday" class="wm-theme-card">
+      <span class="wm-theme-card__swatches" aria-hidden="true">
+        <span style="background:#0E0F13"></span>
+        <span style="background:#16171D"></span>
+        <span style="background:#DC2832"></span>
+        <span style="background:#E8E9EE"></span>
+      </span>
+      <span class="wm-theme-card__name">Doomsday</span>
+      <span class="wm-theme-card__desc">Pure noir dark. Charcoal + sparing blood red for criticality.</span>
+      <span class="wm-theme-card__check" aria-hidden="true">✓</span>
+    </button>
+
+    <button type="button" data-wm-theme="rorschach" class="wm-theme-card">
+      <span class="wm-theme-card__swatches" aria-hidden="true">
+        <span style="background:#EFE4CC"></span>
+        <span style="background:#3D2C1A"></span>
+        <span style="background:#B8541F"></span>
+        <span style="background:#8B2528"></span>
+      </span>
+      <span class="wm-theme-card__name">Rorschach</span>
+      <span class="wm-theme-card__desc">Sepia notebook. Typewriter throughout. Diary mode.</span>
+      <span class="wm-theme-card__check" aria-hidden="true">✓</span>
+    </button>
+  </div>
+</div>
+
+<!-- ── Per-project settings ──────────────────────────────────────────── -->
+<h2 class="text-lg font-semibold mb-3">Tracked projects</h2>
+
+{% if projects %}
+<div class="wm-card overflow-hidden p-0">
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="border-b border-gray-200">
+        <th class="text-left font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Project</th>
+        <th class="text-left font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Repo</th>
+        <th class="text-center font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Enabled</th>
+        <th class="text-center font-medium text-xs uppercase tracking-wide text-gray-500 px-4 py-2.5">Threshold</th>
+        <th class="px-4 py-2.5 w-20"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in projects %}
+      <tr class="border-b border-gray-100 last:border-b-0">
+        <form method="post" action="/settings/project/{{ p.project_key }}">
+          <td class="px-4 py-2.5 font-medium">
+            <a href="/p/{{ p.project_key }}" class="text-blue-600 hover:underline">{{ p.project_key }}</a>
+          </td>
+          <td class="px-4 py-2.5 text-xs text-gray-600 font-mono truncate max-w-[20rem]" title="{{ p.source_repo }}">
+            {{ p.source_repo|replace("/Users/" ~ p.source_repo.split("/")[2], "~") if p.source_repo else "·" }}
+          </td>
+          <td class="px-4 py-2.5 text-center">
+            <label class="inline-flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" name="enabled" value="1" {% if p.enabled %}checked{% endif %}
+                     class="rounded">
+            </label>
+          </td>
+          <td class="px-4 py-2.5 text-center">
+            <input type="number" name="threshold_new_prompts" min="1" value="{{ p.threshold_new_prompts }}"
+                   class="w-20 text-sm font-mono px-2 py-1 border border-gray-300 rounded-md text-center">
+          </td>
+          <td class="px-4 py-2.5 text-right">
+            <button type="submit"
+                    class="text-xs px-2.5 py-1 rounded-md bg-[hsl(var(--accent))] text-white hover:bg-[hsl(var(--accent-strong))]">
+              Save
+            </button>
+          </td>
+        </form>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="text-xs text-gray-500 mt-2">
+  CLI equivalents: <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen settings show &lt;project&gt;</code> ·
+  <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen settings set &lt;project&gt; threshold_new_prompts N</code>
+</div>
+{% else %}
+<div class="wm-card text-sm text-gray-500">
+  No projects tracked yet. Run
+  <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen init</code> or
+  <code class="bg-gray-100 px-1.5 py-0.5 rounded">watchmen track &lt;key&gt; --repo &lt;path&gt;</code>.
+</div>
+{% endif %}
+
+<script>
+  // Theme picker: applies live + persists to localStorage. The FOUC-
+  // prevention script in base.html's <head> reads the same key before
+  // first paint on every page load, so the choice survives navigation.
+  (function () {
+    const STORAGE_KEY = 'watchmen.theme';
+    const cards = document.querySelectorAll('[data-wm-theme]');
+    const current = localStorage.getItem(STORAGE_KEY) || 'comic';
+
+    function applyTheme(name) {
+      document.documentElement.setAttribute('data-theme', name);
+      try { localStorage.setItem(STORAGE_KEY, name); } catch (_) {}
+      cards.forEach(c => c.classList.toggle('is-active', c.dataset.wmTheme === name));
+    }
+
+    cards.forEach(c => {
+      c.addEventListener('click', () => applyTheme(c.dataset.wmTheme));
+    });
+
+    // Initialize active state from current storage (default 'comic').
+    cards.forEach(c => c.classList.toggle('is-active', c.dataset.wmTheme === current));
+  })();
+</script>
+
+{% endblock %}
