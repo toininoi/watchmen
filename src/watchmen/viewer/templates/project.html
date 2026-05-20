@@ -125,6 +125,98 @@
   {% endif %}
 </section>
 
+{% if subagent_metrics and subagent_metrics.has_data %}
+<section class="bg-white rounded-lg border border-gray-200 mb-8 p-5">
+  <div class="flex items-baseline justify-between mb-3">
+    <h2 class="text-lg font-semibold">Subagent usage</h2>
+    <div class="text-xs text-gray-500">
+      {{ subagent_metrics.sessions }} session{{ "" if subagent_metrics.sessions == 1 else "s" }} ·
+      ${{ '%.2f'|format(subagent_metrics.total_cost) }} total
+    </div>
+  </div>
+
+  {% set share = subagent_metrics.cost_share_pct %}
+  {% set share_label = '—' if share is none else ('%.0f'|format(share) + '%') %}
+  {% if share is none %}
+    {% set share_color = 'text-gray-500 bg-gray-100' %}
+  {% elif share < 10 %}
+    {% set share_color = 'text-red-700 bg-red-50' %}
+  {% elif share < 30 %}
+    {% set share_color = 'text-amber-700 bg-amber-50' %}
+  {% else %}
+    {% set share_color = 'text-green-700 bg-green-50' %}
+  {% endif %}
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+    <div class="border border-gray-200 rounded-md p-3">
+      <div class="text-xs uppercase text-gray-500 mb-1">Main thread</div>
+      <div class="text-2xl font-bold font-mono">${{ '%.2f'|format(subagent_metrics.main_cost) }}</div>
+      <div class="text-xs text-gray-500 mt-1">
+        {{ subagent_metrics.sessions - subagent_metrics.subagent_sessions }} session{{ "" if (subagent_metrics.sessions - subagent_metrics.subagent_sessions) == 1 else "s" }}
+      </div>
+    </div>
+    <div class="border border-gray-200 rounded-md p-3">
+      <div class="text-xs uppercase text-gray-500 mb-1">Subagents</div>
+      <div class="text-2xl font-bold font-mono">${{ '%.2f'|format(subagent_metrics.sub_cost) }}</div>
+      <div class="text-xs text-gray-500 mt-1">
+        {{ subagent_metrics.subagent_sessions }} session{{ "" if subagent_metrics.subagent_sessions == 1 else "s" }}
+      </div>
+    </div>
+    <div class="border border-gray-200 rounded-md p-3">
+      <div class="text-xs uppercase text-gray-500 mb-1">Cost share</div>
+      <div class="text-2xl font-bold font-mono">
+        <span class="inline-block px-2 py-0.5 rounded {{ share_color }}">{{ share_label }}</span>
+      </div>
+      <div class="text-xs text-gray-500 mt-1">of project spend in subagents</div>
+    </div>
+  </div>
+
+  {% if subagent_metrics.candidates %}
+  <div class="mt-2">
+    <div class="text-sm font-medium text-gray-700 mb-2">
+      Top main sessions
+      <span class="text-xs text-gray-500 font-normal">— delegation candidates, ordered by cost</span>
+    </div>
+    <table class="min-w-full text-sm">
+      <thead class="text-xs uppercase text-gray-500 border-b border-gray-200">
+        <tr>
+          <th class="py-1.5 pr-3 text-left font-medium">session</th>
+          <th class="py-1.5 pr-3 text-left font-medium">agent</th>
+          <th class="py-1.5 pr-3 text-left font-medium">started</th>
+          <th class="py-1.5 pr-3 text-right font-medium">cost</th>
+          <th class="py-1.5 pr-3 text-right font-medium">tokens</th>
+          <th class="py-1.5 pr-3 text-right font-medium">tools</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in subagent_metrics.candidates %}
+        <tr class="border-b border-gray-100">
+          <td class="py-1.5 pr-3 font-mono text-xs">{{ c.session_id[:12] }}</td>
+          <td class="py-1.5 pr-3 text-gray-600">{{ c.agent }}</td>
+          <td class="py-1.5 pr-3 text-gray-600 text-xs">{{ (c.started_at or '')[:10] }}</td>
+          <td class="py-1.5 pr-3 text-right font-mono">${{ '%.2f'|format(c.cost_usd) }}</td>
+          <td class="py-1.5 pr-3 text-right font-mono text-xs">
+            {% if c.total_tokens >= 1000000 %}{{ '%.1f'|format(c.total_tokens / 1000000) }}M{% else %}{{ '%.0f'|format(c.total_tokens / 1000) }}k{% endif %}
+          </td>
+          <td class="py-1.5 pr-3 text-right font-mono">{{ '{:,}'.format(c.tool_use_count) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if share is not none and share < 10 and subagent_metrics.total_cost >= 10 %}
+  <div class="mt-4 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-3">
+    Only {{ share_label }} of this project's spend goes through subagents.
+    Large main-thread sessions like the ones above are the strongest candidates for delegating work,
+    which lets the parent thread keep a smaller context window and routes routine search/read tasks
+    to focused subagents.
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if skills %}
 <h2 class="text-lg font-semibold mb-3">Skills</h2>
 <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">

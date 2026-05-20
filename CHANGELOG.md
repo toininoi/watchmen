@@ -6,6 +6,30 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-05-20
+
+First step toward the subagent-cost-efficiency thread: surface what the
+corpus already knows about subagent usage so the gap between projects
+that delegate heavily and projects that don't is visible. Measurement
+first, intervention next.
+
+### Added — Subagent usage surface
+- New `watchmen subagents` command shows subagent cost share per agent
+  and per project, with a per-project detail view (`--project <key>`)
+  that lists the top main-thread sessions ranked by cost as
+  "delegation candidates" — the sessions that probably should have
+  delegated routine search/read work to subagents to keep the parent's
+  context window smaller.
+- New section on the per-project web viewer page (`/p/<project_key>`)
+  mirrors the CLI: main vs. subagent cost split, share badge color-coded
+  by intensity (red / amber / green), and the same delegation-candidate
+  table. Renders nothing when the project has no captured sessions yet.
+- All four adapters have populated `sessions.is_subagent` since the
+  adapter rewrite, but Claude Code is the only one with a transcript-
+  level subagent primitive today. Codex / pi.dev / OpenCode rows always
+  report `is_subagent=0` until upstream adds a primitive — the surface
+  is honest about that gap rather than papering over it with heuristics.
+
 ## [0.6.4] — 2026-05-19
 
 Adapter coverage release. Adds the OpenCode adapter and fixes a real gap
