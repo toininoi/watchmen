@@ -3665,6 +3665,10 @@ def _seed_corpus_with_sessions(corpus_db, rows):
     """
     import sqlite3 as _sql
     conn = _sql.connect(corpus_db)
+    # Build the minimum schema homepage + subagents queries touch.  We
+    # only seed `sessions` here; `tool_calls` and `prompts` exist as
+    # empty tables so the homepage aggregations that join across them
+    # don't trip on a missing table.
     conn.executescript("""
         CREATE TABLE sessions (
             session_id TEXT PRIMARY KEY,
@@ -3690,6 +3694,14 @@ def _seed_corpus_with_sessions(corpus_db, rows):
             model_dominant TEXT,
             cost_usd REAL NOT NULL DEFAULT 0,
             agent TEXT NOT NULL DEFAULT 'claude_code'
+        );
+        CREATE TABLE tool_calls (
+            session_id TEXT, timestamp TEXT, tool_name TEXT,
+            is_error INTEGER NOT NULL DEFAULT 0, skill_name TEXT
+        );
+        CREATE TABLE prompts (
+            session_id TEXT, timestamp TEXT, text TEXT,
+            word_count INTEGER, char_count INTEGER, is_first_in_session INTEGER
         );
     """)
     for r in rows:
@@ -3850,6 +3862,61 @@ def test_cli_subagents_overview_runs_and_renders_share(tmp_path, monkeypatch, ca
     assert "Subagent usage" in captured
     assert "claude_code" in captured
     assert "demo" in captured  # project key in the per-project table
+
+
+def test_homepage_impact_strip_includes_subagent_sessions_card(tmp_path, monkeypatch):
+    """impact_strip() must populate `subagent_sessions` with this/prior counts
+    and a current-window cost_share_pct."""
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen.viewer import homepage as _hp
+    importlib.reload(_hp)
+
+    now = datetime.now(timezone.utc)
+    ts_this  = (now - timedelta(days=2)).isoformat()
+    ts_prior = (now - timedelta(days=10)).isoformat()
+
+    _seed_corpus_with_sessions(_paths.CORPUS_DB, [
+        # This-7d window: 2 subagents (cost 1.5) + 1 main (cost 8.5) = 10 total, 15% sub share
+        {"session_id": "this-main", "project_dir": "/r", "is_subagent": 0,
+         "cost_usd": 8.5, "started_at": ts_this},
+        {"session_id": "this-sub-a","project_dir": "/r", "is_subagent": 1,
+         "cost_usd": 1.0, "started_at": ts_this},
+        {"session_id": "this-sub-b","project_dir": "/r", "is_subagent": 1,
+         "cost_usd": 0.5, "started_at": ts_this},
+        # Prior-7d window: 1 subagent
+        {"session_id": "prior-sub", "project_dir": "/r", "is_subagent": 1,
+         "cost_usd": 0.2, "started_at": ts_prior},
+    ])
+
+    strip = _hp.impact_strip()
+    sub = strip["subagent_sessions"]
+    assert sub["this"]  == 2
+    assert sub["prior"] == 1
+    # +100% delta this vs prior
+    assert sub["delta_pct"] is not None
+    assert abs(sub["delta_pct"] - 100.0) < 0.01
+    # 1.5 / 10.0 = 15%
+    assert sub["cost_share_pct"] is not None
+    assert abs(sub["cost_share_pct"] - 15.0) < 0.01
+
+
+def test_homepage_impact_strip_subagent_share_none_on_empty_window(tmp_path, monkeypatch):
+    """cost_share_pct is None when the 7d window has no cost (avoids 0% lie)."""
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    import importlib
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen.viewer import homepage as _hp
+    importlib.reload(_hp)
+
+    # No corpus at all - everything should default to zero/None
+    strip = _hp.impact_strip()
+    assert strip["subagent_sessions"]["this"] == 0
+    assert strip["subagent_sessions"]["cost_share_pct"] is None
 
 
 def test_viewer_project_page_renders_subagent_section(tmp_path, monkeypatch):

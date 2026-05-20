@@ -49,20 +49,24 @@ def _pct_delta(this: float, prior: float) -> float | None:
 # ─── 1. Impact strip — 3 KPI cards with week-over-week delta ────────────────
 
 def impact_strip() -> dict:
-    """Three this-7d vs prior-7d cards.
+    """Four this-7d vs prior-7d KPI cards.
 
     Returns a dict with keys `skill_calls`, `tool_errors`, `active_repos`,
-    each having {this, prior, delta_pct, fmt}.  `fmt` is a hint for the
-    template — int for counts, float-1 for per-session means.
+    and `subagent_sessions` — each having {this, prior, delta_pct, fmt}.
+    `subagent_sessions` additionally carries `cost_share_pct` (this 7d's
+    subagent cost / total cost, for the subtitle).  `fmt` is a hint for
+    the template — int for counts, float-1 for per-session means.
 
     All values fall back to zero when corpus.db is missing.  delta_pct
     is None when the prior week was zero (avoid divide-by-zero, render
     as a dash).
     """
     out = {
-        "skill_calls":  {"this": 0,   "prior": 0,   "delta_pct": None, "fmt": "int"},
-        "tool_errors":  {"this": 0.0, "prior": 0.0, "delta_pct": None, "fmt": "float1"},
-        "active_repos": {"this": 0,   "prior": 0,   "delta_pct": None, "fmt": "int"},
+        "skill_calls":       {"this": 0,   "prior": 0,   "delta_pct": None, "fmt": "int"},
+        "tool_errors":       {"this": 0.0, "prior": 0.0, "delta_pct": None, "fmt": "float1"},
+        "active_repos":      {"this": 0,   "prior": 0,   "delta_pct": None, "fmt": "int"},
+        "subagent_sessions": {"this": 0,   "prior": 0,   "delta_pct": None, "fmt": "int",
+                              "cost_share_pct": None},
     }
     cc = _conn_ro()
     if cc is None:
@@ -110,6 +114,42 @@ def impact_strip() -> dict:
                 args = (start, end)
             out["active_repos"][label] = cc.execute(sql, args).fetchone()["n"] or 0
         out["active_repos"]["delta_pct"] = _pct_delta(out["active_repos"]["this"], out["active_repos"]["prior"])
+
+        # Subagent sessions started in each window + cost share for the
+        # current window. Count is what the card value shows; cost share
+        # rides in the subtitle as the headline qualifier ("16% of cost"),
+        # since count alone is misleading (subagents dominate count even
+        # when they're a minority of spend — see the launch session that
+        # found 97%-by-count but only 17%-by-cost).
+        for label, start, end in [("this", cutoff_7, None), ("prior", cutoff_14, cutoff_7)]:
+            sql = (
+                "SELECT COUNT(*) AS n "
+                "FROM sessions WHERE is_subagent = 1 AND started_at >= ?"
+            )
+            args = (start,)
+            if end:
+                sql += " AND started_at < ?"
+                args = (start, end)
+            out["subagent_sessions"][label] = cc.execute(sql, args).fetchone()["n"] or 0
+        out["subagent_sessions"]["delta_pct"] = _pct_delta(
+            out["subagent_sessions"]["this"], out["subagent_sessions"]["prior"]
+        )
+
+        # Current-window cost share: SUM(sub cost) / SUM(total cost) over
+        # the last 7d.  Stays None when the window has no cost at all so
+        # the template can render a dash instead of a misleading 0%.
+        row = cc.execute(
+            "SELECT "
+            "  COALESCE(SUM(CASE WHEN is_subagent=1 THEN cost_usd ELSE 0 END), 0) AS sub_cost, "
+            "  COALESCE(SUM(cost_usd), 0) AS total_cost "
+            "FROM sessions WHERE started_at >= ?",
+            (cutoff_7,),
+        ).fetchone()
+        sub_c = float(row["sub_cost"] or 0.0)
+        tot_c = float(row["total_cost"] or 0.0)
+        out["subagent_sessions"]["cost_share_pct"] = (
+            (100.0 * sub_c / tot_c) if tot_c > 0 else None
+        )
     finally:
         cc.close()
     return out

@@ -6,6 +6,25 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.6] — 2026-05-20
+
+Mission-control gets a fourth KPI card so the subagent signal sits next
+to the existing skill/error/repos cards instead of being hidden behind
+the per-project drill-down.
+
+### Added — Subagent sessions KPI card on the dashboard
+- New "Subagent sessions · 7d" card alongside the existing three.
+  Headline value is the subagent session count this week with the
+  usual prior-week comparison and color-coded delta arrow.
+- Subtitle carries the current-window **cost share** ("X% of cost"),
+  because the count alone can swing wildly between weeks — a project
+  with two long monolithic main sessions and twenty small subagent
+  sessions looks delegation-heavy by count but isn't by spend.
+- Grid layout adapts: 4 columns on desktop, 2 on tablets, 1 on phones.
+- `impact_strip()` now returns a `subagent_sessions` key with the
+  same `{this, prior, delta_pct, fmt}` shape as the other KPIs, plus
+  a `cost_share_pct` rider for the subtitle.
+
 ## [0.6.5] — 2026-05-20
 
 First step toward the subagent-cost-efficiency thread: surface what the
