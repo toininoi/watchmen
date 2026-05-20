@@ -20,6 +20,7 @@ from watchmen.util import (
     read_skill_list,
     write_skill_list,
 )
+from watchmen import subagents as wm_subagents
 from watchmen.viewer import actions as wm_actions
 from watchmen.viewer import homepage as wm_homepage
 from watchmen.viewer import diagnostics as wm_diag
@@ -359,6 +360,12 @@ def project_page(request: Request, project_key: str):
         # empty state when treatment_date is None or pre/post N < 3, so
         # the section is always safe to include.
         "impact": wm_homepage.project_impact(project_key, weeks=16),
+        # Subagent share + top "delegation candidate" main sessions.  Helps
+        # surface the (often very large) gap between sessions that delegate
+        # heavily to subagents and the monolithic ones that don't.
+        "subagent_metrics": wm_subagents.aggregate_for_project(
+            project_key, proj["source_repo"], candidates_limit=5
+        ),
     })
 
 

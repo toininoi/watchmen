@@ -97,6 +97,7 @@ from watchmen.commands.pipeline import (
     cmd_status,
 )
 from watchmen.commands.lifecycle import cmd_down, cmd_up
+from watchmen.commands.subagents import cmd_subagents
 from watchmen.util import find_changelog as _find_changelog
 
 
@@ -1386,6 +1387,16 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="dashboard view").set_defaults(func=cmd_status)
     sub.add_parser("list", help="auto-detect projects from corpus").set_defaults(func=cmd_list)
+
+    p_subagents = sub.add_parser(
+        "subagents",
+        help="surface subagent usage and cost share, per agent and per project",
+    )
+    p_subagents.add_argument(
+        "--project", default=None,
+        help="show detail for one project key (default: global overview)",
+    )
+    p_subagents.set_defaults(func=cmd_subagents)
 
     p_track = sub.add_parser("track", help="add a project to tracking")
     p_track.add_argument("project", help="project key (used to filter corpus by project_dir substring)")
