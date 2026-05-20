@@ -1957,7 +1957,10 @@ def test_viewer_actions_run_dispatch_and_status(tmp_path, monkeypatch):
     assert (runs_dir / f"{run_id}.log").exists()
 
     # Tail page renders + reports done once the zombie is reaped.
-    wm_actions._wait_for_finish(run_id, timeout_s=3.0)
+    # 10s is overkill on Linux/macOS (echo finishes in tens of ms) but the
+    # 3s default flaked twice in a row on Windows CI runners — subprocess
+    # spawn + reap on Windows under contended CI load can easily exceed 3s.
+    wm_actions._wait_for_finish(run_id, timeout_s=10.0)
     r2 = client.get(f"/actions/run/{run_id}")
     assert r2.status_code == 200
     assert "✓ done" in r2.text
@@ -3744,18 +3747,23 @@ def test_subagents_aggregate_for_project_scopes_by_predicate(tmp_path, monkeypat
     from watchmen import subagents as _sub
     importlib.reload(_sub)
 
+    # Build paths via tmp_path so the test stays portable on Windows, where
+    # `str(Path("/repo/demo"))` is `\repo\demo` and would never match a
+    # forward-slashed literal in the seeded sessions table.
+    repo = tmp_path / "repo" / "demo"
+    repo_sub = repo / "sub"
+    other = tmp_path / "other" / "elsewhere"
+    evil = tmp_path / "repo" / "demo-evil"  # substring collision guard
+
     _seed_corpus_with_sessions(_paths.CORPUS_DB, [
-        # Inside the repo (exact + child path)
-        {"session_id": "in-main",  "project_dir": "/repo/demo",        "is_subagent": 0, "cost_usd": 8.0},
-        {"session_id": "in-sub",   "project_dir": "/repo/demo/sub",    "is_subagent": 1, "cost_usd": 2.0},
-        # Outside the repo
-        {"session_id": "out-main", "project_dir": "/other/elsewhere",  "is_subagent": 0, "cost_usd": 99.0},
-        # Substring collision guard (must NOT match `/repo/demo`)
-        {"session_id": "side-by-side", "project_dir": "/repo/demo-evil", "is_subagent": 0, "cost_usd": 77.0},
+        {"session_id": "in-main",       "project_dir": str(repo),     "is_subagent": 0, "cost_usd": 8.0},
+        {"session_id": "in-sub",        "project_dir": str(repo_sub), "is_subagent": 1, "cost_usd": 2.0},
+        {"session_id": "out-main",      "project_dir": str(other),    "is_subagent": 0, "cost_usd": 99.0},
+        {"session_id": "side-by-side",  "project_dir": str(evil),     "is_subagent": 0, "cost_usd": 77.0},
     ])
 
-    m = _sub.aggregate_for_project("demo", "/repo/demo", candidates_limit=5)
-    assert m.sessions == 2  # excludes /repo/demo-evil and /other/elsewhere
+    m = _sub.aggregate_for_project("demo", str(repo), candidates_limit=5)
+    assert m.sessions == 2  # excludes demo-evil and other/elsewhere
     assert m.main_cost == 8.0
     assert m.sub_cost == 2.0
     assert m.cost_share_pct == 20.0
@@ -3772,15 +3780,16 @@ def test_subagents_delegation_candidates_ranks_main_by_cost_desc(tmp_path, monke
     from watchmen import subagents as _sub
     importlib.reload(_sub)
 
+    repo = tmp_path / "r"
     _seed_corpus_with_sessions(_paths.CORPUS_DB, [
-        {"session_id": "main-cheap", "project_dir": "/r", "is_subagent": 0, "cost_usd": 1.0,  "tool_use_count": 5},
-        {"session_id": "main-pricey","project_dir": "/r", "is_subagent": 0, "cost_usd": 50.0, "tool_use_count": 200},
-        {"session_id": "main-mid",   "project_dir": "/r", "is_subagent": 0, "cost_usd": 10.0, "tool_use_count": 50},
+        {"session_id": "main-cheap", "project_dir": str(repo), "is_subagent": 0, "cost_usd": 1.0,  "tool_use_count": 5},
+        {"session_id": "main-pricey","project_dir": str(repo), "is_subagent": 0, "cost_usd": 50.0, "tool_use_count": 200},
+        {"session_id": "main-mid",   "project_dir": str(repo), "is_subagent": 0, "cost_usd": 10.0, "tool_use_count": 50},
         # Subagent with high cost should NOT appear in candidates
-        {"session_id": "sub-huge",   "project_dir": "/r", "is_subagent": 1, "cost_usd": 999.0, "tool_use_count": 1},
+        {"session_id": "sub-huge",   "project_dir": str(repo), "is_subagent": 1, "cost_usd": 999.0, "tool_use_count": 1},
     ])
 
-    m = _sub.aggregate_for_project("r", "/r", candidates_limit=3)
+    m = _sub.aggregate_for_project("r", str(repo), candidates_limit=3)
     assert [c.session_id for c in m.candidates] == ["main-pricey", "main-mid", "main-cheap"]
     assert all(c.session_id != "sub-huge" for c in m.candidates)
 
@@ -3811,7 +3820,8 @@ def test_cli_subagents_overview_runs_and_renders_share(tmp_path, monkeypatch, ca
     from watchmen import state as _state
     importlib.reload(_state)
     _state.init_db()
-    _state.track_project("demo", "/repo/demo", threshold=30)
+    repo = tmp_path / "repo" / "demo"
+    _state.track_project("demo", str(repo), threshold=30)
 
     from watchmen import subagents as _sub
     importlib.reload(_sub)
@@ -3819,8 +3829,8 @@ def test_cli_subagents_overview_runs_and_renders_share(tmp_path, monkeypatch, ca
     importlib.reload(_cmd)
 
     _seed_corpus_with_sessions(_paths.CORPUS_DB, [
-        {"session_id": "main",  "project_dir": "/repo/demo", "is_subagent": 0, "cost_usd": 9.0},
-        {"session_id": "sub-1", "project_dir": "/repo/demo", "is_subagent": 1, "cost_usd": 1.0},
+        {"session_id": "main",  "project_dir": str(repo), "is_subagent": 0, "cost_usd": 9.0},
+        {"session_id": "sub-1", "project_dir": str(repo), "is_subagent": 1, "cost_usd": 1.0},
     ])
 
     class A:
@@ -3843,7 +3853,8 @@ def test_viewer_project_page_renders_subagent_section(tmp_path, monkeypatch):
     from watchmen import state as _state
     importlib.reload(_state)
     _state.init_db()
-    _state.track_project("demo", "/repo/demo", threshold=30)
+    repo = tmp_path / "repo" / "demo"
+    _state.track_project("demo", str(repo), threshold=30)
 
     from watchmen import subagents as _sub
     importlib.reload(_sub)
@@ -3854,9 +3865,9 @@ def test_viewer_project_page_renders_subagent_section(tmp_path, monkeypatch):
     (tmp_path / "bundles" / "demo").mkdir(parents=True, exist_ok=True)
 
     _seed_corpus_with_sessions(_paths.CORPUS_DB, [
-        {"session_id": "main", "project_dir": "/repo/demo", "is_subagent": 0,
+        {"session_id": "main", "project_dir": str(repo), "is_subagent": 0,
          "cost_usd": 12.34, "tool_use_count": 99},
-        {"session_id": "sub-a","project_dir": "/repo/demo", "is_subagent": 1,
+        {"session_id": "sub-a","project_dir": str(repo), "is_subagent": 1,
          "cost_usd": 0.66},
     ])
 
