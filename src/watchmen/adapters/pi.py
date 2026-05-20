@@ -39,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from watchmen.adapters._shared import extract_skill_from_args, extract_skill_from_path
 from watchmen.metrics import turn_cost_usd
 
 NAME = "pi"
@@ -290,7 +291,7 @@ def scan(entry: dict):
                             "timestamp": ts,
                             "tool_name": block.get("name") or "?",
                             "is_error": 0,
-                            "skill_name": None,
+                            "skill_name": extract_skill_from_args(block.get("arguments")),
                         })
 
         elif role == "toolResult":
@@ -303,12 +304,16 @@ def scan(entry: dict):
 
         elif role == "bashExecution":
             session["tool_use_count"] += 1
+            # bashExecution carries the command in the message content; treat
+            # the whole content blob as a potential SKILL.md reference. Works
+            # for both string content ("cat /path/SKILL.md") and list content
+            # with text blocks.
             tool_calls.append({
                 "session_id": session["session_id"],
                 "timestamp": ts,
                 "tool_name": "bash",
                 "is_error": 0,
-                "skill_name": None,
+                "skill_name": extract_skill_from_args(content) or extract_skill_from_path(content if isinstance(content, str) else ""),
             })
 
         # custom / branchSummary / compactionSummary — silently ignore.

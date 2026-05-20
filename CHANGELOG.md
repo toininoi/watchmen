@@ -6,6 +6,32 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-05-19
+
+Adapter coverage release. Adds the OpenCode adapter and fixes a real gap
+in cross-adapter skill telemetry that had been hiding in plain sight:
+only Claude Code transcripts were producing per-skill usage counts, so
+`watchmen prune` and the dashboard sparklines were blind to skill
+activations in Codex, pi.dev, and OpenCode sessions.
+
+### Added — OpenCode Adapter
+- New `opencode` adapter in `src/watchmen/adapters/opencode.py`.
+- Supports ingesting sessions exported from the OpenCode CLI (`opencode export`).
+- Auto-discovery of session JSON files in `~/.opencode/sessions/` and `~/.local/share/opencode/sessions/`.
+- Extracts user prompts, assistant text, internal reasoning (Chain of Thought), and tool execution history (including errors).
+- Full token-usage and cost attribution based on the exported model metadata.
+
+### Fixed — Cross-adapter skill attribution
+- New `adapters/_shared.py` ships an `extract_skill_from_path()` helper
+  that scans tool-call arguments for a `…/skills/<slug>/SKILL.md` path
+  and returns the slug. Wired into the Codex, pi.dev, and OpenCode
+  adapters so every read of a SKILL.md file populates the `skill_name`
+  column the same way Claude Code's `Skill` tool already does.
+- Effect: `watchmen prune`'s usage telemetry now sees skill activations
+  across all four supported agents, not just Claude Code. The dashboard
+  sparklines and the prune judge's per-skill `usage_count`/`last_fired_at`
+  numbers reflect real usage regardless of which agent invoked the skill.
+
 ## [0.6.3] — 2026-05-19
 
 Hotfix for the false-success scenario in `watchmen up` discovered during

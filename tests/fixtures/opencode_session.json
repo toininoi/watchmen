@@ -1,0 +1,52 @@
+{
+  "id": "ses_01J9X7Y2Z3A4B5C6D7E8F9G0H1",
+  "title": "Debug Auth Flow",
+  "model": "anthropic/claude-3-5-sonnet-20241022",
+  "cwd": "/Users/ahegde/projects/watchmen",
+  "messages": [
+    {
+      "info": {
+        "id": "msg_user_1",
+        "role": "user",
+        "timestamp": "2026-05-19T18:00:00.000Z"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "Why is the login failing in the production logs?"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_assistant_1",
+        "role": "assistant",
+        "timestamp": "2026-05-19T18:00:05.000Z",
+        "model_id": "claude-3-5-sonnet-20241022",
+        "tokens": {
+          "input": 450,
+          "output": 820
+        }
+      },
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "The user wants to investigate a production login failure. I need to check the logs first to identify the error pattern."
+        },
+        {
+          "type": "tool",
+          "tool": "bash",
+          "args": {
+            "command": "grep 'ERROR' logs/production.log | tail -n 5"
+          },
+          "status": "completed",
+          "output": "2026-05-19 17:55:01 ERROR: JWT expired for user_id 8821"
+        },
+        {
+          "type": "text",
+          "text": "I've checked the logs and found that logins are failing due to expired JWT tokens."
+        }
+      ]
+    }
+  ]
+}

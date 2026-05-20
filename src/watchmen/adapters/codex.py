@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from watchmen.adapters._shared import extract_skill_from_args
 from watchmen.metrics import price_for_model
 
 NAME = "codex"
@@ -220,12 +221,23 @@ def scan(entry: dict):
                 session["assistant_thinking_count"] += 1
             elif ptype in ("function_call", "custom_tool_call"):
                 session["tool_use_count"] += 1
+                # Codex serializes tool args as a JSON-encoded string. Parse
+                # best-effort; if it doesn't decode (corrupt line, non-JSON
+                # custom tool, etc.) we still fall through to the raw string
+                # match, which catches paths embedded in shell commands.
+                raw_args = payload.get("arguments")
+                parsed_args = raw_args
+                if isinstance(raw_args, str):
+                    try:
+                        parsed_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        parsed_args = raw_args
                 tool_calls.append({
                     "session_id": session["session_id"],
                     "timestamp": ts,
                     "tool_name": payload.get("name") or "?",
                     "is_error": 0,
-                    "skill_name": None,
+                    "skill_name": extract_skill_from_args(parsed_args),
                 })
             elif ptype in ("function_call_output", "custom_tool_call_output"):
                 # Tool result. is_error not directly exposed; some outputs carry
