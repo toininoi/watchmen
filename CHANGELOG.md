@@ -6,6 +6,13 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-05-20
+
+First step toward the subagent-cost-efficiency thread: surface what the
+corpus already knows about subagent usage so the gap between projects
+that delegate heavily and projects that don't is visible. Measurement
+first, intervention next.
+
 ### Added — Subagent usage surface
 - New `watchmen subagents` command shows subagent cost share per agent
   and per project, with a per-project detail view (`--project <key>`)
