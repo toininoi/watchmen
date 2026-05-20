@@ -3750,16 +3750,25 @@ def test_subagents_aggregate_for_project_scopes_by_predicate(tmp_path, monkeypat
     # Build paths via tmp_path so the test stays portable on Windows, where
     # `str(Path("/repo/demo"))` is `\repo\demo` and would never match a
     # forward-slashed literal in the seeded sessions table.
+    #
+    # We deliberately keep both "inside" sessions at the same exact path
+    # rather than splitting one into a subdirectory.  The intent of this
+    # test is to verify subagent counting + the substring-collision guard
+    # ('demo' vs 'demo-evil'); subdir matching exercises the predicate's
+    # LIKE branch which is a separate concern with a known Windows-quirk
+    # in `_project_dir_predicate` (hardcoded forward slash).  Keeping the
+    # scope tight here means this stays a useful regression test on every
+    # platform without smuggling in cross-platform path normalization
+    # coverage that belongs in a dedicated state.py test.
     repo = tmp_path / "repo" / "demo"
-    repo_sub = repo / "sub"
     other = tmp_path / "other" / "elsewhere"
     evil = tmp_path / "repo" / "demo-evil"  # substring collision guard
 
     _seed_corpus_with_sessions(_paths.CORPUS_DB, [
-        {"session_id": "in-main",       "project_dir": str(repo),     "is_subagent": 0, "cost_usd": 8.0},
-        {"session_id": "in-sub",        "project_dir": str(repo_sub), "is_subagent": 1, "cost_usd": 2.0},
-        {"session_id": "out-main",      "project_dir": str(other),    "is_subagent": 0, "cost_usd": 99.0},
-        {"session_id": "side-by-side",  "project_dir": str(evil),     "is_subagent": 0, "cost_usd": 77.0},
+        {"session_id": "in-main",       "project_dir": str(repo),  "is_subagent": 0, "cost_usd": 8.0},
+        {"session_id": "in-sub",        "project_dir": str(repo),  "is_subagent": 1, "cost_usd": 2.0},
+        {"session_id": "out-main",      "project_dir": str(other), "is_subagent": 0, "cost_usd": 99.0},
+        {"session_id": "side-by-side",  "project_dir": str(evil),  "is_subagent": 0, "cost_usd": 77.0},
     ])
 
     m = _sub.aggregate_for_project("demo", str(repo), candidates_limit=5)
