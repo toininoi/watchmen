@@ -232,3 +232,18 @@ def default_model() -> str:
     # Lazy import — providers.py imports nothing from config, so this is one-way.
     from watchmen import providers
     return providers.get_provider(active_provider()).default_model
+
+
+def distill_default_model() -> str:
+    """Model used for semantic skill distillation.
+
+    Distill asks for strict structured judgments and tends to do better on a
+    stronger model. We do not hardcode model names here because they go stale;
+    instead we respect the user's globally configured default. Users who want a
+    different model for distill specifically can set WATCHMEN_DISTILL_MODEL or
+    pass `watchmen distill --model ...`.
+    """
+    explicit = read_env_var("WATCHMEN_DISTILL_MODEL")
+    if explicit:
+        return explicit
+    return default_model()
