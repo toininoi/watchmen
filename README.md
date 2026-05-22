@@ -368,6 +368,38 @@ curator does not immediately recreate them. With `--stage`, approved semantic
 candidates are written to `bundles/<project>/_pending/` instead, so
 `watchmen review` remains the slower approval gate.
 
+### Model comparison for skill buckets
+
+```bash
+watchmen compare exploit-agent --bucket model-repl-compliance
+watchmen compare exploit-agent --bucket model-repl-compliance --candidates openai/gpt-5-mini,deepseek/deepseek-v4-flash
+watchmen compare exploit-agent --bucket model-repl-compliance --tasks 3 --best-of 3
+watchmen compare exploit-agent --bucket model-repl-compliance --concurrency 6
+watchmen compare exploit-agent --bucket model-repl-compliance --candidate tencent/hy3-preview
+watchmen compare exploit-agent --bucket model-repl-compliance --candidates none --comparison-model moonshotai/kimi-k2.6
+```
+
+`compare` evaluates replacement models for one skill bucket using watchmen's
+own skill evidence. For each task variant, it generates one reference output
+with Opus 4.7 by default, generates best-of-N candidate outputs through
+OpenRouter with bounded per-task parallelism, and asks GPT-5.5 to blindly score
+every output against the bucket evidence. The report aggregates quality, wins
+against the reference, total cost with retries included, provider-reported
+completion tokens, visible output characters, empty and maxed sample counts,
+latency, and clearer Pareto-style decisions such as `replace reference`,
+`cheap tradeoff`, `invalid output`, and `dominated`.
+
+Artifacts are written under `bundles/<project>/_compare/<run_id>/`:
+`config.json`, `tasks.json`, `generations.jsonl`, `judgments.jsonl`,
+`summary.json`, and `report.md`.
+
+The built-in candidate pool includes `openai/gpt-5-mini`,
+`deepseek/deepseek-v4-flash`, `anthropic/claude-sonnet-4-6`,
+`minimax/minimax-m2.5`, `tencent/hy3-preview`, `stepfun/step-3.5-flash`, and
+`moonshotai/kimi-k2.6`. Use repeatable `--candidate` / `--comparison-model`
+flags to add one-off models; use `--candidates none` when you want only the
+explicitly flagged models.
+
 ## vs Claude Code's `/insights`
 
 Claude Code shipped `/insights` in v2.1.117 (Apr 2026) — LLM-narrated HTML report from your transcripts. It's good. watchmen is **complementary**:
@@ -431,6 +463,7 @@ watchmen learn <key> --full      With full curator (Stage 1+2+3)
 watchmen review <key>            Interactive walk: pending then approved
 watchmen distill <key>           Skill mesh + merge plan for context rot
 watchmen distill <key> --stage   Stage merged drafts in _pending/
+watchmen compare <key> --bucket <skill>    Compare models on one skill bucket
 
 # Services
 watchmen daemon run              Scheduling loop (foreground)
