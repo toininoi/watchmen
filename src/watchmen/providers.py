@@ -144,6 +144,20 @@ class Provider:
         shape. Default is identity."""
         return raw
 
+    def apply_extra_payload(self, body: dict, extra: dict) -> dict:
+        """Merge caller-supplied chat-completions kwargs (temperature,
+        max_tokens, response_format, ...) into the translated request body.
+
+        Default behavior merges verbatim — fine for OpenAI-shape providers
+        (openrouter/openai) and for Anthropic (which accepts the same
+        top-level `temperature` / `max_tokens` keys). Providers whose wire
+        format uses different parameter names override to rename/drop
+        unsupported kwargs."""
+        for k, v in extra.items():
+            if v is not None:
+                body[k] = v
+        return body
+
     def call(self, client, url: str, headers: dict, body: dict, *,
              max_retries: int = 4, log=None, label: str = "") -> dict:
         """Custom transport hook. Default returns None to signal "use the
@@ -675,6 +689,39 @@ class ChatGPT(Provider):
         }
         if responses_tools:
             body["tools"] = responses_tools
+        return body
+
+    def apply_extra_payload(self, body: dict, extra: dict) -> dict:
+        """The codex/responses OAuth endpoint accepts a stricter kwarg
+        surface than both chat-completions and the public Responses API.
+        Empirically (probed against
+        `chatgpt.com/backend-api/codex/responses` on 2026-05-22) it
+        rejects all three kwargs the chat-completions judge passes:
+
+        - `max_tokens` / `max_output_tokens`: returns
+          ``{"detail": "Unsupported parameter: max_output_tokens"}``.
+          The endpoint does not accept any length-cap parameter; codex
+          itself sends none, relying on `reasoning.effort` + streaming
+          aggregation to bound output. Dropped here.
+        - `temperature`: reasoning models on this endpoint control
+          determinism via `reasoning.effort` (set in `translate_request`),
+          not `temperature`.
+        - `response_format`: replaced in the Responses API by a nested
+          `text.format` block we don't emit. Structured-output
+          enforcement on chatgpt would need separate plumbing.
+
+        Dropping silently means callers (the skillmesh judge in
+        particular) can keep passing chat-completions kwargs for the
+        openrouter/openai path without crashing chatgpt. Unknown kwargs
+        fall through verbatim — room for future Responses-API-native
+        params (e.g. `parallel_tool_calls`) without another override."""
+        dropped = ("temperature", "response_format", "max_tokens", "max_output_tokens")
+        for k, v in extra.items():
+            if v is None:
+                continue
+            if k in dropped:
+                continue
+            body[k] = v
         return body
 
     def call(self, client, url: str, headers: dict, body: dict, *,
