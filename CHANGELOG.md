@@ -6,6 +6,8 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+## [0.6.7] — 2026-05-22
+
 ### Added — `watchmen goals` (codex 0.133.0+)
 - New CLI command surfacing the goal-level lens for codex sessions.
   Codex 0.133.0 introduced first-class goals — one objective + status +
