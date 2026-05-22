@@ -76,6 +76,7 @@ from watchmen.commands.inspect import (
 )
 # Cross-repo digest — the largest single command, lives in its own module.
 from watchmen.commands.insights import cmd_insights
+from watchmen.commands.compare import cmd_compare
 
 
 def _run_settings_menu() -> int:
@@ -1219,6 +1220,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("learn",      "fast cycle: analyze + light curator (~$0.50)"),
         ("review",     "interactive walk: keep/drop/pin per skill"),
         ("distill",    "semantic skill distill: find overlaps and stage merged drafts"),
+        ("compare",    "compare OpenRouter models on a skill bucket"),
     ]),
 ]
 
@@ -1400,6 +1402,41 @@ def main(argv: list[str] | None = None) -> int:
     p_distill.add_argument("--json", action="store_true",
                            help="print the distillation plan as JSON")
     p_distill.set_defaults(func=cmd_distill)
+
+    p_compare = sub.add_parser(
+        "compare",
+        help="compare OpenRouter models against a reference model on one skill bucket",
+    )
+    p_compare.add_argument("project")
+    p_compare.add_argument("--bucket", required=True,
+                           help="skill slug to use as the comparison bucket")
+    p_compare.add_argument("--reference", default="anthropic/claude-opus-4-7",
+                           help="reference generator model (default: anthropic/claude-opus-4-7)")
+    p_compare.add_argument("--judge", default="openai/gpt-5.5",
+                           help="blind judge model (default: openai/gpt-5.5)")
+    p_compare.add_argument("--candidates", default="auto",
+                           help="comma-separated candidate models, or auto for the built-in pool")
+    p_compare.add_argument("--candidate", "--comparison-model", dest="candidate_models",
+                           action="append", default=[],
+                           help="candidate model to add to the comparison pool; repeatable")
+    p_compare.add_argument("--tasks", type=int, default=3,
+                           help="number of bucket task variants (default: 3)")
+    p_compare.add_argument("--reference-n", type=int, default=1,
+                           help="samples per task for reference model (default: 1)")
+    p_compare.add_argument("--best-of", type=int, default=3,
+                           help="candidate samples per task before best-score selection (default: 3)")
+    p_compare.add_argument("--provider", default="openrouter",
+                           help="provider route for generation and judging (default: openrouter)")
+    p_compare.add_argument("--temperature", type=float, default=0.4,
+                           help="generation temperature (default: 0.4)")
+    p_compare.add_argument("--max-tokens", type=int, default=2600,
+                           help="max tokens per generated SKILL.md (default: 2600)")
+    p_compare.add_argument("--concurrency", type=int, default=4,
+                           help="parallel generation calls per task (default: 4)")
+    p_compare.add_argument("--json", action="store_true",
+                           help="print the full comparison result as JSON")
+    p_compare.set_defaults(func=cmd_compare)
+
 
     p_reset = sub.add_parser(
         "reset",

@@ -6,6 +6,25 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — Skill-bucket model comparison
+- New `watchmen compare <project> --bucket <skill>` evaluates replacement
+  models for one skill bucket using watchmen's stored skill evidence.
+- The default setup compares Opus 4.7 reference generations against an
+  OpenRouter candidate pool, uses GPT-5.5 as a blind judge, and supports
+  best-of-N candidate sampling with cost, completion tokens, visible output
+  characters, empty and maxed sample counts, and latency included.
+- The built-in candidate pool includes Tencent HY3 preview, Stepfun 3.5 Flash,
+  and Moonshot Kimi K2.6, and `--candidate` / `--comparison-model` can add
+  repeatable one-off comparison models.
+- Model decisions now distinguish replacement candidates, cheap/speed
+  tradeoffs, invalid/unstable/truncated output, and dominated candidates with a
+  short reason.
+- Generation calls run in bounded parallel batches per task via
+  `--concurrency` while judgments still run after the task's outputs finish.
+- Comparison runs persist `config.json`, `tasks.json`, `generations.jsonl`,
+  `judgments.jsonl`, `summary.json`, and `report.md` under
+  `bundles/<project>/_compare/<run_id>/`.
+
 ## [0.6.7] — 2026-05-22
 
 ### Added — `watchmen goals` (codex 0.133.0+)
@@ -94,7 +113,6 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 - `watchmen distill <project> --animate` renders a Rich terminal mesh view:
   skills connect, clusters form, and overlapping bundles reduce into fewer
   staged candidates.
-
 ## [0.6.6] — 2026-05-20
 
 Mission-control gets a fourth KPI card so the subagent signal sits next
