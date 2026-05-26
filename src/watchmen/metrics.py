@@ -235,10 +235,23 @@ def _load_suggestions(project_key: str) -> list[dict]:
     return out
 
 
+def _skill_name_matches(skill_name: str, slug: str) -> bool:
+    """A `tool_calls.skill_name` matches a suggestion slug if it equals the slug
+    or equals it after stripping a namespace prefix (e.g. `watchmen:brief` and
+    `figma:figma-use` match `brief` and `figma-use`)."""
+    return skill_name == slug or skill_name.split(":")[-1] == slug
+
+
 def _count_uptake(suggestions: list[dict]) -> int:
-    """For each suggestion, count it as 'taken' if the same skill_slug appears
-    as a slash command in any prompt within the same session, after the
-    suggestion's timestamp, within 1 hour."""
+    """For each suggestion, count it as 'taken' if, in the same session and
+    within 1 hour after the suggestion, the suggested skill was either:
+
+      - invoked as a slash command in a later prompt (e.g. ``/<slug>``), or
+      - auto-fired by the agent — captured as a ``tool_calls`` row with
+        ``tool_name = 'Skill'`` and ``skill_name`` matching the slug.
+
+    Skills activate by context match far more often than by explicit slash
+    command, so counting only the prompt channel undercounts real uptake."""
     if not suggestions or not CORPUS_DB.exists():
         return 0
 
@@ -246,17 +259,29 @@ def _count_uptake(suggestions: list[dict]) -> int:
     if not session_ids:
         return 0
 
+    placeholders = ",".join("?" for _ in session_ids)
+    by_session_prompts: dict[str, list[tuple[str, str]]] = {}
+    by_session_skills: dict[str, list[tuple[str, str]]] = {}
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
-        placeholders = ",".join("?" for _ in session_ids)
-        rows = conn.execute(
+        for r in conn.execute(
             f"SELECT session_id, timestamp, text FROM prompts "
             f"WHERE session_id IN ({placeholders}) ORDER BY timestamp ASC",
             tuple(session_ids),
-        ).fetchall()
-    by_session: dict[str, list[tuple[str, str]]] = {}
-    for r in rows:
-        by_session.setdefault(r["session_id"], []).append((r["timestamp"], r["text"] or ""))
+        ):
+            by_session_prompts.setdefault(r["session_id"], []).append(
+                (r["timestamp"], r["text"] or "")
+            )
+        for r in conn.execute(
+            f"SELECT session_id, timestamp, skill_name FROM tool_calls "
+            f"WHERE session_id IN ({placeholders}) "
+            f"AND skill_name IS NOT NULL AND skill_name != '' "
+            f"ORDER BY timestamp ASC",
+            tuple(session_ids),
+        ):
+            by_session_skills.setdefault(r["session_id"], []).append(
+                (r["timestamp"], r["skill_name"])
+            )
 
     taken = 0
     for s in suggestions:
@@ -269,19 +294,38 @@ def _count_uptake(suggestions: list[dict]) -> int:
             ts = datetime.fromisoformat(ts_str)
         except ValueError:
             continue
-        prompts = by_session.get(sid, [])
-        # Find later prompts in the same session
-        pattern = re.compile(rf"/(?:watchmen:)?{re.escape(slug)}\b")
-        for p_ts_str, p_text in prompts:
-            p_ts = _parse_any_ts(p_ts_str)
-            if not p_ts or p_ts <= ts:
-                continue
-            if (p_ts - ts).total_seconds() > 3600:
-                continue
-            if pattern.search(p_text):
-                taken += 1
-                break
+        if _suggestion_taken(sid, slug, ts, by_session_prompts, by_session_skills):
+            taken += 1
     return taken
+
+
+def _suggestion_taken(
+    sid: str,
+    slug: str,
+    ts: datetime,
+    by_session_prompts: dict[str, list[tuple[str, str]]],
+    by_session_skills: dict[str, list[tuple[str, str]]],
+) -> bool:
+    """True if `slug` was invoked as a slash command or auto-fired as a Skill
+    tool call in session `sid` within 1 hour after `ts`."""
+    pattern = re.compile(rf"/(?:watchmen:)?{re.escape(slug)}\b")
+    for p_ts_str, p_text in by_session_prompts.get(sid, []):
+        p_ts = _parse_any_ts(p_ts_str)
+        if not p_ts or p_ts <= ts:
+            continue
+        if (p_ts - ts).total_seconds() > 3600:
+            continue
+        if pattern.search(p_text):
+            return True
+    for c_ts_str, skill_name in by_session_skills.get(sid, []):
+        c_ts = _parse_any_ts(c_ts_str)
+        if not c_ts or c_ts <= ts:
+            continue
+        if (c_ts - ts).total_seconds() > 3600:
+            continue
+        if _skill_name_matches(skill_name, slug):
+            return True
+    return False
 
 
 def _parse_any_ts(s: str | None):
