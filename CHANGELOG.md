@@ -6,6 +6,48 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — Iterative skill routing with watchmen-driven improvement
+
+- New `watchmen route <project> --bucket <skill>` reads the corpus to find
+  the most-recent model each harness (claude-code, codex, opencode, pi.dev)
+  used for this project, then iteratively rewrites the skill itself until a
+  cheaper model in that harness's provider family can carry the skill within
+  `reference - 0.05` judge score (`--threshold` to pin an absolute target).
+- Inner loop reuses `compare` (generate best-of-N, blind judge, score). Outer
+  loop is the new piece: when no cheap candidate clears the target, watchmen
+  reads the judge's failure rationales and revises SKILL.md, then re-sweeps
+  the (post-cull) candidate pool. Default `--max-iters 3`.
+- When a cheap model converges, route emits the harness-specific
+  model-bearing artifact and rewrites the skill body so the user's main
+  agent natively delegates to that model on the next invocation:
+  - **claude-code:** `<repo>/.claude/agents/<bucket>-router.md` (Task tool
+    with `subagent_type=<bucket>-router`)
+  - **codex:** `~/.codex/route-<bucket>.config.toml`
+    (`codex exec --profile-v2 route-<bucket>`)
+  - **opencode:** `<repo>/.opencode/agents/<bucket>-router.md`
+    (dispatch via `@<bucket>-router`)
+  - **pi.dev:** `~/.pi/agent/agents/<bucket>.md` (with opt-in subagent
+    extension) or a body-only "run `pi --model X`" fallback
+- SKILL.md body edits live inside `<!-- watchmen-route:dispatch -->`
+  markers so future `curate` regenerations preserve them.
+- **Hard stop preserves the user's SKILL.md** when no cheap model
+  converges after `max_iters`. The improved skill is *not* committed
+  unless `--commit-improvements` is set. The improved version is always
+  persisted to `bundles/<project>/_route/<run_id>/SKILL.md.final` for
+  inspection.
+- `--no-improve` falls back to one-shot mode (no skill rewrite, just pick
+  the best model the harness can reach today).
+- `--cross-harness` extends each harness's candidate pool with other
+  harnesses' currently-used models so route can surface switch-harness
+  recommendations.
+- `--max-cost-usd` caps cumulative OpenRouter spend; bail at the ceiling
+  with the iteration history preserved.
+- Decision labels: `stay` / `downshift` / `upshift` / `switch-harness`.
+  Inherits compare's quality guards (`invalid` / `unstable` / `truncated` /
+  `dominated`) so damaged candidates never get promoted.
+- All file writes audit-logged at
+  `bundles/<project>/_route/<run_id>/skill_rewrites.jsonl`.
+
 ### Added — Skill-bucket model comparison
 - New `watchmen compare <project> --bucket <skill>` evaluates replacement
   models for one skill bucket using watchmen's stored skill evidence.

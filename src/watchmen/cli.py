@@ -77,6 +77,7 @@ from watchmen.commands.inspect import (
 # Cross-repo digest — the largest single command, lives in its own module.
 from watchmen.commands.insights import cmd_insights
 from watchmen.commands.compare import cmd_compare
+from watchmen.commands.route import cmd_route
 
 
 def _run_settings_menu() -> int:
@@ -1221,6 +1222,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("review",     "interactive walk: keep/drop/pin per skill"),
         ("distill",    "semantic skill distill: find overlaps and stage merged drafts"),
         ("compare",    "compare OpenRouter models on a skill bucket"),
+        ("route",      "harness-aware: rewrite skill so each harness delegates to its best model"),
     ]),
 ]
 
@@ -1436,6 +1438,61 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("--json", action="store_true",
                            help="print the full comparison result as JSON")
     p_compare.set_defaults(func=cmd_compare)
+
+    p_route = sub.add_parser(
+        "route",
+        help="harness-aware skill-bucket routing: pick the best model each harness can actually use, rewrite skill so the main agent natively delegates",
+    )
+    p_route.add_argument("project")
+    p_route.add_argument("--bucket", required=True,
+                         help="skill slug to route")
+    p_route.add_argument("--harnesses", default="auto",
+                         help="comma-separated subset of detected harnesses (claude-code, codex, opencode, pi); auto = all detected")
+    p_route.add_argument("--harness", dest="harness_extra",
+                         action="append", default=[],
+                         help="extra harness to include (repeatable)")
+    p_route.add_argument("--since", type=int, default=30,
+                         help="lookback window in days for harness/model detection (default: 30)")
+    p_route.add_argument("--cross-harness", action="store_true",
+                         help="extend each harness's candidate pool with other harnesses' currently-used models")
+    p_route.add_argument("--candidate", dest="candidate_models",
+                         action="append", default=[],
+                         help="explicit candidate model to include (repeatable; routed to whichever harness's provider family matches)")
+    p_route.add_argument("--tasks", type=int, default=3,
+                         help="number of bucket task variants per harness (default: 3)")
+    p_route.add_argument("--best-of", type=int, default=3,
+                         help="candidate samples per task before best-score selection (default: 3)")
+    p_route.add_argument("--judge", default=None,
+                         help="blind judge model (default: each harness's modal/reference model — same model the user runs day-to-day, so the judge is anchored in what's already trusted and stays inside the quota the user already pays for)")
+    p_route.add_argument("--provider", default="openrouter",
+                         help="provider route for generation and judging (default: openrouter)")
+    p_route.add_argument("--temperature", type=float, default=0.4,
+                         help="generation temperature (default: 0.4)")
+    p_route.add_argument("--max-tokens", type=int, default=2600,
+                         help="max tokens per generated SKILL.md (default: 2600)")
+    p_route.add_argument("--concurrency", type=int, default=4,
+                         help="parallel generation calls per harness compare (default: 4)")
+    p_route.add_argument("--no-improve", action="store_true",
+                         help="one-shot mode: skip the watchmen-revises-the-skill iteration loop, just pick the best model the harness can reach today")
+    p_route.add_argument("--max-iters", type=int, default=3,
+                         help="ceiling on how many times watchmen revises the skill before bailing out (default: 3)")
+    p_route.add_argument("--threshold", type=float, default=None,
+                         help="absolute judge-score target (default: reference score - 0.05, i.e. 'you wouldn't notice the swap')")
+    p_route.add_argument("--threshold-offset", type=float, default=-0.05,
+                         help="when --threshold is unset, target = reference + this offset (default: -0.05)")
+    p_route.add_argument("--improver", default="anthropic/claude-opus-4-7",
+                         help="model watchmen uses to revise SKILL.md between iterations (default: anthropic/claude-opus-4-7)")
+    p_route.add_argument("--max-cost-usd", type=float, default=None,
+                         help="bail out when cumulative OpenRouter spend crosses this ceiling (default: no cap)")
+    p_route.add_argument("--commit-improvements", action="store_true",
+                         help="commit the revised SKILL.md even when no cheap model cleared the threshold")
+    p_route.add_argument("--no-rewrite", action="store_true",
+                         help="skip the per-harness router file writes and SKILL.md body edit; report decisions only")
+    p_route.add_argument("--dry-run", action="store_true",
+                         help="print what would be written without touching files")
+    p_route.add_argument("--json", action="store_true",
+                         help="print the full route result as JSON")
+    p_route.set_defaults(func=cmd_route)
 
 
     p_reset = sub.add_parser(

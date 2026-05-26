@@ -96,6 +96,12 @@ class GenerationRecord:
     latency_s: float
     error: str | None = None
     finish_reason: str | None = None
+    # Coarse error category: "rate_limit" (HTTP 429), "auth" (401/403),
+    # "unknown_model" (400 with a "model" hint), or "other". None means
+    # the call succeeded. Used by route to distinguish "this candidate
+    # got rate-limited" from "this candidate broke" so the iterative
+    # improver can decide whether to retry, skip, or fail loudly.
+    error_kind: str | None = None
 
 
 @dataclass
@@ -458,6 +464,7 @@ def _generate_one(
     output_id = f"{task.id}-out-{output_index:03d}"
     start = time.monotonic()
     finish_reason = None
+    error_kind: str | None = None
     try:
         data = _call_model_data(
             client,
@@ -477,6 +484,7 @@ def _generate_one(
         output = f"GENERATION_ERROR: {type(exc).__name__}: {exc}"
         usage = {}
         error = f"{type(exc).__name__}: {exc}"
+        error_kind = _classify_call_exception(exc)
     latency = time.monotonic() - start
     return GenerationRecord(
         run_id=run_id,
@@ -491,7 +499,73 @@ def _generate_one(
         latency_s=round(latency, 3),
         error=error,
         finish_reason=finish_reason,
+        error_kind=error_kind,
     )
+
+
+def _classify_call_exception(exc: Exception) -> str:
+    """Bucket a chat_call failure into a coarse error category.
+
+    Sources we recognize:
+      - `httpx.HTTPStatusError`: read the status code off `.response`.
+      - Any exception whose stringified form mentions a recognizable
+        provider phrase ("rate_limit_error", "unauthorized", etc.) —
+        cheap fallback for wrapped/re-raised exceptions.
+
+    Categories:
+      - "rate_limit" — HTTP 429 or rate_limit_error body. Most actionable
+        for the iterative improver: it can retry/skip rather than treat
+        the candidate as broken.
+      - "auth" — HTTP 401 / 403. Distinct from rate limit because no
+        amount of waiting fixes it; the credential is wrong.
+      - "unknown_model" — HTTP 400 with "model" in body (Anthropic /
+        OpenAI both surface this when the id isn't in their catalog).
+      - "other" — everything else (timeouts, 5xx, parse errors).
+    """
+    status: int | None = None
+    body: str = ""
+    try:
+        # Local import to avoid forcing httpx at module-import time in
+        # environments that mock the provider stack.
+        import httpx
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            try:
+                body = exc.response.text or ""
+            except Exception:
+                body = ""
+    except Exception:
+        pass
+
+    if status == 429:
+        return "rate_limit"
+    if status in (401, 403):
+        return "auth"
+    if status == 400:
+        # Only flag as "unknown_model" when the response body uses an
+        # *unambiguous* model-not-found phrase. The previous heuristic
+        # of "any 'model' substring" tripped on Anthropic 400s for
+        # canonical models that were actually rate-limited (the body
+        # contains words like "model" or routes through `/messages`).
+        # Match specific tokens that providers emit when the id itself
+        # is wrong, and nothing else.
+        body_l = body.lower()
+        if (
+            "model_not_found" in body_l
+            or "not_found_error" in body_l
+            or "invalid model" in body_l
+            or "unknown model" in body_l
+        ):
+            return "unknown_model"
+
+    blob = str(exc).lower()
+    if "rate_limit_error" in blob or "rate limit" in blob:
+        return "rate_limit"
+    if "unauthorized" in blob or "authentication_error" in blob:
+        return "auth"
+    if "model_not_found" in blob or "unknown model" in blob:
+        return "unknown_model"
+    return "other"
 
 
 def _build_generation_jobs(config: CompareConfig, *, start_output_index: int) -> tuple[list[_GenerationJob], int]:
@@ -869,11 +943,25 @@ def _write_report(result: CompareResult) -> Path:
     return path
 
 
-def run_compare(config: CompareConfig, *, run_id: str | None = None, progress=None) -> CompareResult:
+def run_compare(
+    config: CompareConfig,
+    *,
+    run_id: str | None = None,
+    progress=None,
+    evidence: SkillBucketEvidence | None = None,
+) -> CompareResult:
+    """Run one compare pass over a skill bucket.
+
+    Set ``evidence`` to bypass the on-disk SKILL.md read; ``watchmen route``
+    uses this to iterate against an in-memory revised SKILL.md without
+    clobbering the user's bundle until the loop converges.  Default
+    behaviour is unchanged.
+    """
     import httpx
 
     run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    evidence = load_skill_bucket_evidence(config.project_key, config.bucket)
+    if evidence is None:
+        evidence = load_skill_bucket_evidence(config.project_key, config.bucket)
     tasks = build_compare_tasks(config.task_count)
     run_dir = bundle_dir(config.project_key) / "_compare" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
