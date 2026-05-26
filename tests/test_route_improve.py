@@ -821,6 +821,139 @@ def test_reference_unroutable_reports_auth_when_all_errors_are_401():
     assert "login" in reason
 
 
+def test_classify_route_and_pick_cheapest_passing_agree_on_same_result():
+    """Regression for divergence found in PR #85 review: one-shot
+    classify_route (picked highest-quality) and iterative
+    _pick_cheapest_passing (picked cheapest passer) could produce
+    different recommendations for the same compare result. They must
+    agree — both implement sweep semantics now.
+
+    Concrete scenario: candidates A (0.91, 1.5× cost) and B (0.86, 0.7×
+    cost), ref=0.90, threshold=0.85, both pass. Before the unification:
+      - classify_route picked A → "stay" (not better, not cheaper)
+      - _pick_cheapest_passing picked B → "downshift" (0.7× cost)
+    After unification: both pick B and recommend downshift.
+    """
+    from watchmen.compare import (
+        CompareConfig, CompareResult, ModelSummary,
+    )
+    from watchmen.route import (
+        HarnessReference, RouteDecision, classify_route,
+    )
+    from watchmen.route_improve import _pick_cheapest_passing
+
+    ref_row = ModelSummary(
+        model="ref-model", role="reference", avg_score=0.90,
+        worst_score=0.90, wins_vs_reference=None, task_count=1,
+        cost_usd=1.0, cost_vs_reference=None,
+        produced_tokens=1000, produced_tokens_vs_reference=None,
+        visible_chars=5000, empty_outputs=0, maxed_outputs=0,
+        sample_count=1, latency_s=20.0, latency_vs_reference=None,
+        decision="reference", decision_note="",
+    )
+    pricey_quality = ModelSummary(
+        model="cand-A", role="candidate", avg_score=0.91,
+        worst_score=0.91, wins_vs_reference=0, task_count=1,
+        cost_usd=1.5, cost_vs_reference=1.5,
+        produced_tokens=1200, produced_tokens_vs_reference=1.2,
+        visible_chars=6000, empty_outputs=0, maxed_outputs=0,
+        sample_count=1, latency_s=25.0, latency_vs_reference=1.25,
+        decision="comparable", decision_note="",
+    )
+    cheaper_passer = ModelSummary(
+        model="cand-B", role="candidate", avg_score=0.86,
+        worst_score=0.86, wins_vs_reference=0, task_count=1,
+        cost_usd=0.7, cost_vs_reference=0.7,
+        produced_tokens=800, produced_tokens_vs_reference=0.8,
+        visible_chars=4000, empty_outputs=0, maxed_outputs=0,
+        sample_count=1, latency_s=15.0, latency_vs_reference=0.75,
+        decision="comparable", decision_note="",
+    )
+    cmp_result = CompareResult(
+        run_id="r", run_dir="/tmp",
+        config=CompareConfig(
+            project_key="p", bucket="b", reference_model="ref-model",
+            candidates=["cand-A", "cand-B"],
+        ),
+        tasks=[], generations=[], scores=[], task_results=[],
+        summaries=[ref_row, pricey_quality, cheaper_passer],
+    )
+    harness_ref = HarnessReference(
+        harness="claude_code", current_model="ref-model",
+        last_session_ts="2026-01-01T00:00:00Z", session_count_window=10,
+    )
+
+    one_shot = classify_route(harness_ref, cmp_result, [harness_ref])
+    seed_decision = RouteDecision(
+        harness="claude_code", current_model="ref-model",
+        recommended_model=None, label="stay", note="",
+        avg_score=0.90, cost_vs_current=None,
+    )
+    iterative = _pick_cheapest_passing(seed_decision, cmp_result, threshold=0.85)
+
+    # Both paths must converge on the same recommendation.
+    assert one_shot.recommended_model == iterative.recommended_model, (
+        f"one-shot recommended {one_shot.recommended_model!r} but "
+        f"iterative recommended {iterative.recommended_model!r}"
+    )
+    assert one_shot.label == iterative.label, (
+        f"one-shot label {one_shot.label!r} but iterative {iterative.label!r}"
+    )
+    # Sanity: the cheaper candidate IS the right answer (Pareto-good).
+    assert one_shot.recommended_model == "cand-B"
+    assert one_shot.label == "downshift"
+
+
+def test_claude_pro_resolve_api_key_raises_when_token_expired(monkeypatch):
+    """OAuth expiry race: a long iterative route run can cross the token
+    boundary mid-loop. `resolve_api_key` must fail fast with a clear
+    error rather than handing out an expired token that 401s opaquely
+    from `/v1/messages`."""
+    import pytest
+    from watchmen.providers import ClaudePro
+    from watchmen.credentials import ClaudeCodeCredentials
+
+    expired = ClaudeCodeCredentials(
+        access_token="expired-token",
+        refresh_token="some-refresh",
+        expires_at_ms=1_000,  # ancient
+        scopes=("user:inference",),
+        subscription_type="team",
+        rate_limit_tier="default_claude_max_5x",
+    )
+    monkeypatch.setattr(
+        "watchmen.credentials.ClaudeCodeCredentials.read",
+        classmethod(lambda cls: expired),
+    )
+
+    provider = ClaudePro()
+    with pytest.raises(RuntimeError, match="OAuth token expired"):
+        provider.resolve_api_key(configured=None)
+
+
+def test_claude_pro_resolve_api_key_returns_token_when_valid(monkeypatch):
+    """Sanity check: valid (non-expired) credential returns the token
+    unchanged, no error."""
+    import time
+    from watchmen.providers import ClaudePro
+    from watchmen.credentials import ClaudeCodeCredentials
+
+    fresh = ClaudeCodeCredentials(
+        access_token="fresh-token",
+        refresh_token="some-refresh",
+        expires_at_ms=int(time.time() * 1000) + 60 * 60 * 1000,  # +1h
+        scopes=("user:inference",),
+        subscription_type="team",
+        rate_limit_tier="default_claude_max_5x",
+    )
+    monkeypatch.setattr(
+        "watchmen.credentials.ClaudeCodeCredentials.read",
+        classmethod(lambda cls: fresh),
+    )
+
+    assert ClaudePro().resolve_api_key(configured=None) == "fresh-token"
+
+
 def test_pick_cheapest_passing_recommends_stay_when_winner_worse_and_costlier():
     """When the only passing candidate is both lower-quality AND not
     cheaper than the reference, route should recommend `stay`, not

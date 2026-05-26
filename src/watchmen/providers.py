@@ -488,11 +488,23 @@ class ClaudePro(AnthropicProvider):
         """Read the OAuth token straight from Claude Code's keychain
         entry. `configured` (env var / .env) is ignored — for the
         subscription-quota provider, the user shouldn't need to paste
-        anything; the credential is wherever Claude Code put it."""
+        anything; the credential is wherever Claude Code put it.
+
+        Re-reads on every call so a refreshed keychain entry propagates
+        without a process restart. Raises `RuntimeError` when the token
+        is expired (CC refreshes proactively, but a long iterative route
+        run can cross the expiry boundary mid-loop; failing fast with a
+        clear message beats a silent 401 from `/v1/messages`).
+        """
         from watchmen.credentials import ClaudeCodeCredentials
         creds = ClaudeCodeCredentials.read()
         if creds is None:
             return None
+        if creds.is_expired():
+            raise RuntimeError(
+                "Claude Pro OAuth token expired — run `claude login` "
+                "to refresh, then retry"
+            )
         return creds.access_token
 
     def headers(self, api_key: str, *, agent_name: str = "") -> dict[str, str]:

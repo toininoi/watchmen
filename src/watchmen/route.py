@@ -785,11 +785,28 @@ def classify_route(
             summary=worst,
         )
 
-    # Pick the highest-quality healthy candidate.  Tie-break on cost.
-    winner = sorted(
-        healthy,
-        key=lambda c: (-c.avg_score, c.cost_usd or 0.0),
-    )[0]
+    # Winner-pick must match `route_improve._pick_cheapest_passing` so the
+    # one-shot and iterative paths agree on the same compare result. Sweep
+    # semantics: prefer the *cheapest* candidate that's acceptably close to
+    # the reference (within 0.05 below ref score). Tie-break on quality.
+    # Falls back to highest-quality if nothing clears the floor, so the user
+    # still sees a recommendation when every candidate is significantly worse
+    # than the reference (the stay-guard below then surfaces the right note).
+    ACCEPTABLE_BELOW_REF = 0.05
+    acceptable = [
+        c for c in healthy
+        if c.avg_score >= ref_row.avg_score - ACCEPTABLE_BELOW_REF
+    ]
+    if acceptable:
+        winner = sorted(
+            acceptable,
+            key=lambda c: (c.cost_usd or 0.0, -c.avg_score),
+        )[0]
+    else:
+        winner = sorted(
+            healthy,
+            key=lambda c: (-c.avg_score, c.cost_usd or 0.0),
+        )[0]
 
     # If the winner isn't materially better than the reference (avg score
     # within 0.02), recommend `stay` — saves users from churn over noise.
