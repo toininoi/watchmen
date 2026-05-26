@@ -584,3 +584,130 @@ def test_cross_agent_narrative_skips_when_lt_two_active_adapters():
          "dominant_model": "gpt-5.5", "suggestions_fired": 0},
     ]}
     assert _cross_agent_narrative(facts_thin, model="ignored") is None
+
+
+# ── _count_uptake: slash-command + auto-fire channels ──────────────────────
+
+def _seed_corpus_for_uptake(corpus_path: Path, prompts: list[dict], tool_calls: list[dict]) -> None:
+    """Minimal corpus.db with the two tables `_count_uptake` reads: `prompts`
+    (slash-command channel) and `tool_calls` carrying `skill_name` (auto-fire
+    channel)."""
+    schema = """
+    CREATE TABLE prompts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT,
+        timestamp TEXT,
+        text TEXT
+    );
+    CREATE TABLE tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT,
+        timestamp TEXT,
+        tool_name TEXT,
+        is_error INTEGER NOT NULL DEFAULT 0,
+        skill_name TEXT
+    );
+    """
+    with sqlite3.connect(str(corpus_path)) as conn:
+        conn.executescript(schema)
+        for p in prompts:
+            conn.execute(
+                "INSERT INTO prompts (session_id, timestamp, text) VALUES (?, ?, ?)",
+                (p["session_id"], p["timestamp"], p["text"]),
+            )
+        for t in tool_calls:
+            conn.execute(
+                "INSERT INTO tool_calls (session_id, timestamp, tool_name, skill_name) "
+                "VALUES (?, ?, ?, ?)",
+                (t["session_id"], t["timestamp"], t.get("tool_name", "Skill"), t.get("skill_name")),
+            )
+
+
+def _sugg(session_id: str, slug: str, ts: str) -> dict:
+    return {"session_id": session_id, "skill_slug": slug, "ts": ts}
+
+
+def test_uptake_slash_command_channel(fresh_metrics):
+    """A later /<slug> prompt in the same session within an hour counts."""
+    _seed_corpus_for_uptake(
+        fresh_metrics.CORPUS_DB,
+        prompts=[{"session_id": "s1", "timestamp": "2026-05-20T12:30:00.000Z",
+                  "text": "let's run /portless-dev-server now"}],
+        tool_calls=[],
+    )
+    n = fresh_metrics._count_uptake([_sugg("s1", "portless-dev-server", "2026-05-20T12:00:00")])
+    assert n == 1
+
+
+def test_uptake_autofire_channel(fresh_metrics):
+    """A Skill tool call (auto-fire, no slash command) counts as uptake."""
+    _seed_corpus_for_uptake(
+        fresh_metrics.CORPUS_DB,
+        prompts=[],
+        tool_calls=[{"session_id": "s1", "timestamp": "2026-05-20T12:30:00.000Z",
+                     "skill_name": "portless-dev-server"}],
+    )
+    n = fresh_metrics._count_uptake([_sugg("s1", "portless-dev-server", "2026-05-20T12:00:00")])
+    assert n == 1
+
+
+def test_uptake_autofire_namespace_stripped(fresh_metrics):
+    """`watchmen:brief` auto-fire matches a `brief` suggestion."""
+    _seed_corpus_for_uptake(
+        fresh_metrics.CORPUS_DB,
+        prompts=[],
+        tool_calls=[{"session_id": "s1", "timestamp": "2026-05-20T12:10:00.000Z",
+                     "skill_name": "watchmen:brief"}],
+    )
+    n = fresh_metrics._count_uptake([_sugg("s1", "brief", "2026-05-20T12:00:00")])
+    assert n == 1
+
+
+def test_uptake_autofire_outside_window_not_counted(fresh_metrics):
+    """A Skill call more than an hour after the suggestion doesn't count."""
+    _seed_corpus_for_uptake(
+        fresh_metrics.CORPUS_DB,
+        prompts=[],
+        tool_calls=[{"session_id": "s1", "timestamp": "2026-05-20T13:30:00.000Z",
+                     "skill_name": "portless-dev-server"}],
+    )
+    n = fresh_metrics._count_uptake([_sugg("s1", "portless-dev-server", "2026-05-20T12:00:00")])
+    assert n == 0
+
+
+def test_uptake_autofire_before_suggestion_not_counted(fresh_metrics):
+    """A Skill call before the suggestion timestamp doesn't count."""
+    _seed_corpus_for_uptake(
+        fresh_metrics.CORPUS_DB,
+        prompts=[],
+        tool_calls=[{"session_id": "s1", "timestamp": "2026-05-20T11:30:00.000Z",
+                     "skill_name": "portless-dev-server"}],
+    )
+    n = fresh_metrics._count_uptake([_sugg("s1", "portless-dev-server", "2026-05-20T12:00:00")])
+    assert n == 0
+
+
+def test_uptake_no_matching_channel_not_counted(fresh_metrics):
+    """Neither a /<slug> prompt nor a matching Skill call → not taken."""
+    _seed_corpus_for_uptake(
+        fresh_metrics.CORPUS_DB,
+        prompts=[{"session_id": "s1", "timestamp": "2026-05-20T12:30:00.000Z",
+                  "text": "unrelated prompt"}],
+        tool_calls=[{"session_id": "s1", "timestamp": "2026-05-20T12:30:00.000Z",
+                     "skill_name": "some-other-skill"}],
+    )
+    n = fresh_metrics._count_uptake([_sugg("s1", "portless-dev-server", "2026-05-20T12:00:00")])
+    assert n == 0
+
+
+def test_uptake_both_channels_counts_suggestion_once(fresh_metrics):
+    """When both channels fire for one suggestion, it still counts once."""
+    _seed_corpus_for_uptake(
+        fresh_metrics.CORPUS_DB,
+        prompts=[{"session_id": "s1", "timestamp": "2026-05-20T12:20:00.000Z",
+                  "text": "/portless-dev-server"}],
+        tool_calls=[{"session_id": "s1", "timestamp": "2026-05-20T12:30:00.000Z",
+                     "skill_name": "portless-dev-server"}],
+    )
+    n = fresh_metrics._count_uptake([_sugg("s1", "portless-dev-server", "2026-05-20T12:00:00")])
+    assert n == 1
