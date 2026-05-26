@@ -16,14 +16,36 @@
       {% if status.blocked %}
         <span class="wm-pill wm-pill-fail" title="Slug is in the blocklist. Curator can't regenerate it until restored.">⊘ blocked</span>
       {% endif %}
+      {% if status.is_installed %}
+        <span class="wm-pill wm-pill-ok" title="Symlinked into: {{ status.installed_harnesses|join(', ') }}. The agent can load and fire this skill.">✓ installed ({{ status.installed_harnesses|join(', ') }})</span>
+      {% else %}
+        <span class="wm-pill" title="Not yet installed into any agent's skill dir, so the agent never sees it.">not installed</span>
+      {% endif %}
     </div>
     {% if provenance and provenance.description %}
     <div class="text-sm text-gray-600 mt-1">{{ provenance.description }}</div>
     {% endif %}
   </div>
 
-  <!-- Skill controls: pin/unpin + drop. POST → 303 redirect. -->
+  <!-- Skill controls: install + pin/unpin + drop. POST → 303 redirect. -->
   <div class="flex items-center gap-2 flex-shrink-0">
+    {% if status.is_installed %}
+      <form method="post" action="/p/{{ project_key }}/skills/{{ skill_slug }}/uninstall">
+        <button type="submit"
+                class="text-xs px-3 py-1.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50"
+                title="Remove the symlinks watchmen created in the agent skill dirs.">
+          Uninstall
+        </button>
+      </form>
+    {% else %}
+      <form method="post" action="/p/{{ project_key }}/skills/{{ skill_slug }}/install">
+        <button type="submit"
+                class="text-xs px-3 py-1.5 rounded-md border border-green-300 bg-white text-green-700 hover:bg-green-50"
+                title="Symlink this skill into the agent skill dirs so it can load and fire.">
+          ✓ Install
+        </button>
+      </form>
+    {% endif %}
     {% if status.pinned %}
       <form method="post" action="/p/{{ project_key }}/skills/{{ skill_slug }}/unpin">
         <button type="submit"

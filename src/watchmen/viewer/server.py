@@ -21,6 +21,7 @@ from watchmen.util import (
     write_skill_list,
 )
 from watchmen import subagents as wm_subagents
+from watchmen import skill_install as wm_install
 from watchmen.viewer import actions as wm_actions
 from watchmen.viewer import homepage as wm_homepage
 from watchmen.viewer import diagnostics as wm_diag
@@ -256,13 +257,20 @@ def get_skill_provenance(project_key: str, skill_slug: str) -> dict:
 
 
 def get_skill_status(project_key: str, skill_slug: str) -> dict:
-    """Pinned / blocked status of a skill. Drives the control buttons:
-    Pin vs Unpin label, Drop confirm prompt, restore-from-blocklist hint."""
+    """Pinned / blocked / install status of a skill. Drives the control
+    buttons: Pin vs Unpin label, Drop confirm prompt, Install vs Uninstall."""
     pinned = read_skill_list(project_key, PINNED_FILE)
     blocked = read_skill_list(project_key, BLOCKLIST_FILE)
+    installed = sorted(
+        e["harness"] for e in wm_install.installed_targets(project_key)
+        if e["slug"] == skill_slug
+    )
     return {
         "pinned": skill_slug in pinned,
         "blocked": skill_slug in blocked,
+        "installed_harnesses": installed,
+        "is_installed": bool(installed),
+        "all_harnesses": list(wm_install.HARNESS_SKILL_DIRS),
     }
 
 
@@ -448,6 +456,28 @@ def skill_restore(project_key: str, skill_slug: str):
     blocklist = read_skill_list(project_key, BLOCKLIST_FILE)
     blocklist.discard(skill_slug)
     write_skill_list(project_key, BLOCKLIST_FILE, blocklist)
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/install")
+def skill_install_action(project_key: str, skill_slug: str):
+    """Symlink this skill into every known harness discovery dir so the agent
+    can load it. Skips harnesses where a non-watchmen target already exists."""
+    _skill_or_404(project_key, skill_slug)
+    wm_install.install_project(project_key, slugs=[skill_slug])
+    return RedirectResponse(
+        url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
+    )
+
+
+@app.post("/p/{project_key}/skills/{skill_slug}/uninstall")
+def skill_uninstall_action(project_key: str, skill_slug: str):
+    """Remove watchmen-created links for this skill from all harness dirs.
+    Never touches a target watchmen didn't create."""
+    for harness in wm_install.HARNESS_SKILL_DIRS:
+        wm_install.uninstall_skill(skill_slug, harness)
     return RedirectResponse(
         url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
     )

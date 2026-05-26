@@ -796,6 +796,13 @@ def write_changelog(out_dir: Path, run_kind: str) -> None:
     except Exception as e:
         print(f"      _build_skill_index failed (non-fatal): {type(e).__name__}: {e}", flush=True)
 
+    # When the project opted in, symlink the freshly curated skills into the
+    # agent discovery dirs so they fire without a manual `watchmen install`.
+    try:
+        _maybe_auto_install(out_dir.name)
+    except Exception as e:
+        print(f"      auto-install failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+
 
 def _git_commit_artifacts(
     project_dir: Path,
@@ -1001,6 +1008,22 @@ def _publish_watchmen_state(
         (base / "projects.json").write_text(json.dumps(index, indent=2))
     except Exception:
         pass  # index refresh is best-effort; state file already written
+
+
+def _maybe_auto_install(project_key: str) -> None:
+    """Symlink curated skills into the agent discovery dirs when the project
+    has `auto_install` set. No-op otherwise. Best-effort — the caller wraps
+    this in a try/except so a broken install never fails the curator run."""
+    from watchmen import skill_install
+    from watchmen import state as _state
+
+    proj = _state.get_project(project_key)
+    if not proj or not proj.get("auto_install"):
+        return
+    results = skill_install.install_project(project_key)
+    changed = [r for r in results if r.action in ("installed", "replaced")]
+    if changed:
+        print(f"      auto-installed {len(changed)} skill link(s) into agent dirs", flush=True)
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────
