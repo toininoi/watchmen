@@ -186,6 +186,12 @@ def _parse_pricing(pricing: dict) -> Optional[ModelPricing]:
     OpenRouter returns pricing as per-token strings; store per-million prices
     so API-backed and hardcoded prices use the same convention.
     We need: input, cache_write_5m, cache_write_1h, cache_read, output.
+
+    Returns None for sentinel / unknown pricing (OpenRouter sometimes returns
+    "-1" or similar to mark a model as unpriced — e.g. internal Codex tools
+    like `codex-auto-review`). Returning None lets the caller fall through to
+    the family-pattern fallback rather than producing a nonsensical negative
+    cost like the `-7748` figure caught in route smokes.
     """
     def per_million(value: object) -> float:
         return float(str(value).replace("$", "").replace(",", "")) * 1_000_000
@@ -208,6 +214,13 @@ def _parse_pricing(pricing: dict) -> Optional[ModelPricing]:
             else cache_write_5m
         )
         cache_read = per_million(pricing["cache_read_input"]) if "cache_read_input" in pricing else prompt * 0.1
+
+        # Reject negative pricing — OpenRouter uses negative sentinels for
+        # internal / unpriced models. Letting them through propagates as
+        # negative `cost_usd` values in compare summaries and breaks the
+        # cost-vs-reference ratio used by route's decision logic.
+        if min(prompt, completion, cache_write_5m, cache_write_1h, cache_read) < 0:
+            return None
 
         return ModelPricing(prompt, cache_write_5m, cache_write_1h, cache_read, completion)
     except (ValueError, TypeError):
@@ -292,6 +305,12 @@ def _load_cache() -> Optional[PriceDatabase]:
         db.fetched_at = fetched_at
         db.source = data.get("source", "cache")
         for name, p in data.get("prices", {}).items():
+            # Skip negative-sentinel entries — older OpenRouter responses
+            # cached for "auto" / "pareto-code" / etc. used -1 to mark
+            # unpriced models, which we'd been multiplying up to -$1M /
+            # token. Filter on load so existing dirty caches self-heal.
+            if min(p["input"], p["output"], p["cache_write_5m"], p["cache_write_1h"], p["cache_read"]) < 0:
+                continue
             db.prices[name] = ModelPricing(
                 p["input"],
                 p["cache_write_5m"],
@@ -369,6 +388,12 @@ def price_for_model(model: str | None) -> tuple[float, float, float, float, floa
         return HARDCODED_PRICES["gpt-5"]
     if "gpt-4" in m or m.startswith("o3"):
         return HARDCODED_PRICES["gpt-4.1"]
+    # Codex-family OpenAI models accessible only via ChatGPT-backend
+    # (e.g. `codex-auto-review`, `gpt-5.3-codex`). OpenRouter doesn't list
+    # them so the API path returns a negative sentinel; family-pattern
+    # mapping here keeps cost math sane.
+    if "codex" in m:
+        return HARDCODED_PRICES["gpt-5"]
 
     return DEFAULT_HARDCODED
 

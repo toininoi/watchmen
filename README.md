@@ -400,6 +400,42 @@ The built-in candidate pool includes `openai/gpt-5-mini`,
 flags to add one-off models; use `--candidates none` when you want only the
 explicitly flagged models.
 
+### Iterative skill routing with watchmen-driven improvement
+
+```bash
+watchmen route exploit-agent --bucket model-repl-compliance
+watchmen route exploit-agent --bucket model-repl-compliance --no-improve     # one-shot mode
+watchmen route exploit-agent --bucket model-repl-compliance --max-iters 5
+watchmen route exploit-agent --bucket model-repl-compliance --threshold 0.85
+watchmen route exploit-agent --bucket model-repl-compliance --max-cost-usd 10
+watchmen route exploit-agent --bucket model-repl-compliance --cross-harness  # compare across harnesses
+watchmen route exploit-agent --bucket model-repl-compliance --no-rewrite     # report only, no file writes
+watchmen route exploit-agent --bucket model-repl-compliance --commit-improvements  # keep watchmen's edits even if no cheap model converged
+```
+
+`route` answers a sharper question than `compare`. Where `compare` picks the best model out of an OpenRouter pool, `route` asks: **can a cheaper model in your actual harness carry this skill, and if not, can watchmen rewrite the skill so it can?**
+
+The loop:
+
+1. **Detect.** Read `corpus.db` for the most-recent model each harness ran on this project (claude-code, codex, opencode, pi.dev). That model is the reference; cheaper same-family models are the candidates.
+2. **Compare.** Generate + judge per harness (`compare` engine, blind judge on stored skill evidence).
+3. **Improve.** If no candidate clears `reference - 0.05` (configurable via `--threshold`), watchmen reads the judge's failure rationales (ambiguous triggers, missing steps, hallucinated procedure) and revises SKILL.md to fix those specific failure modes.
+4. **Loop.** Re-sweep the (post-cull) candidate pool with the revised skill. Repeat up to `--max-iters 3`.
+5. **Commit.** When a cheap model clears the threshold, route emits the harness-specific model-bearing artifact and rewrites the skill body so the user's main agent natively delegates to the cheaper model:
+
+| harness     | artifact watchmen emits                                | dispatch syntax in SKILL.md body                                          |
+|-------------|--------------------------------------------------------|--------------------------------------------------------------------------|
+| claude-code | `<repo>/.claude/agents/<bucket>-router.md`             | Task tool with `subagent_type="<bucket>-router"`                          |
+| codex       | `~/.codex/route-<bucket>.config.toml`                  | `codex exec --profile-v2 route-<bucket>`                                  |
+| opencode    | `<repo>/.opencode/agents/<bucket>-router.md`           | `@<bucket>-router` mention                                                |
+| pi.dev      | `~/.pi/agent/agents/<bucket>.md` (with opt-in extension) — falls back to a body-only "run `pi --model X`" recommendation otherwise | extension's Task tool             |
+
+**Hard stop preserves your SKILL.md.** If no cheap model converges after `max_iters`, the improved skill is *not* committed unless you pass `--commit-improvements`. The improved version is always saved to `bundles/<project>/_route/<run_id>/SKILL.md.final` so you can read it and decide manually.
+
+Decision labels: `stay` (current model wins), `downshift` (cheaper same-family model cleared threshold), `upshift` (pricier model needed; cheap floor not reachable yet), `switch-harness` (best cleared candidate is another harness's current model — only fires with `--cross-harness`). Inherits compare's quality guards (`invalid` / `unstable` / `truncated` / `dominated`) so damaged candidates never get promoted.
+
+SKILL.md body edits live inside `<!-- watchmen-route:dispatch -->` markers so future `watchmen curate` regenerations preserve them. All file writes are audit-logged at `bundles/<project>/_route/<run_id>/skill_rewrites.jsonl`.
+
 ## vs Claude Code's `/insights`
 
 Claude Code shipped `/insights` in v2.1.117 (Apr 2026) — LLM-narrated HTML report from your transcripts. It's good. watchmen is **complementary**:
@@ -464,6 +500,7 @@ watchmen review <key>            Interactive walk: pending then approved
 watchmen distill <key>           Skill mesh + merge plan for context rot
 watchmen distill <key> --stage   Stage merged drafts in _pending/
 watchmen compare <key> --bucket <skill>    Compare models on one skill bucket
+watchmen route <key> --bucket <skill>      Pick the best model each harness can use; rewrite skill for native delegation
 
 # Services
 watchmen daemon run              Scheduling loop (foreground)

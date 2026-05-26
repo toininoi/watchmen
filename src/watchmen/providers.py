@@ -488,11 +488,23 @@ class ClaudePro(AnthropicProvider):
         """Read the OAuth token straight from Claude Code's keychain
         entry. `configured` (env var / .env) is ignored — for the
         subscription-quota provider, the user shouldn't need to paste
-        anything; the credential is wherever Claude Code put it."""
+        anything; the credential is wherever Claude Code put it.
+
+        Re-reads on every call so a refreshed keychain entry propagates
+        without a process restart. Raises `RuntimeError` when the token
+        is expired (CC refreshes proactively, but a long iterative route
+        run can cross the expiry boundary mid-loop; failing fast with a
+        clear message beats a silent 401 from `/v1/messages`).
+        """
         from watchmen.credentials import ClaudeCodeCredentials
         creds = ClaudeCodeCredentials.read()
         if creds is None:
             return None
+        if creds.is_expired():
+            raise RuntimeError(
+                "Claude Pro OAuth token expired — run `claude login` "
+                "to refresh, then retry"
+            )
         return creds.access_token
 
     def headers(self, api_key: str, *, agent_name: str = "") -> dict[str, str]:
@@ -529,6 +541,40 @@ class ClaudePro(AnthropicProvider):
             bits.append(creds.rate_limit_tier)
         meta = " · ".join(bits) if bits else "valid"
         return ProbeResult(True, f"OAuth · {meta}")
+
+    def list_available_models(self, *, timeout: float = 10.0) -> list[str]:
+        """Model ids the current OAuth credential can call. Empty on failure.
+
+        Hits Anthropic's GET /v1/models with the OAuth bearer + beta header.
+        Returns the authoritative canonical id list — used by `watchmen
+        route` so candidate discovery is grounded in what the user's
+        subscription actually exposes today, instead of guessing from
+        corpus history (which can include models the user lost access to
+        or that were renamed between catalog generations)."""
+        from watchmen.credentials import ClaudeCodeCredentials
+        import httpx
+        creds = ClaudeCodeCredentials.read()
+        if creds is None or creds.is_expired() or not creds.has_inference_scope():
+            return []
+        try:
+            r = httpx.get(
+                "https://api.anthropic.com/v1/models?limit=100",
+                headers={
+                    "Authorization": f"Bearer {creds.access_token}",
+                    "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "oauth-2025-04-20",
+                },
+                timeout=timeout,
+            )
+        except httpx.RequestError:
+            return []
+        if r.status_code != 200:
+            return []
+        try:
+            data = r.json()
+        except ValueError:
+            return []
+        return [m["id"] for m in (data.get("data") or []) if isinstance(m, dict) and m.get("id")]
 
 
 # ─── ChatGPT (OpenAI Responses API via Codex OAuth) ────────────────────────
@@ -847,6 +893,41 @@ class ChatGPT(Provider):
         if r.status_code in (401, 403):
             return ProbeResult(False, f"{r.status_code} · token expired or invalid — `codex login` to refresh")
         return ProbeResult(False, f"HTTP {r.status_code} · {r.text[:120]}")
+
+    def list_available_models(self, *, timeout: float = 10.0) -> list[str]:
+        """Codex-accessible model slugs for the current ChatGPT credential.
+
+        Hits chatgpt.com/backend-api/codex/models — same endpoint as the
+        probe, just kept as a separate accessor so route's candidate
+        discovery doesn't conflate "is the token alive" with "what can it
+        call". Empty list on any failure: route falls back to corpus +
+        user-supplied candidates so a transient backend hiccup doesn't
+        kill the run."""
+        import httpx
+        from watchmen.credentials import CodexCredentials
+        creds = CodexCredentials.read()
+        if creds is None or creds.mode != "chatgpt":
+            return []
+        try:
+            r = httpx.get(
+                f"https://chatgpt.com/backend-api/codex/models?client_version={self._VERSION}",
+                headers={
+                    "Authorization": f"Bearer {creds.access_token}",
+                    "chatgpt-account-id": creds.account_id or "",
+                    "originator": self._ORIGINATOR,
+                    "version": self._VERSION,
+                },
+                timeout=timeout,
+            )
+        except httpx.RequestError:
+            return []
+        if r.status_code != 200:
+            return []
+        try:
+            data = r.json()
+        except ValueError:
+            return []
+        return [m["slug"] for m in (data.get("models") or []) if isinstance(m, dict) and m.get("slug")]
 
 
 # ─── SSE aggregation helper ────────────────────────────────────────────────
