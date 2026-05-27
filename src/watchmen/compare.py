@@ -76,6 +76,12 @@ class CompareConfig:
     reference_n: int = 1
     candidate_n: int = 3
     provider: str = DEFAULT_PROVIDER
+    # Per-candidate provider overrides keyed by (normalized) model id. Lets a
+    # cross-harness run generate each candidate on the backend that actually
+    # serves it (e.g. a Codex model under chatgpt) instead of forcing the whole
+    # pool through the source harness's provider. Empty = every model uses
+    # ``provider``. The reference and judge always use ``provider``.
+    candidate_providers: dict[str, str] = field(default_factory=dict)
     temperature: float = 0.4
     judge_temperature: float = 0.0
     max_tokens: int = 2600
@@ -468,7 +474,7 @@ def _generate_one(
     try:
         data = _call_model_data(
             client,
-            provider=config.provider,
+            provider=config.candidate_providers.get(model, config.provider),
             model=model,
             messages=_generation_messages(evidence, task),
             agent_name="compare-generator",

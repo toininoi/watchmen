@@ -347,6 +347,55 @@ def _make_compare_result(
     )
 
 
+def test_run_route_routes_cross_harness_candidate_to_its_own_backend(tmp_path, monkeypatch):
+    """In a cross-harness run, the injected foreign model must be tagged with
+    the backend that serves it (codex's gpt-5.5 -> chatgpt), not the source
+    harness's provider. Own candidates carry no override (they use the run's
+    provider)."""
+    from watchmen import route as wm_route
+    from watchmen.route import HarnessReference, RouteConfig, run_route
+
+    _setup_project(tmp_path, monkeypatch, "p", str(tmp_path / "repo"))
+
+    refs = [
+        HarnessReference("claude_code", "anthropic/claude-opus-4-7",
+                         _now_iso(0), 10),
+        HarnessReference("codex", "openai/gpt-5.5", _now_iso(0), 5),
+    ]
+    monkeypatch.setattr(wm_route, "detect_harnesses", lambda *a, **k: refs)
+    monkeypatch.setattr(wm_route, "load_skill_bucket_evidence", lambda *a, **k: None)
+    # Own pools: one same-family candidate each, no foreign ids.
+    own = {
+        "claude_code": ["claude-sonnet-4-6"],
+        "codex": ["gpt-5.4-mini"],
+    }
+    monkeypatch.setattr(
+        wm_route, "candidates_for_harness",
+        lambda harness, current, **k: list(own[harness]),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run_compare(cfg, *, run_id, progress=None):
+        captured[cfg.provider] = cfg
+        return _make_compare_result(cfg.reference_model, 0.8, candidates=[])
+
+    monkeypatch.setattr(wm_route, "run_compare", fake_run_compare)
+
+    run_route(RouteConfig(project_key="p", bucket="b", cross_harness=True))
+
+    cc_cfg = captured["claude-pro"]
+    # gpt-5.5 (codex's model) injected into CC's pool, tagged to chatgpt;
+    # the bare form is what compare will run, so that's the map key.
+    assert cc_cfg.candidate_providers == {"gpt-5.5": "chatgpt"}
+    assert "gpt-5.5" in cc_cfg.candidates
+    assert "claude-sonnet-4-6" in cc_cfg.candidates
+
+    codex_cfg = captured["chatgpt"]
+    # claude-opus injected into codex's pool, tagged to claude-pro.
+    assert codex_cfg.candidate_providers == {"claude-opus-4-7": "claude-pro"}
+
+
 def test_classify_downshift_when_winner_is_cheaper_and_better():
     from watchmen.route import HarnessReference, classify_route
 
@@ -450,15 +499,53 @@ def test_classify_switch_harness_when_other_harness_model_wins():
     assert d.recommended_model == "openai/gpt-5.5"
 
 
+def test_classify_switch_harness_matches_across_namespace_forms():
+    """Real runs hit a form mismatch: references are namespaced
+    (openai/gpt-5.5) but compare returns the winner bare (gpt-5.5) after
+    per-provider normalization. switch-harness must still fire, and name the
+    harness that runs it, or the whole cross-harness path is dead."""
+    from watchmen.route import HarnessReference, classify_route
+
+    ref_cc = HarnessReference(
+        harness="claude_code", current_model="anthropic/claude-opus-4-7",
+        last_session_ts=_now_iso(0), session_count_window=10,
+    )
+    ref_codex = HarnessReference(
+        harness="codex", current_model="openai/gpt-5.5",   # namespaced
+        last_session_ts=_now_iso(0), session_count_window=5,
+    )
+    result = _make_compare_result(
+        "anthropic/claude-opus-4-7", ref_score=0.82,
+        candidates=[
+            {"model": "gpt-5.5", "avg": 0.93, "cost_ratio": 0.50},  # bare winner
+        ],
+    )
+    d = classify_route(ref_cc, result, [ref_cc, ref_codex])
+    assert d.label == "switch-harness"
+    assert d.recommended_model == "gpt-5.5"
+    assert d.recommended_harness == "codex"
+
+
+def test_same_model_id_ignores_namespace():
+    from watchmen.route import _same_model_id
+
+    assert _same_model_id("openai/gpt-5.5", "gpt-5.5")
+    assert _same_model_id("gpt-5.5", "openai/gpt-5.5")
+    assert _same_model_id("anthropic/claude-opus-4-7", "anthropic/claude-opus-4-7")
+    assert not _same_model_id("openai/gpt-5.5", "openai/gpt-5-mini")
+    assert not _same_model_id("", "gpt-5.5")
+
+
 # ─── Rewriters ───────────────────────────────────────────────────────
 
 
-def _decision(harness: str, current: str, recommended: str, label="downshift", cost=0.5):
+def _decision(harness: str, current: str, recommended: str, label="downshift",
+              cost=0.5, recommended_harness=None):
     from watchmen.route import RouteDecision
     return RouteDecision(
         harness=harness, current_model=current, recommended_model=recommended,
         label=label, note="winner cheaper at ratio", avg_score=0.92,
-        cost_vs_current=cost,
+        cost_vs_current=cost, recommended_harness=recommended_harness,
     )
 
 
@@ -571,6 +658,76 @@ def test_rewrite_pi_falls_back_to_body_when_extension_missing(tmp_path, monkeypa
     # But SKILL.md still gets the dispatch sentence
     skill_md = (tmp_path / "bundles" / "p" / "skills" / "demo-skill" / "SKILL.md").read_text()
     assert "pi --model anthropic/claude-haiku-4-5" in skill_md
+
+
+def test_switch_harness_advises_instead_of_writing_unrunnable_file(tmp_path, monkeypatch):
+    """A switch-harness winner is another runtime's model. Claude Code can't
+    run it, so we must NOT write a router pinned to it — we advise running the
+    skill on the harness that can, and the SKILL.md must not claim CC runs it."""
+    from watchmen.route_rewrite import apply_route_rewrites
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _setup_project(tmp_path, monkeypatch, "p", str(repo))
+
+    skill_dir = tmp_path / "bundles" / "p" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\n---\nbody\n", encoding="utf-8",
+    )
+    result = _route_result(tmp_path, "demo-skill", [
+        _decision("claude_code", "anthropic/claude-opus-4-7",
+                  "openai/gpt-5-codex", label="switch-harness",
+                  recommended_harness="codex"),
+    ])
+    outcomes = apply_route_rewrites(result, repo_root=str(repo))
+
+    # No claude-code router file written for a model CC can't run.
+    router = repo / ".claude" / "agents" / "demo-skill-router.md"
+    assert not router.exists()
+
+    by_kind = {(o.harness, o.artifact_kind): o for o in outcomes}
+    assert by_kind[("claude_code", "advisory")].action == "skipped"
+    assert "not runnable" in by_kind[("claude_code", "advisory")].reason
+
+    skill_md = (skill_dir / "SKILL.md").read_text()
+    assert "run it on Codex" in skill_md
+    assert "openai/gpt-5-codex" in skill_md       # named in the advisory
+    # ...but never as a recommended model CC would adopt.
+    assert "Recommended model:" not in skill_md
+
+
+def test_foreign_candidate_winner_is_advised_not_emitted(tmp_path, monkeypatch):
+    """A user-injected --candidate from another provider can win as a
+    downshift (it's never labeled switch-harness because no current harness
+    runs it). The provider_supports_model clause must still catch it so we
+    don't stamp a GPT model into Claude Code's subagent file."""
+    from watchmen.route_rewrite import apply_route_rewrites
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _setup_project(tmp_path, monkeypatch, "p", str(repo))
+
+    skill_dir = tmp_path / "bundles" / "p" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\n---\nbody\n", encoding="utf-8",
+    )
+    result = _route_result(tmp_path, "demo-skill", [
+        _decision("claude_code", "anthropic/claude-opus-4-7",
+                  "openai/gpt-5-mini", label="downshift"),
+    ])
+    outcomes = apply_route_rewrites(result, repo_root=str(repo))
+
+    router = repo / ".claude" / "agents" / "demo-skill-router.md"
+    assert not router.exists()
+
+    by_kind = {(o.harness, o.artifact_kind): o for o in outcomes}
+    assert by_kind[("claude_code", "advisory")].action == "skipped"
+
+    skill_md = (skill_dir / "SKILL.md").read_text()
+    assert "isn't run by any current harness" in skill_md
+    assert "Recommended model:" not in skill_md
 
 
 def test_rewrite_skill_body_is_idempotent(tmp_path, monkeypatch):

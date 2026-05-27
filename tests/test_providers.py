@@ -644,10 +644,10 @@ def test_reset_rejects_untracked_project(monkeypatch, tmp_path, capsys):
     assert "not tracked" in capsys.readouterr().out
 
 
-def test_chat_call_extra_payload_overrides_get_merged(monkeypatch):
-    """Caller-supplied kwargs (temperature, max_tokens) flow into the request
-    body for both shapes — insights.py relies on this to pin temperature=0.3
-    regardless of provider."""
+def test_chat_call_drops_temperature_passes_other_kwargs(monkeypatch):
+    """`temperature` is dropped for every provider (newer Anthropic/OpenAI
+    models reject it with a 400), while other caller kwargs like max_tokens
+    still flow into the request body."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     monkeypatch.setenv("WATCHMEN_PROVIDER", "openrouter")
     client = MagicMock()
@@ -665,7 +665,7 @@ def test_chat_call_extra_payload_overrides_get_merged(monkeypatch):
     )
     _, kwargs = client.post.call_args
     body = kwargs["json"]
-    assert body["temperature"] == 0.3
+    assert "temperature" not in body
     assert body["max_tokens"] == 500
 
 
@@ -718,3 +718,16 @@ def test_default_apply_extra_payload_skips_none_values():
     body = prov.apply_extra_payload(body, {"temperature": None, "max_tokens": 100})
     assert "temperature" not in body
     assert body["max_tokens"] == 100
+
+
+def test_apply_extra_payload_drops_temperature_for_all_providers():
+    """Every provider drops `temperature` (newer Anthropic/OpenAI models
+    reject it with a 400) while keeping the other kwargs."""
+    for name in ("openrouter", "openai", "anthropic", "claude-pro"):
+        prov = providers.get_provider(name)
+        body = prov.apply_extra_payload(
+            {"model": "m", "messages": []},
+            {"temperature": 0.0, "max_tokens": 100},
+        )
+        assert "temperature" not in body, name
+        assert body["max_tokens"] == 100, name
