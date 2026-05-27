@@ -214,6 +214,10 @@ class RouteDecision:
     avg_score: float
     cost_vs_current: float | None
     summary: ModelSummary | None = None  # the winning candidate's compare row
+    # For switch-harness: the harness that already runs the winning model.
+    # The source harness can't execute it natively, so the rewriter advises
+    # running the skill there instead of emitting an unrunnable artifact.
+    recommended_harness: str | None = None
 
 
 @dataclass
@@ -850,6 +854,7 @@ def classify_route(
             avg_score=winner.avg_score,
             cost_vs_current=winner.cost_vs_reference,
             summary=winner,
+            recommended_harness=cross.harness,
         )
 
     cost_ratio = winner.cost_vs_reference

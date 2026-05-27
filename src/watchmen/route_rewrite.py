@@ -41,7 +41,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from watchmen.route import RouteDecision, RouteResult
+from watchmen.route import (
+    RouteDecision,
+    RouteResult,
+    native_provider_for_harness,
+    provider_supports_model,
+)
 from watchmen.state import get_project
 from watchmen.util import bundle_dir
 
@@ -103,9 +108,47 @@ def apply_route_rewrites(
 
     outcomes: list[RewriteOutcome] = []
     dispatch_sentences: dict[str, str] = {}
+    advisory_harnesses: set[str] = set()
 
     for decision in actionable:
         harness = decision.harness
+
+        # Never stamp a model into a harness artifact unless that harness's
+        # provider can actually run it. Two clauses, each covering a hole the
+        # other misses — keep BOTH:
+        #  - label == "switch-harness": the winner is another harness's current
+        #    model. Catches multi-provider harnesses (opencode/pi) where
+        #    provider_supports_model defaults to True and would otherwise let a
+        #    foreign model through.
+        #  - not provider_supports_model(...): catches a foreign --candidate the
+        #    user injected that wins as downshift/upshift (so it's never labeled
+        #    switch-harness) but still isn't runnable by a single-provider source.
+        # The union over-skips only a rare same-family coincidence, which the
+        # advisory line still surfaces — an accepted trade.
+        native = native_provider_for_harness(harness)
+        cross_runtime = (
+            decision.label == "switch-harness"
+            or not provider_supports_model(decision.recommended_model, native)
+        )
+        if cross_runtime:
+            advisory_harnesses.add(harness)
+            dispatch_sentences[harness] = _advisory_sentence(
+                decision, bucket=result.config.bucket
+            )
+            outcomes.append(
+                RewriteOutcome(
+                    harness=harness,
+                    artifact_kind="advisory",
+                    path="",
+                    action="skipped",
+                    reason=(
+                        f"cross-runtime winner {decision.recommended_model!r} "
+                        f"not runnable by {harness}; advised instead"
+                    ),
+                )
+            )
+            continue
+
         emitter = _HARNESS_EMITTERS.get(harness)
         if emitter is None:
             outcomes.append(
@@ -134,6 +177,7 @@ def apply_route_rewrites(
             skill_md_path=skill_md_path,
             dispatch_sentences=dispatch_sentences,
             decisions={d.harness: d for d in actionable},
+            advisory_harnesses=advisory_harnesses,
             run_id=result.run_id,
             dry_run=dry_run,
         )
@@ -141,6 +185,27 @@ def apply_route_rewrites(
 
     _audit_log(Path(result.run_dir) / "skill_rewrites.jsonl", outcomes)
     return outcomes
+
+
+def _advisory_sentence(decision: RouteDecision, *, bucket: str) -> str:
+    """Human-facing line for a cross-runtime winner we won't emit a file for.
+
+    Two sub-cases: a switch-harness winner is already run by a known harness
+    (point the user there); a non-runnable --candidate winner is run by no
+    current harness (state that no route was emitted).
+    """
+    source = _harness_display_name(decision.harness)
+    if decision.recommended_harness:
+        target = _harness_display_name(decision.recommended_harness)
+        return (
+            f"For the `{bucket}` skill, run it on {target} — {source} can't run "
+            f"`{decision.recommended_model}` natively."
+        )
+    return (
+        f"For the `{bucket}` skill, the winning model "
+        f"`{decision.recommended_model}` isn't runnable by {source} and isn't "
+        "run by any current harness — no route emitted."
+    )
 
 
 # ─── claude-code ─────────────────────────────────────────────────────
@@ -373,6 +438,7 @@ def _rewrite_skill_body(
     skill_md_path: Path,
     dispatch_sentences: dict[str, str],
     decisions: dict[str, RouteDecision],
+    advisory_harnesses: set[str],
     run_id: str,
     dry_run: bool,
 ) -> RewriteOutcome:
@@ -388,6 +454,7 @@ def _rewrite_skill_body(
     block = _build_dispatch_block(
         dispatch_sentences=dispatch_sentences,
         decisions=decisions,
+        advisory_harnesses=advisory_harnesses,
         run_id=run_id,
     )
     if DISPATCH_MARKER_START in existing and DISPATCH_MARKER_END in existing:
@@ -421,6 +488,7 @@ def _build_dispatch_block(
     *,
     dispatch_sentences: dict[str, str],
     decisions: dict[str, RouteDecision],
+    advisory_harnesses: set[str],
     run_id: str,
 ) -> str:
     lines = [
@@ -438,17 +506,20 @@ def _build_dispatch_block(
         lines.append(f"### {_harness_display_name(harness)}")
         lines.append("")
         lines.append(sentence)
-        if decision.cost_vs_current is not None:
-            lines.append(
-                f"_Recommended model: `{decision.recommended_model}` "
-                f"({decision.label}, {decision.cost_vs_current:.2f}× cost vs "
-                f"`{decision.current_model}`)._"
-            )
-        else:
-            lines.append(
-                f"_Recommended model: `{decision.recommended_model}` "
-                f"({decision.label})._"
-            )
+        # Advisory harnesses can't run the winner, so don't print a
+        # "Recommended model: <foreign>" line that implies they will.
+        if harness not in advisory_harnesses:
+            if decision.cost_vs_current is not None:
+                lines.append(
+                    f"_Recommended model: `{decision.recommended_model}` "
+                    f"({decision.label}, {decision.cost_vs_current:.2f}× cost vs "
+                    f"`{decision.current_model}`)._"
+                )
+            else:
+                lines.append(
+                    f"_Recommended model: `{decision.recommended_model}` "
+                    f"({decision.label})._"
+                )
         lines.append("")
     lines.append(DISPATCH_MARKER_END)
     return "\n".join(lines)

@@ -453,12 +453,13 @@ def test_classify_switch_harness_when_other_harness_model_wins():
 # ─── Rewriters ───────────────────────────────────────────────────────
 
 
-def _decision(harness: str, current: str, recommended: str, label="downshift", cost=0.5):
+def _decision(harness: str, current: str, recommended: str, label="downshift",
+              cost=0.5, recommended_harness=None):
     from watchmen.route import RouteDecision
     return RouteDecision(
         harness=harness, current_model=current, recommended_model=recommended,
         label=label, note="winner cheaper at ratio", avg_score=0.92,
-        cost_vs_current=cost,
+        cost_vs_current=cost, recommended_harness=recommended_harness,
     )
 
 
@@ -571,6 +572,76 @@ def test_rewrite_pi_falls_back_to_body_when_extension_missing(tmp_path, monkeypa
     # But SKILL.md still gets the dispatch sentence
     skill_md = (tmp_path / "bundles" / "p" / "skills" / "demo-skill" / "SKILL.md").read_text()
     assert "pi --model anthropic/claude-haiku-4-5" in skill_md
+
+
+def test_switch_harness_advises_instead_of_writing_unrunnable_file(tmp_path, monkeypatch):
+    """A switch-harness winner is another runtime's model. Claude Code can't
+    run it, so we must NOT write a router pinned to it — we advise running the
+    skill on the harness that can, and the SKILL.md must not claim CC runs it."""
+    from watchmen.route_rewrite import apply_route_rewrites
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _setup_project(tmp_path, monkeypatch, "p", str(repo))
+
+    skill_dir = tmp_path / "bundles" / "p" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\n---\nbody\n", encoding="utf-8",
+    )
+    result = _route_result(tmp_path, "demo-skill", [
+        _decision("claude_code", "anthropic/claude-opus-4-7",
+                  "openai/gpt-5-codex", label="switch-harness",
+                  recommended_harness="codex"),
+    ])
+    outcomes = apply_route_rewrites(result, repo_root=str(repo))
+
+    # No claude-code router file written for a model CC can't run.
+    router = repo / ".claude" / "agents" / "demo-skill-router.md"
+    assert not router.exists()
+
+    by_kind = {(o.harness, o.artifact_kind): o for o in outcomes}
+    assert by_kind[("claude_code", "advisory")].action == "skipped"
+    assert "not runnable" in by_kind[("claude_code", "advisory")].reason
+
+    skill_md = (skill_dir / "SKILL.md").read_text()
+    assert "run it on Codex" in skill_md
+    assert "openai/gpt-5-codex" in skill_md       # named in the advisory
+    # ...but never as a recommended model CC would adopt.
+    assert "Recommended model:" not in skill_md
+
+
+def test_foreign_candidate_winner_is_advised_not_emitted(tmp_path, monkeypatch):
+    """A user-injected --candidate from another provider can win as a
+    downshift (it's never labeled switch-harness because no current harness
+    runs it). The provider_supports_model clause must still catch it so we
+    don't stamp a GPT model into Claude Code's subagent file."""
+    from watchmen.route_rewrite import apply_route_rewrites
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _setup_project(tmp_path, monkeypatch, "p", str(repo))
+
+    skill_dir = tmp_path / "bundles" / "p" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\n---\nbody\n", encoding="utf-8",
+    )
+    result = _route_result(tmp_path, "demo-skill", [
+        _decision("claude_code", "anthropic/claude-opus-4-7",
+                  "openai/gpt-5-mini", label="downshift"),
+    ])
+    outcomes = apply_route_rewrites(result, repo_root=str(repo))
+
+    router = repo / ".claude" / "agents" / "demo-skill-router.md"
+    assert not router.exists()
+
+    by_kind = {(o.harness, o.artifact_kind): o for o in outcomes}
+    assert by_kind[("claude_code", "advisory")].action == "skipped"
+
+    skill_md = (skill_dir / "SKILL.md").read_text()
+    assert "isn't run by any current harness" in skill_md
+    assert "Recommended model:" not in skill_md
 
 
 def test_rewrite_skill_body_is_idempotent(tmp_path, monkeypatch):
