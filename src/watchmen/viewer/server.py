@@ -483,6 +483,19 @@ def skill_uninstall_action(project_key: str, skill_slug: str):
     )
 
 
+@app.post("/p/{project_key}/auto-install/toggle")
+def project_auto_install_toggle(project_key: str):
+    """Flip the project's `auto_install` flag. When on, a successful curator
+    run symlinks the project's skills into the agent dirs automatically."""
+    from watchmen import state as _state
+    proj = _state.get_project(project_key)
+    if not proj:
+        raise HTTPException(404, f"project {project_key} not tracked")
+    current = bool(proj.get("auto_install") or 0)
+    _state.update_project(project_key, auto_install=0 if current else 1)
+    return RedirectResponse(url=f"/p/{project_key}", status_code=303)
+
+
 # ─── Prune review queue ─────────────────────────────────────────────────────
 # Renders the LLM-judge output written by `watchmen prune <project>`. Each
 # flagged skill has Approve (delete) / Dismiss (keep) buttons. Dismissals

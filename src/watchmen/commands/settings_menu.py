@@ -501,6 +501,7 @@ def _project_page(console: Console, breadcrumb: list[str], project_key: str) -> 
         thr = p["threshold_new_prompts"]
         approval = bool(p.get("approval_required") or 0)
         skip_overlap = bool(p.get("skip_overlapping_skills") or 0)
+        auto_install = bool(p.get("auto_install") or 0)
         notes = (p.get("notes") or "").strip()
 
         choices = [
@@ -508,6 +509,7 @@ def _project_page(console: Console, breadcrumb: list[str], project_key: str) -> 
             questionary.Choice(f"Threshold (new prompts)  · {thr}",                              value="threshold"),
             questionary.Choice(f"Approval required        · {'yes' if approval else 'no'}",     value="approval"),
             questionary.Choice(f"Skip overlapping skills  · {'yes' if skip_overlap else 'no'}", value="skip_overlap"),
+            questionary.Choice(f"Auto-install skills      · {'yes' if auto_install else 'no'}", value="auto_install"),
             questionary.Choice(f"Notes                    · {notes or '(empty)'}",               value="notes"),
             questionary.Separator(),
             questionary.Choice("Back", value=_BACK),
@@ -530,6 +532,9 @@ def _project_page(console: Console, breadcrumb: list[str], project_key: str) -> 
         elif choice == "skip_overlap":
             state.update_project(project_key, skip_overlapping_skills=0 if skip_overlap else 1)
             console.print(f"[green]✓[/] skip_overlapping_skills → {'no' if skip_overlap else 'yes'}")
+        elif choice == "auto_install":
+            state.update_project(project_key, auto_install=0 if auto_install else 1)
+            console.print(f"[green]✓[/] auto_install → {'no' if auto_install else 'yes'}")
         elif choice == "threshold":
             new_thr = questionary.text(
                 "New threshold (≥1):",
