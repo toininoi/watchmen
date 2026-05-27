@@ -347,6 +347,55 @@ def _make_compare_result(
     )
 
 
+def test_run_route_routes_cross_harness_candidate_to_its_own_backend(tmp_path, monkeypatch):
+    """In a cross-harness run, the injected foreign model must be tagged with
+    the backend that serves it (codex's gpt-5.5 -> chatgpt), not the source
+    harness's provider. Own candidates carry no override (they use the run's
+    provider)."""
+    from watchmen import route as wm_route
+    from watchmen.route import HarnessReference, RouteConfig, run_route
+
+    _setup_project(tmp_path, monkeypatch, "p", str(tmp_path / "repo"))
+
+    refs = [
+        HarnessReference("claude_code", "anthropic/claude-opus-4-7",
+                         _now_iso(0), 10),
+        HarnessReference("codex", "openai/gpt-5.5", _now_iso(0), 5),
+    ]
+    monkeypatch.setattr(wm_route, "detect_harnesses", lambda *a, **k: refs)
+    monkeypatch.setattr(wm_route, "load_skill_bucket_evidence", lambda *a, **k: None)
+    # Own pools: one same-family candidate each, no foreign ids.
+    own = {
+        "claude_code": ["claude-sonnet-4-6"],
+        "codex": ["gpt-5.4-mini"],
+    }
+    monkeypatch.setattr(
+        wm_route, "candidates_for_harness",
+        lambda harness, current, **k: list(own[harness]),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run_compare(cfg, *, run_id, progress=None):
+        captured[cfg.provider] = cfg
+        return _make_compare_result(cfg.reference_model, 0.8, candidates=[])
+
+    monkeypatch.setattr(wm_route, "run_compare", fake_run_compare)
+
+    run_route(RouteConfig(project_key="p", bucket="b", cross_harness=True))
+
+    cc_cfg = captured["claude-pro"]
+    # gpt-5.5 (codex's model) injected into CC's pool, tagged to chatgpt;
+    # the bare form is what compare will run, so that's the map key.
+    assert cc_cfg.candidate_providers == {"gpt-5.5": "chatgpt"}
+    assert "gpt-5.5" in cc_cfg.candidates
+    assert "claude-sonnet-4-6" in cc_cfg.candidates
+
+    codex_cfg = captured["chatgpt"]
+    # claude-opus injected into codex's pool, tagged to claude-pro.
+    assert codex_cfg.candidate_providers == {"claude-opus-4-7": "claude-pro"}
+
+
 def test_classify_downshift_when_winner_is_cheaper_and_better():
     from watchmen.route import HarnessReference, classify_route
 
@@ -448,6 +497,43 @@ def test_classify_switch_harness_when_other_harness_model_wins():
     d = classify_route(ref_cc, result, [ref_cc, ref_codex])
     assert d.label == "switch-harness"
     assert d.recommended_model == "openai/gpt-5.5"
+
+
+def test_classify_switch_harness_matches_across_namespace_forms():
+    """Real runs hit a form mismatch: references are namespaced
+    (openai/gpt-5.5) but compare returns the winner bare (gpt-5.5) after
+    per-provider normalization. switch-harness must still fire, and name the
+    harness that runs it, or the whole cross-harness path is dead."""
+    from watchmen.route import HarnessReference, classify_route
+
+    ref_cc = HarnessReference(
+        harness="claude_code", current_model="anthropic/claude-opus-4-7",
+        last_session_ts=_now_iso(0), session_count_window=10,
+    )
+    ref_codex = HarnessReference(
+        harness="codex", current_model="openai/gpt-5.5",   # namespaced
+        last_session_ts=_now_iso(0), session_count_window=5,
+    )
+    result = _make_compare_result(
+        "anthropic/claude-opus-4-7", ref_score=0.82,
+        candidates=[
+            {"model": "gpt-5.5", "avg": 0.93, "cost_ratio": 0.50},  # bare winner
+        ],
+    )
+    d = classify_route(ref_cc, result, [ref_cc, ref_codex])
+    assert d.label == "switch-harness"
+    assert d.recommended_model == "gpt-5.5"
+    assert d.recommended_harness == "codex"
+
+
+def test_same_model_id_ignores_namespace():
+    from watchmen.route import _same_model_id
+
+    assert _same_model_id("openai/gpt-5.5", "gpt-5.5")
+    assert _same_model_id("gpt-5.5", "openai/gpt-5.5")
+    assert _same_model_id("anthropic/claude-opus-4-7", "anthropic/claude-opus-4-7")
+    assert not _same_model_id("openai/gpt-5.5", "openai/gpt-5-mini")
+    assert not _same_model_id("", "gpt-5.5")
 
 
 # ─── Rewriters ───────────────────────────────────────────────────────

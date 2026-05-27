@@ -331,6 +331,18 @@ def _normalize_model_id(model_id: str, *, harness: str | None = None) -> str:
     return f"{family}/{model_id}"
 
 
+def _same_model_id(a: str, b: str) -> bool:
+    """Whether two model ids name the same model regardless of namespace.
+
+    References carry namespaced ids (``openai/gpt-5.5``) while compare returns
+    the winning candidate bare (``gpt-5.5``). Compare on the bare, lowercased
+    tail so cross-harness matching survives the form mismatch.
+    """
+    def bare(m: str) -> str:
+        return (m.split("/", 1)[1] if "/" in m else m).strip().lower()
+    return bool(a) and bool(b) and bare(a) == bare(b)
+
+
 def _canonicalize_corpus_model_id(model_id: str) -> str | None:
     """Coerce a corpus-stored model id into the form `/v1/models` accepts.
 
@@ -622,28 +634,46 @@ def run_route(config: RouteConfig, *, progress=None) -> RouteResult:
 
     compare_results: dict[str, CompareResult] = {}
     for ref in references:
-        candidates = candidates_for_harness(
+        harness_provider = native_provider_for_harness(ref.harness)
+
+        own = candidates_for_harness(
             ref.harness, ref.current_model,
             project_key=config.project_key,
             user_candidates=config.user_candidates,
             since_days=config.since_days * 3,  # widen for candidate discovery
         )
+        # (model, provider) pairs. Own candidates run on the harness's native
+        # backend; cross-harness injections run on the backend that actually
+        # serves them, so a foreign model generates for real instead of
+        # erroring under a provider that can't run it.
+        candidate_pairs: list[tuple[str, str]] = [(c, harness_provider) for c in own]
         if config.cross_harness:
-            # Add other harnesses' current models to this harness's pool.
-            # Marked separately by the rewriter so we can label the
-            # `switch-harness` decision.
             for other in references:
                 if other.harness == ref.harness:
                     continue
-                if other.current_model not in candidates and other.current_model != ref.current_model:
-                    candidates.append(other.current_model)
+                if other.current_model == ref.current_model:
+                    continue
+                if any(other.current_model == m for m, _ in candidate_pairs):
+                    continue
+                candidate_pairs.append(
+                    (other.current_model, native_provider_for_harness(other.harness))
+                )
 
-        if not candidates:
+        if not candidate_pairs:
             if progress:
                 progress(f"{ref.harness}: no candidate pool; skipping")
             continue
 
-        harness_provider = native_provider_for_harness(ref.harness)
+        # Normalize each id for the provider that will run it, and record any
+        # non-native backend so the compare engine routes that candidate there.
+        norm_candidates: list[str] = []
+        candidate_providers: dict[str, str] = {}
+        for model, prov in candidate_pairs:
+            norm = model_id_for_provider(model, prov)
+            norm_candidates.append(norm)
+            if prov != harness_provider:
+                candidate_providers[norm] = prov
+
         cmp_cfg = CompareConfig(
             project_key=config.project_key,
             bucket=config.bucket,
@@ -655,13 +685,12 @@ def run_route(config: RouteConfig, *, progress=None) -> RouteResult:
                 reference_model=ref.current_model,
                 override=config.judge_model,
             ),
-            candidates=[
-                model_id_for_provider(c, harness_provider) for c in candidates
-            ],
+            candidates=norm_candidates,
             task_count=config.task_count,
             reference_n=1,
             candidate_n=config.candidate_n,
             provider=harness_provider,
+            candidate_providers=candidate_providers,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             generation_concurrency=config.generation_concurrency,
@@ -669,7 +698,7 @@ def run_route(config: RouteConfig, *, progress=None) -> RouteResult:
         if progress:
             progress(
                 f"{ref.harness}: ref={ref.current_model} vs "
-                f"{len(candidates)} candidate(s)"
+                f"{len(norm_candidates)} candidate(s)"
             )
         # Nest the per-harness compare run under our own dir so the
         # JSONL/MD artifacts stay co-located with the route result.
@@ -833,11 +862,14 @@ def classify_route(
         )
 
     # cross-harness winner?  Match against the other harnesses' current
-    # models.
+    # models.  Compare on bare form: references store namespaced ids
+    # (``openai/gpt-5.5``) while the winning candidate comes back from compare
+    # bare (``gpt-5.5``) after per-provider normalization, so a raw ==
+    # would never match and switch-harness could never fire.
     cross = next(
         (
             r for r in all_references
-            if r.harness != ref.harness and r.current_model == winner.model
+            if r.harness != ref.harness and _same_model_id(r.current_model, winner.model)
         ),
         None,
     )

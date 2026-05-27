@@ -380,3 +380,43 @@ def test_compare_candidate_parser_auto_and_csv():
     assert _parse_candidates("a,b, c ") == ["a", "b", "c"]
     assert _parse_candidates("a,b", ["b", "d"]) == ["a", "b", "d"]
     assert _parse_candidates("none", ["custom/model"]) == ["custom/model"]
+
+
+def test_generate_one_routes_candidate_to_its_own_provider(monkeypatch):
+    """A candidate listed in candidate_providers generates on that backend;
+    the reference (not in the map) falls back to the run's provider. This is
+    what lets a cross-harness run execute a foreign model for real instead of
+    forcing it through a provider that can't serve it."""
+    from watchmen import compare
+
+    evidence = compare.SkillBucketEvidence(
+        project_key="demo", bucket="demo-skill",
+        skill_md="---\nname: demo\n---\n# Demo", candidate=None,
+        workspace_brief="brief", curation_log="log",
+    )
+    task = compare.CompareTask("task-1", "Gen", "Make a SKILL.md")
+    seen: dict[str, str] = {}
+
+    def fake_call_model_data(client, *, provider, model, **kwargs):
+        seen[model] = provider
+        return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {}}
+
+    monkeypatch.setattr(compare, "_call_model_data", fake_call_model_data)
+    cfg = compare.CompareConfig(
+        project_key="demo", bucket="demo-skill",
+        reference_model="anthropic/claude-opus-4-7",
+        candidates=["gpt-5.5"],
+        provider="claude-pro",
+        candidate_providers={"gpt-5.5": "chatgpt"},
+    )
+
+    compare._generate_one(None, cfg, evidence, task, run_id="r",
+                          model="gpt-5.5", role="candidate",
+                          sample_index=1, output_index=1)
+    compare._generate_one(None, cfg, evidence, task, run_id="r",
+                          model="anthropic/claude-opus-4-7", role="reference",
+                          sample_index=1, output_index=2)
+
+    assert seen["gpt-5.5"] == "chatgpt"                 # foreign candidate -> its backend
+    assert seen["anthropic/claude-opus-4-7"] == "claude-pro"  # reference -> source backend

@@ -411,6 +411,17 @@ def run_route_iterative(
         )
         for ref in references
     }
+    # Backend that actually serves each candidate. Own candidates run on the
+    # harness's native provider; cross-harness injections run on the backend of
+    # the harness that uses them, so a foreign model generates for real in
+    # compare instead of erroring under a provider that can't serve it.
+    candidate_backend: dict[str, dict[str, str]] = {
+        ref.harness: {
+            m: native_provider_for_harness(ref.harness)
+            for m in live_candidates[ref.harness]
+        }
+        for ref in references
+    }
     if config.cross_harness:
         for ref in references:
             for other in references:
@@ -419,6 +430,8 @@ def run_route_iterative(
                 if other.current_model not in live_candidates[ref.harness] \
                         and other.current_model != ref.current_model:
                     live_candidates[ref.harness].append(other.current_model)
+                    candidate_backend[ref.harness][other.current_model] = \
+                        native_provider_for_harness(other.harness)
 
     iterations: list[IterationResult] = []
     total_cost = 0.0
@@ -453,22 +466,29 @@ def run_route_iterative(
                 reference_model=ref.current_model,
                 override=config.judge_model,
             )
+            # Normalize each id for the backend that will run it (bare for
+            # native-bare providers, namespaced for OpenRouter), and record
+            # any non-native backend so compare routes that candidate there.
+            backend = candidate_backend[ref.harness]
+            norm_candidates: list[str] = []
+            candidate_providers: dict[str, str] = {}
+            for c in cands:
+                prov = backend.get(c, harness_provider)
+                norm = model_id_for_provider(c, prov)
+                norm_candidates.append(norm)
+                if prov != harness_provider:
+                    candidate_providers[norm] = prov
             cmp_cfg = CompareConfig(
                 project_key=config.project_key, bucket=config.bucket,
-                # Strip namespace prefix when the harness's native
-                # provider takes bare ids (anthropic-direct, claude-pro
-                # OAuth, etc).  OpenRouter is the only path that needs
-                # the namespaced form.
                 reference_model=model_id_for_provider(
                     ref.current_model, harness_provider,
                 ),
                 judge_model=harness_judge,
-                candidates=[
-                    model_id_for_provider(c, harness_provider) for c in cands
-                ],
+                candidates=norm_candidates,
                 task_count=config.task_count, reference_n=1,
                 candidate_n=config.candidate_n,
                 provider=harness_provider,
+                candidate_providers=candidate_providers,
                 temperature=config.temperature, max_tokens=config.max_tokens,
                 generation_concurrency=config.generation_concurrency,
             )
