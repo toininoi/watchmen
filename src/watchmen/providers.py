@@ -145,17 +145,21 @@ class Provider:
         return raw
 
     def apply_extra_payload(self, body: dict, extra: dict) -> dict:
-        """Merge caller-supplied chat-completions kwargs (temperature,
-        max_tokens, response_format, ...) into the translated request body.
+        """Merge caller-supplied chat-completions kwargs (max_tokens,
+        response_format, ...) into the translated request body.
 
-        Default behavior merges verbatim — fine for OpenAI-shape providers
-        (openrouter/openai) and for Anthropic (which accepts the same
-        top-level `temperature` / `max_tokens` keys). Providers whose wire
-        format uses different parameter names override to rename/drop
-        unsupported kwargs."""
+        `temperature` is dropped for every provider. Newer models reject it
+        outright with a 400 (`claude-opus-4-7`:
+        "`temperature` is deprecated for this model."; OpenAI/ChatGPT
+        reasoning models likewise), which would kill any call using one as
+        reference, candidate, or judge. Models that still accept it fall back
+        to their own default, so dropping wholesale avoids a per-model
+        allowlist. Providers whose wire format renames other kwargs override
+        this to translate them."""
         for k, v in extra.items():
-            if v is not None:
-                body[k] = v
+            if v is None or k == "temperature":
+                continue
+            body[k] = v
         return body
 
     def call(self, client, url: str, headers: dict, body: dict, *,
