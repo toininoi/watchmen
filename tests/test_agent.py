@@ -93,6 +93,18 @@ def test_backoff_ignores_malformed_retry_after():
     assert delay > 0  # backoff still applies
 
 
+def test_backoff_caps_exponential_term():
+    """With a 7-attempt budget the exponential term would reach 2^6=64s at a
+    high attempt; the cap keeps any single sleep bounded so total wait stays
+    around a minute, not several. A server Retry-After can still exceed it."""
+    from watchmen.agent import _BACKOFF_CAP_SECONDS
+    # attempt=10 → 2^10=1024 without the cap; jitter adds <1.
+    delay = _backoff_seconds(attempt=10, retry_after=None)
+    assert delay <= _BACKOFF_CAP_SECONDS + 1.0
+    # Retry-After floor still wins over the cap.
+    assert _backoff_seconds(attempt=10, retry_after="120") >= 120.0
+
+
 # ─── _turn_cost ────────────────────────────────────────────────────────────
 
 

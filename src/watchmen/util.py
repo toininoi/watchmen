@@ -14,6 +14,7 @@ Design rules:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -288,3 +289,85 @@ def find_changelog() -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+# ─── Run-failure classification ─────────────────────────────────────────────
+# A failed curator/analyst subprocess only hands the daemon an exit code. The
+# *reason* (provider rate-limit, OAuth expiry) lives in the captured output and
+# the bundle _run.log. classify_failure() distills that into a concise
+# runs.notes string so a wall of red rows reads as "blocked on quota" instead
+# of an identical "exit 1". Pure + text-only so it's trivially testable.
+
+# Substrings that map a provider's endpoint/label to a short name. Ordered:
+# first match wins, so put more-specific hosts before generic vendor names.
+_PROVIDER_HINTS: tuple[tuple[str, str], ...] = (
+    ("chatgpt.com", "chatgpt"),
+    ("openrouter", "openrouter"),
+    ("api.anthropic.com", "claude-pro"),
+    ("claude pro", "claude-pro"),
+    ("claude-pro", "claude-pro"),
+    ("anthropic", "claude-pro"),
+)
+
+_RATE_LIMIT_MARKERS = (
+    "http 429",
+    "429 too many requests",
+    "too many requests",
+    "rate limit",
+    "rate_limit",
+)
+
+_AUTH_MARKERS = (
+    "oauth token expired",
+    "http 401",
+    "401 unauthorized",
+    "invalid_api_key",
+    "invalid api key",
+)
+
+
+def _detect_provider(output: str) -> str:
+    """Best-effort provider name from captured output: prefer the explicit
+    retry-log label (``chatgpt: HTTP 429``), fall back to endpoint host hints,
+    else a generic ``provider``."""
+    m = re.search(r"([A-Za-z][\w.-]*): HTTP \d{3}", output)
+    if m:
+        return m.group(1)
+    low = output.lower()
+    for needle, name in _PROVIDER_HINTS:
+        if needle in low:
+            return name
+    return "provider"
+
+
+def classify_failure(output: str, returncode: int) -> str:
+    """Map a failed run's captured output + exit code to a concise notes string.
+
+    Returns ``rate_limit: <provider>`` when the output carries a 429 / rate-limit
+    signature, ``auth: <provider>`` for OAuth expiry / 401, else ``exit <code>``.
+    The provider families (chatgpt subscription, claude-pro OAuth) share this
+    shape, so one classifier covers both.
+    """
+    low = output.lower()
+    if any(m in low for m in _RATE_LIMIT_MARKERS):
+        return f"rate_limit: {_detect_provider(output)}"
+    if any(m in low for m in _AUTH_MARKERS):
+        return f"auth: {_detect_provider(output)}"
+    return f"exit {returncode}"
+
+
+def classify_run_failure(project_key: str, returncode: int, extra_output: str = "") -> str:
+    """`classify_failure` plus the tail of the project's bundle ``_run.log``.
+
+    The curator writes per-attempt ``<provider>: HTTP 429`` breadcrumbs to that
+    log, so folding it in lets callers that don't capture subprocess output
+    (the interactive CLI) still classify the failure. ``extra_output`` carries
+    captured stderr/stdout when the caller has it (the daemon)."""
+    parts = [extra_output]
+    run_log = BUNDLES_DIR / project_key / "_run.log"
+    if run_log.exists():
+        try:
+            parts.append(run_log.read_text(encoding="utf-8", errors="replace")[-4000:])
+        except OSError:
+            pass
+    return classify_failure("\n".join(p for p in parts if p), returncode)

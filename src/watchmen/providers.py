@@ -159,7 +159,7 @@ class Provider:
         return body
 
     def call(self, client, url: str, headers: dict, body: dict, *,
-             max_retries: int = 4, log=None, label: str = "") -> dict:
+             max_retries: int = 7, log=None, label: str = "") -> dict:
         """Custom transport hook. Default returns None to signal "use the
         standard chat_call path"; override for streaming/SSE providers.
 
@@ -771,7 +771,7 @@ class ChatGPT(Provider):
         return body
 
     def call(self, client, url: str, headers: dict, body: dict, *,
-             max_retries: int = 4, log=None, label: str = "") -> dict:
+             max_retries: int = 7, log=None, label: str = "") -> dict:
         """Stream the Responses API SSE event stream + aggregate into a
         chat-completions-shaped response dict.
 
