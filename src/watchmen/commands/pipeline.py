@@ -30,6 +30,7 @@ from watchmen.util import (
     adapter_breakdown as _adapter_breakdown,
     analyses_base as _analyses_base,
     bundle_base as _bundle_base,
+    classify_run_failure as _classify_run_failure,
 )
 
 # Package root used as cwd for subprocess invocations of `python -m
@@ -291,7 +292,7 @@ def cmd_analyze(args) -> int:
         state.finish_run(run_id, "ok")
         print(_green(f"\n{args.project}: analyst run completed."))
     else:
-        state.finish_run(run_id, "failed", notes=f"exit code {r.returncode}")
+        state.finish_run(run_id, "failed", notes=_classify_run_failure(args.project, r.returncode))
         print(_yellow(f"\n{args.project}: analyst run failed (exit {r.returncode})."))
     return r.returncode
 
@@ -328,7 +329,7 @@ def cmd_curate(args) -> int:
         state.finish_run(run_id, "ok", notes=f"{skill_count} skills")
         print(_green(f"\n{args.project}: curator run completed ({skill_count} skills)."))
     else:
-        state.finish_run(run_id, "failed", notes=f"exit code {r.returncode}")
+        state.finish_run(run_id, "failed", notes=_classify_run_failure(args.project, r.returncode))
     return r.returncode
 
 

@@ -152,12 +152,19 @@ def load_api_key(provider: str | None = None) -> str:
     )
 
 
+# Per-attempt backoff ceiling. Without it, 2**attempt explodes (attempt 6 →
+# 64s) and a single wait can blow past a sane total budget. Capped here so a
+# 7-attempt run spends ~1 min total across its sleeps, not several.
+_BACKOFF_CAP_SECONDS = 30.0
+
+
 def _backoff_seconds(attempt: int, retry_after: str | None) -> float:
     """Exponential backoff with jitter, honoring Retry-After if the server set one.
 
     Jitter spreads simultaneous-retry storms when multiple Stage 2 workers all
     hit the same rate-limit at once. Retry-After (seconds form) is treated as
-    a floor — we wait at least that long.
+    a floor — we wait at least that long. The exponential term is capped at
+    `_BACKOFF_CAP_SECONDS`; a server-sent Retry-After can still exceed the cap.
     """
     server_hint = 0.0
     if retry_after:
@@ -165,7 +172,7 @@ def _backoff_seconds(attempt: int, retry_after: str | None) -> float:
             server_hint = float(retry_after)
         except ValueError:
             pass
-    backoff = (2 ** attempt) + random.uniform(0.0, 1.0)
+    backoff = min((2 ** attempt) + random.uniform(0.0, 1.0), _BACKOFF_CAP_SECONDS)
     return max(backoff, server_hint)
 
 
@@ -175,7 +182,7 @@ def call_chat(
     headers: dict,
     payload: dict,
     *,
-    max_retries: int = 4,
+    max_retries: int = 7,
     log: Callable[[str], None] | None = None,
     provider_label: str = "llm",
 ) -> dict:
@@ -220,7 +227,7 @@ def call_openrouter(
     headers: dict,
     payload: dict,
     *,
-    max_retries: int = 4,
+    max_retries: int = 7,
     log: Callable[[str], None] | None = None,
 ) -> dict:
     """Legacy entry point kept for tests / external callers that import this
@@ -242,7 +249,7 @@ def chat_call(
     provider: str | None = None,
     api_key: str | None = None,
     agent_name: str = "watchmen",
-    max_retries: int = 4,
+    max_retries: int = 7,
     log: Callable[[str], None] | None = None,
     **extra_payload,
 ) -> dict:

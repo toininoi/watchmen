@@ -33,6 +33,7 @@ from pathlib import Path
 
 from watchmen import state
 from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR
+from watchmen.util import classify_run_failure
 
 ROOT = Path(__file__).parent
 DEFAULT_INTERVAL = 7200       # 2 hours between analyst checks
@@ -105,6 +106,16 @@ def _ingest_corpus(log: logging.Logger) -> None:
         log.info("ingest done: %s", last_line)
 
 
+def _failure_notes(project_key: str, r: "subprocess.CompletedProcess") -> str:
+    """Concise runs.notes for a failed daemon run — folds the captured
+    stderr/stdout into the shared classifier (which also reads the bundle
+    _run.log tail) so a provider rate-limit reads as 'rate_limit: <provider>'
+    instead of 'exit 1'."""
+    return classify_run_failure(
+        project_key, r.returncode, f"{r.stderr or ''}\n{r.stdout or ''}"
+    )
+
+
 def _run_analyst(project_key: str, model: str, log: logging.Logger) -> bool:
     log.info("analyst[%s] starting (incremental)", project_key)
     progress = state.get_project_progress(project_key)
@@ -117,7 +128,7 @@ def _run_analyst(project_key: str, model: str, log: logging.Logger) -> bool:
     r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=14400)
     if r.returncode != 0:
         log.error("analyst[%s] failed: %s", project_key, (r.stderr or r.stdout)[:500])
-        state.finish_run(run_id, "failed", notes=f"exit {r.returncode}")
+        state.finish_run(run_id, "failed", notes=_failure_notes(project_key, r))
         return False
 
     analyses_dir = ANALYSES_DIR / project_key
@@ -143,7 +154,7 @@ def _regen_claude_md(project_key: str, model: str, log: logging.Logger) -> bool:
     r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
         log.error("regen-claude[%s] failed: %s", project_key, (r.stderr or r.stdout)[:500])
-        state.finish_run(run_id, "failed", notes=f"exit {r.returncode}")
+        state.finish_run(run_id, "failed", notes=_failure_notes(project_key, r))
         return False
     state.update_project(project_key, last_curator_run=state.now_iso())
     state.finish_run(run_id, "ok", notes="claude.md regen")
@@ -163,7 +174,7 @@ def _run_full_curator(project_key: str, model: str, log: logging.Logger) -> bool
     r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=21600)  # 6 hour ceiling
     if r.returncode != 0:
         log.error("full-curator[%s] failed: %s", project_key, (r.stderr or r.stdout)[:500])
-        state.finish_run(run_id, "failed", notes=f"exit {r.returncode}")
+        state.finish_run(run_id, "failed", notes=_failure_notes(project_key, r))
         return False
     skills_dir = BUNDLES_DIR / project_key / "skills"
     skill_count = sum(1 for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else 0
