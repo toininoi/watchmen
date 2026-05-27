@@ -7,6 +7,18 @@
     <div class="text-xs text-gray-500 mb-1"><a href="/" class="hover:text-gray-700">← dashboard</a></div>
     <h1 class="text-2xl font-semibold">{{ project.project_key }}</h1>
     <div class="text-sm text-gray-600 mt-1 font-mono">{{ project.source_repo|replace("/Users/" ~ project.source_repo.split("/")[2], "~") if project.source_repo and project.source_repo.startswith("/Users/") else project.source_repo }}</div>
+    <!-- Auto-install toggle: POST → 303 redirect back to this page. -->
+    <form method="post" action="/p/{{ project.project_key }}/auto-install/toggle" class="mt-2 inline-flex items-center gap-2">
+      {% if project.auto_install %}
+        <span class="wm-pill wm-pill-ok" title="Curated skills are symlinked into the agent dirs automatically after each curator run.">⤓ auto-install: on</span>
+        <button type="submit" class="text-xs px-2.5 py-1 rounded-md border border-gray-300 bg-white hover:bg-gray-50"
+                title="Stop auto-installing; install skills manually instead.">Turn off</button>
+      {% else %}
+        <span class="wm-pill" title="Curated skills stay in bundles until you install them (watchmen install, or the Install button on each skill).">auto-install: off</span>
+        <button type="submit" class="text-xs px-2.5 py-1 rounded-md border border-green-300 bg-white text-green-700 hover:bg-green-50"
+                title="Symlink this project's curated skills into the agent dirs automatically after each curator run.">Turn on</button>
+      {% endif %}
+    </form>
   </div>
   <div class="text-right space-y-1">
     <div><a href="/p/{{ project.project_key }}/metrics" class="text-sm text-blue-600 hover:underline">View metrics →</a></div>

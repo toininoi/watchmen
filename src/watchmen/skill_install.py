@@ -140,17 +140,18 @@ def _manifest_entry(links: list[dict], target: Path) -> dict | None:
 
 def _is_managed(target: Path, links: list[dict]) -> bool:
     """True if watchmen owns this target — either it's in the manifest, or it's
-    a symlink already pointing inside BUNDLES_DIR (covers manifest loss)."""
+    a symlink already pointing inside BUNDLES_DIR (covers manifest loss).
+
+    Uses ``target.resolve()`` to follow the symlink rather than ``readlink()``:
+    on Windows ``readlink()`` can return a ``\\?\``-prefixed path that no longer
+    compares equal to ``BUNDLES_DIR.resolve()``, so the membership check would
+    wrongly miss. ``resolve()`` normalizes both sides the same way."""
     if _manifest_entry(links, target) is not None:
         return True
     if target.is_symlink():
         try:
-            dest = target.readlink()
-        except OSError:
-            return False
-        dest_abs = dest if dest.is_absolute() else (target.parent / dest)
-        try:
-            dest_abs.resolve().relative_to(BUNDLES_DIR.resolve())
+            resolved = target.resolve()
+            resolved.relative_to(BUNDLES_DIR.resolve())
             return True
         except (ValueError, OSError):
             return False
