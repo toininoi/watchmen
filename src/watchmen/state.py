@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS projects (
     notes TEXT,
     approval_required INTEGER NOT NULL DEFAULT 0,
     skip_overlapping_skills INTEGER NOT NULL DEFAULT 0,
+    auto_install INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -80,12 +81,17 @@ def _migrate_project_columns(c) -> None:
         until reviewed via `watchmen review`. Default 0 (autonomy preserved).
       - `skip_overlapping_skills`: makes `watchmen curate` drop candidates
         that overlap with installed harness skills entirely, rather than
-        proposing them as enhancements (the default). Default 0."""
+        proposing them as enhancements (the default). Default 0.
+      - `auto_install`: when set, a successful curator run symlinks the
+        project's curated skills into the agent discovery dirs so they fire
+        without a manual `watchmen install`. Default 0 (review-first)."""
     cols = {r[1] for r in c.execute("PRAGMA table_info(projects)").fetchall()}
     if "approval_required" not in cols:
         c.execute("ALTER TABLE projects ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 0")
     if "skip_overlapping_skills" not in cols:
         c.execute("ALTER TABLE projects ADD COLUMN skip_overlapping_skills INTEGER NOT NULL DEFAULT 0")
+    if "auto_install" not in cols:
+        c.execute("ALTER TABLE projects ADD COLUMN auto_install INTEGER NOT NULL DEFAULT 0")
 
 
 def now_iso() -> str:

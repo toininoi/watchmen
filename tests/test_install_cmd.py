@@ -1,0 +1,89 @@
+"""Tests for the `watchmen install` command dispatch (commands/install.py)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from watchmen import skill_install as si
+from watchmen.commands import install as cmd
+
+
+@pytest.fixture
+def env(tmp_path: Path, monkeypatch):
+    bundles = tmp_path / "bundles"
+    claude = tmp_path / "claude" / "skills"
+    codex = tmp_path / "codex" / "skills"
+    bundles.mkdir(parents=True)
+    monkeypatch.setattr(si, "BUNDLES_DIR", bundles)
+    monkeypatch.setattr(si, "MANIFEST_PATH", tmp_path / "install_manifest.json")
+    monkeypatch.setattr(si, "HARNESS_SKILL_DIRS", {"claude_code": claude, "codex": codex})
+    return tmp_path
+
+
+def _bundle(env: Path, project: str, slug: str):
+    d = env / "bundles" / project / "skills" / slug
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(f"---\nname: {slug}\ndescription: x\n---\nbody\n", encoding="utf-8")
+
+
+def _args(project, **kw):
+    base = {"skill": [], "harness": [], "force": False, "uninstall": False, "list": False}
+    base.update(kw)
+    return SimpleNamespace(project=project, **base)
+
+
+def test_install_no_skills_returns_1(env, capsys):
+    rc = cmd.cmd_install(_args("ghost"))
+    assert rc == 1
+    assert "no curated skills" in capsys.readouterr().out
+
+
+def test_install_all(env):
+    _bundle(env, "proj", "alpha")
+    _bundle(env, "proj", "beta")
+    rc = cmd.cmd_install(_args("proj"))
+    assert rc == 0
+    assert (env / "claude" / "skills" / "alpha").is_symlink()
+    assert (env / "codex" / "skills" / "beta").is_symlink()
+
+
+def test_install_slug_and_harness_filter(env):
+    _bundle(env, "proj", "alpha")
+    _bundle(env, "proj", "beta")
+    rc = cmd.cmd_install(_args("proj", skill=["alpha"], harness=["claude-code"]))
+    assert rc == 0
+    assert (env / "claude" / "skills" / "alpha").is_symlink()
+    assert not (env / "codex" / "skills" / "alpha").exists()
+    assert not (env / "claude" / "skills" / "beta").exists()
+
+
+def test_install_conflict_skipped_message(env, capsys):
+    _bundle(env, "proj", "alpha")
+    user = env / "claude" / "skills" / "alpha"
+    user.mkdir(parents=True)
+    (user / "SKILL.md").write_text("mine\n", encoding="utf-8")
+    cmd.cmd_install(_args("proj", harness=["claude-code"]))
+    out = capsys.readouterr().out
+    assert "skipped_conflict" in out
+    assert user.is_dir() and not user.is_symlink()
+
+
+def test_list_mode_changes_nothing(env, capsys):
+    _bundle(env, "proj", "alpha")
+    rc = cmd.cmd_install(_args("proj", list=True))
+    assert rc == 0
+    assert not (env / "claude" / "skills" / "alpha").exists()
+    assert "1 curated skills" in capsys.readouterr().out
+
+
+def test_uninstall_removes_links(env):
+    _bundle(env, "proj", "alpha")
+    cmd.cmd_install(_args("proj"))
+    assert (env / "claude" / "skills" / "alpha").is_symlink()
+    rc = cmd.cmd_install(_args("proj", uninstall=True))
+    assert rc == 0
+    assert not (env / "claude" / "skills" / "alpha").exists()
+    assert not (env / "codex" / "skills" / "alpha").exists()

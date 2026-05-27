@@ -78,6 +78,7 @@ from watchmen.commands.inspect import (
 from watchmen.commands.insights import cmd_insights
 from watchmen.commands.compare import cmd_compare
 from watchmen.commands.route import cmd_route
+from watchmen.commands.install import cmd_install
 
 
 def _run_settings_menu() -> int:
@@ -579,7 +580,7 @@ def cmd_reonboard(args) -> int:
 
 _SETTABLE_KEYS = (
     "enabled", "threshold", "repo", "notes",
-    "approval_required", "skip_overlapping_skills",
+    "approval_required", "skip_overlapping_skills", "auto_install",
 )
 
 
@@ -608,9 +609,9 @@ def _parse_setting(key: str, value: str) -> tuple[str, object]:
         return "source_repo", str(path)
     if key == "notes":
         return "notes", value
-    # Boolean settings: approval_required + skip_overlapping_skills both
-    # default 0 and accept the same true/false vocabulary as `enabled`.
-    if key in ("approval_required", "skip_overlapping_skills"):
+    # Boolean settings: approval_required, skip_overlapping_skills, auto_install
+    # all default 0 and accept the same true/false vocabulary as `enabled`.
+    if key in ("approval_required", "skip_overlapping_skills", "auto_install"):
         v = value.strip().lower()
         if v in ("true", "yes", "y", "on", "1"):
             return key, 1
@@ -644,7 +645,7 @@ def cmd_settings_show(args) -> int:
         return 1
     print(_bold(f"\n{args.project}\n"))
     for k in ("source_repo", "enabled", "threshold_new_prompts", "notes",
-              "approval_required", "skip_overlapping_skills",
+              "approval_required", "skip_overlapping_skills", "auto_install",
               "last_analyst_day", "last_analyst_run",
               "last_curator_run", "last_curator_skill_count",
               "created_at", "updated_at"):
@@ -1223,6 +1224,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("distill",    "semantic skill distill: find overlaps and stage merged drafts"),
         ("compare",    "compare OpenRouter models on a skill bucket"),
         ("route",      "harness-aware: rewrite skill so each harness delegates to its best model"),
+        ("install",    "symlink curated skills into the agent's discovery dir so they actually fire"),
     ]),
 ]
 
@@ -1493,6 +1495,23 @@ def main(argv: list[str] | None = None) -> int:
     p_route.add_argument("--json", action="store_true",
                          help="print the full route result as JSON")
     p_route.set_defaults(func=cmd_route)
+
+    p_install = sub.add_parser(
+        "install",
+        help="symlink curated skills into the agent's discovery dir (~/.claude/skills, ~/.codex/skills) so they actually load and fire",
+    )
+    p_install.add_argument("project")
+    p_install.add_argument("--skill", action="append", default=[],
+                           help="only install this slug (repeatable; default: all curated skills)")
+    p_install.add_argument("--harness", action="append", default=[],
+                           help="only install into this harness: claude-code, codex (repeatable; default: all)")
+    p_install.add_argument("--force", action="store_true",
+                           help="overwrite a target that already exists and wasn't created by watchmen")
+    p_install.add_argument("--uninstall", action="store_true",
+                           help="remove watchmen-created links instead of installing")
+    p_install.add_argument("--list", action="store_true",
+                           help="show install status per skill/harness without changing anything")
+    p_install.set_defaults(func=cmd_install)
 
 
     p_reset = sub.add_parser(
