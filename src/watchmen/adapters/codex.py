@@ -164,6 +164,12 @@ def scan(entry: dict):
     model_output_tokens: dict[str, int] = {}
     is_first_user = True
     current_model: str | None = None
+    # Per-skill cost attribution (#94). A skill is detected when the model
+    # reads its SKILL.md (a function_call whose args contain the path); we
+    # accrue subsequent per-turn token cost into that skill's tool_call row
+    # until the next skill read or the next genuine user prompt. `active_skill`
+    # points at the row we're accruing into.
+    active_skill: dict | None = None
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -219,7 +225,10 @@ def scan(entry: dict):
                         session["input_tokens"] += max(0, in_t - cached)
                         session["cache_read_tokens"] += cached
                         session["output_tokens"] += out_t + reasoning
-                        session["cost_usd"] += _codex_turn_cost(current_model, last)
+                        turn_cost = _codex_turn_cost(current_model, last)
+                        session["cost_usd"] += turn_cost
+                        if active_skill is not None:
+                            active_skill["cost_usd"] = (active_skill["cost_usd"] or 0.0) + turn_cost
                         if current_model:
                             model_output_tokens[current_model] = (
                                 model_output_tokens.get(current_model, 0) + out_t + reasoning
@@ -250,6 +259,7 @@ def scan(entry: dict):
                     })
                     is_first_user = False
                     session["user_prompt_count"] += 1
+                    active_skill = None  # genuine prompt ends any skill span
                 elif role == "assistant":
                     if text:
                         session["assistant_text_count"] += 1
@@ -269,13 +279,21 @@ def scan(entry: dict):
                         parsed_args = json.loads(raw_args)
                     except json.JSONDecodeError:
                         parsed_args = raw_args
-                tool_calls.append({
+                skill_name = extract_skill_from_args(parsed_args)
+                row = {
                     "session_id": session["session_id"],
                     "timestamp": ts,
                     "tool_name": payload.get("name") or "?",
                     "is_error": 0,
-                    "skill_name": extract_skill_from_args(parsed_args),
-                })
+                    "skill_name": skill_name,
+                }
+                if skill_name:
+                    # Reading a SKILL.md opens an attribution span; this turn's
+                    # token_count (emitted later in the turn) and later turns
+                    # accrue into this row.
+                    row["cost_usd"] = 0.0
+                    active_skill = row
+                tool_calls.append(row)
             elif ptype in ("function_call_output", "custom_tool_call_output"):
                 # Tool result. is_error not directly exposed; some outputs carry
                 # exit_code in their JSON. Best-effort scan.

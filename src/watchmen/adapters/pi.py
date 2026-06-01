@@ -162,6 +162,11 @@ def scan(entry: dict):
     models: set[str] = set()
     model_output_tokens: dict[str, int] = {}
     is_first_user = True
+    # Per-skill cost attribution (#94). A skill is detected when the model
+    # reads its SKILL.md (a read/bash toolCall whose args contain the path);
+    # we accrue subsequent per-message cost into that skill's tool_call row
+    # until the next skill read or the next genuine user prompt.
+    active_skill: dict | None = None
 
     # Pass 1: load all entries.
     by_id: dict[str, dict] = {}
@@ -258,6 +263,7 @@ def scan(entry: dict):
                 })
                 is_first_user = False
                 session["user_prompt_count"] += 1
+                active_skill = None  # genuine prompt ends any skill span
 
         elif role == "assistant":
             model = msg.get("model")
@@ -275,7 +281,10 @@ def scan(entry: dict):
                 session["cache_creation_tokens"] += cw_t
                 session["cache_read_tokens"] += cr_t
                 session["output_tokens"] += out_t
-                session["cost_usd"] += turn_cost_usd(model, in_t, cw_t, 0, cr_t, out_t)
+                turn_cost = turn_cost_usd(model, in_t, cw_t, 0, cr_t, out_t)
+                session["cost_usd"] += turn_cost
+                if active_skill is not None:
+                    active_skill["cost_usd"] = (active_skill["cost_usd"] or 0.0) + turn_cost
                 if model:
                     model_output_tokens[model] = model_output_tokens.get(model, 0) + out_t
             if isinstance(content, list):
@@ -289,13 +298,18 @@ def scan(entry: dict):
                         session["assistant_thinking_count"] += 1
                     elif btype == "toolCall":
                         session["tool_use_count"] += 1
-                        tool_calls.append({
+                        skill_name = extract_skill_from_args(block.get("arguments"))
+                        row = {
                             "session_id": session["session_id"],
                             "timestamp": ts,
                             "tool_name": block.get("name") or "?",
                             "is_error": 0,
-                            "skill_name": extract_skill_from_args(block.get("arguments")),
-                        })
+                            "skill_name": skill_name,
+                        }
+                        if skill_name:
+                            row["cost_usd"] = 0.0
+                            active_skill = row
+                        tool_calls.append(row)
 
         elif role == "toolResult":
             # Tool result lives as its own message. pi carries the error flag
@@ -316,13 +330,18 @@ def scan(entry: dict):
             # the whole content blob as a potential SKILL.md reference. Works
             # for both string content ("cat /path/SKILL.md") and list content
             # with text blocks.
-            tool_calls.append({
+            skill_name = extract_skill_from_args(content) or extract_skill_from_path(content if isinstance(content, str) else "")
+            row = {
                 "session_id": session["session_id"],
                 "timestamp": ts,
                 "tool_name": "bash",
                 "is_error": 0,
-                "skill_name": extract_skill_from_args(content) or extract_skill_from_path(content if isinstance(content, str) else ""),
-            })
+                "skill_name": skill_name,
+            }
+            if skill_name:
+                row["cost_usd"] = 0.0
+                active_skill = row
+            tool_calls.append(row)
 
         # custom / branchSummary / compactionSummary — silently ignore.
 

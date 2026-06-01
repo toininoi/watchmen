@@ -3318,6 +3318,59 @@ def test_corpus_extracts_skill_name_from_claude_code_tool_use(tmp_path, monkeypa
         f"expected skill_name='ship-pr' in tool_calls, got {[(t.get('tool_name'), t.get('skill_name')) for t in tools]}"
 
 
+def test_corpus_persists_per_skill_cost_usd(tmp_path, monkeypatch):
+    """Per-skill cost (#94) must survive the round-trip into corpus.db: the
+    skill-activation tool_call row carries `cost_usd` (the cost of the turns
+    the skill was active for), and non-skill rows stay NULL. Exercises the
+    `tool_calls.cost_usd` column, the insert default, and migrate_schema
+    adding the column to a legacy DB."""
+    import json as _json
+    import importlib
+
+    monkeypatch.setenv("WATCHMEN_HOME", str(tmp_path))
+    from watchmen import paths as _paths
+    importlib.reload(_paths)
+    from watchmen import corpus as _corpus
+    importlib.reload(_corpus)
+    from watchmen.adapters import claude_code as _cc
+    importlib.reload(_cc)
+    from watchmen.metrics import turn_cost_usd
+
+    u = {"input_tokens": 1000, "output_tokens": 1000}
+    one = turn_cost_usd("claude-opus-4-7", 1000, 0, 0, 0, 1000)
+
+    proj = tmp_path / "claude_projects" / "-Users-test-demo"
+    proj.mkdir(parents=True)
+    t = proj / "sess.jsonl"
+    t.write_text("\n".join(_json.dumps(x) for x in [
+        {"type": "user", "sessionId": "sess", "timestamp": "2026-05-10T12:00:00Z",
+         "message": {"content": "go"}},
+        {"type": "assistant", "timestamp": "2026-05-10T12:00:01Z",
+         "message": {"id": "d", "model": "claude-opus-4-7",
+                     "content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "foo"}}], "usage": u}},
+        {"type": "assistant", "timestamp": "2026-05-10T12:00:02Z",
+         "message": {"id": "w", "model": "claude-opus-4-7",
+                     "content": [{"type": "tool_use", "name": "Bash", "input": {}}], "usage": u}},
+    ]) + "\n")
+
+    session, prompts, tools = _cc.scan({
+        "path": t, "session_id": "sess", "project_dir": "/Users/test/demo",
+        "is_subagent": 0, "parent_session_id": None,
+    })
+
+    session["file_mtime"] = None  # normally stamped by scan_all()
+    conn = _corpus.init_db(full=True)
+    _corpus._replace_session(conn, session, prompts, tools)
+    conn.commit()
+
+    rows = dict(conn.execute(
+        "SELECT tool_name, cost_usd FROM tool_calls WHERE session_id = 'sess'"
+    ).fetchall())
+    assert rows["Skill"] == one, f"skill cost should be the one in-span turn, got {rows['Skill']}"
+    assert rows["Bash"] is None, "non-skill rows must keep cost_usd NULL"
+    conn.close()
+
+
 def test_prune_judge_inputs_joins_bundle_with_usage(tmp_path, monkeypatch):
     """gather_judge_inputs() should read SKILL.md frontmatter from the
     bundle directory and join it with usage counts from corpus.db's

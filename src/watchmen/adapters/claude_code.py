@@ -115,6 +115,12 @@ def scan(entry: dict):
     # run of same-id assistant lines (runs are always contiguous in practice)
     # while still counting content blocks per line below.
     last_usage_msg_id: str | None = None
+    # Per-skill cost attribution (#94). A `Skill` tool_use starts a span; we
+    # accrue each subsequent turn's cost into that skill's tool_call row until
+    # the next Skill or the next genuine user prompt. `active_skill` points at
+    # the row we're accruing into. The activating turn itself isn't charged
+    # (its cost is trivial; the SKILL.md context + work land on later turns).
+    active_skill: dict | None = None
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -142,6 +148,11 @@ def scan(entry: dict):
             content = msg.get("content")
 
             if etype == "user":
+                if e.get("isMeta"):
+                    # Injected context (e.g. the SKILL.md body Claude Code
+                    # feeds in after a Skill call) — not a real user prompt,
+                    # so don't count it or end the active skill span.
+                    continue
                 if isinstance(content, str):
                     text = content
                     prompts.append({
@@ -154,6 +165,7 @@ def scan(entry: dict):
                     })
                     is_first = False
                     session["user_prompt_count"] += 1
+                    active_skill = None  # genuine prompt ends any skill span
                 elif isinstance(content, list):
                     text_parts: list[str] = []
                     saw_tool_result = False
@@ -179,6 +191,7 @@ def scan(entry: dict):
                         })
                         is_first = False
                         session["user_prompt_count"] += 1
+                        active_skill = None  # genuine prompt ends any skill span
 
             elif etype == "assistant":
                 model = msg.get("model")
@@ -205,7 +218,10 @@ def scan(entry: dict):
                     session["cache_creation_tokens"] += cc_t
                     session["cache_read_tokens"] += cr_t
                     session["output_tokens"] += out_t
-                    session["cost_usd"] += turn_cost_usd(model, in_t, cc_5m, cc_1h, cr_t, out_t)
+                    turn_cost = turn_cost_usd(model, in_t, cc_5m, cc_1h, cr_t, out_t)
+                    session["cost_usd"] += turn_cost
+                    if active_skill is not None:
+                        active_skill["cost_usd"] = (active_skill["cost_usd"] or 0.0) + turn_cost
                     if model:
                         model_output_tokens[model] = model_output_tokens.get(model, 0) + out_t
                 if isinstance(content, list):
@@ -231,13 +247,19 @@ def scan(entry: dict):
                                     slug = inp.get("skill")
                                     if isinstance(slug, str) and slug.strip():
                                         skill_name = slug.strip()
-                            tool_calls.append({
+                            row = {
                                 "session_id": session["session_id"],
                                 "timestamp": ts,
                                 "tool_name": tool_name,
                                 "is_error": 0,
                                 "skill_name": skill_name,
-                            })
+                            }
+                            if skill_name:
+                                # Start a fresh attribution span; later turns
+                                # accrue their cost into this row.
+                                row["cost_usd"] = 0.0
+                                active_skill = row
+                            tool_calls.append(row)
 
     session["models"] = json.dumps(sorted(models))
     if model_output_tokens:

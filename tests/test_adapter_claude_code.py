@@ -154,6 +154,54 @@ def test_scan_charges_usage_once_per_split_message_id():
         assert session["tool_use_count"] == 1
 
 
+def test_scan_attributes_turn_cost_to_active_skill():
+    """A `Skill` activation opens a cost span: subsequent turns accrue into the
+    skill's tool_call row until the next genuine user prompt. The activating
+    turn is NOT charged (its cost is trivial); the injected SKILL.md `isMeta`
+    message must NOT end the span; a real follow-up prompt MUST."""
+    from watchmen.metrics import turn_cost_usd
+
+    u = {"input_tokens": 1000, "output_tokens": 1000}
+    one = turn_cost_usd("claude-opus-4-7", 1000, 0, 0, 0, 1000)
+    assert one > 0, "model must be priced for this test to be meaningful"
+
+    def asst(mid, content):
+        return {"timestamp": "2026-05-15T10:00:00Z", "type": "assistant",
+                "message": {"id": mid, "model": "claude-opus-4-7", "content": content, "usage": u}}
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        _write_transcript(p, [
+            {"timestamp": "2026-05-15T10:00:00Z", "type": "user", "message": {"content": "go"}},
+            # dispatch turn: invokes the skill (NOT charged to it)
+            {"timestamp": "2026-05-15T10:00:01Z", "type": "assistant",
+             "message": {"id": "d", "model": "claude-opus-4-7",
+                         "content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "foo"}}], "usage": u}},
+            # tool_result echo + injected SKILL.md (isMeta) must not end the span
+            {"timestamp": "2026-05-15T10:00:02Z", "type": "user",
+             "message": {"content": [{"type": "tool_result", "content": "Launching skill: foo"}]}},
+            {"timestamp": "2026-05-15T10:00:03Z", "type": "user", "isMeta": True,
+             "message": {"content": [{"type": "text", "text": "<skill body>"}]}},
+            # two in-span turns -> accrue to foo (distinct message ids)
+            asst("m1", [{"type": "text", "text": "a"}]),
+            asst("m2", [{"type": "text", "text": "b"}]),
+            # genuine prompt ends the span
+            {"timestamp": "2026-05-15T10:00:06Z", "type": "user", "message": {"content": "now something else"}},
+            # post-span turn -> NOT attributed to foo
+            asst("m3", [{"type": "text", "text": "c"}]),
+        ])
+        session, prompts, tool_calls = claude_code.scan(_entry(p))
+
+        skill_rows = [t for t in tool_calls if t.get("skill_name") == "foo"]
+        assert len(skill_rows) == 1
+        # exactly the two in-span turns, not the dispatch or post-span turn
+        assert skill_rows[0]["cost_usd"] == one * 2
+        # isMeta message was not counted as a prompt (2 genuine prompts only)
+        assert session["user_prompt_count"] == 2
+        # session charges all four costed turns
+        assert session["cost_usd"] == one * 4
+
+
 def test_scan_extracts_text_blocks_skips_tool_result_only_messages():
     """User messages can carry either a string OR a list of content blocks. A
     list with only tool_result blocks is NOT a real user prompt — it's the
