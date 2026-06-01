@@ -9,7 +9,7 @@ Public entry points:
     watchmen.cli.main         CLI dispatch (the `watchmen` console script)
     watchmen.daemon.main      background scheduler
     watchmen.viewer.server    FastAPI viewer at 127.0.0.1:8979
-    watchmen.server           hook capture server at 127.0.0.1:8765
+    watchmen.hook_server      hook capture server at 127.0.0.1:8765
 
 Most users interact via the `watchmen` console script. Most contributors
 won't import this package directly — the modules are intended to be invoked

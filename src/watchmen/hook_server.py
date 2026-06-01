@@ -1,3 +1,11 @@
+"""Local hook-capture server — receives agent hook POSTs and logs them.
+
+NOT the dashboard. This is the lightweight event sink that coding-agent hooks
+fire at (`127.0.0.1:8765/hook`); the human-facing mission-control UI is the
+separate FastAPI app in `watchmen.viewer.server` (`127.0.0.1:8979`). Run it
+standalone with `python -m watchmen.hook_server`.
+"""
+
 import json
 import sqlite3
 from datetime import datetime, timezone

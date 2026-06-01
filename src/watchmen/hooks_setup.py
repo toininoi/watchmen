@@ -295,7 +295,7 @@ def install() -> int:
 
     for key, p in WATCHMEN_SCRIPTS.items():
         print(f"hook script: {key} → {p}")
-    print("Note: start the local hooks server with `uv run python -m watchmen.server` in a terminal so events are captured.")
+    print("Note: start the local hooks server with `uv run python -m watchmen.hook_server` in a terminal so events are captured.")
     return 0
 
 

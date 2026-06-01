@@ -1294,16 +1294,13 @@ def _bare_default() -> int:
     return cmd_status(argparse.Namespace())
 
 
-def main(argv: list[str] | None = None) -> int:
-    # Pin stdout/stderr to UTF-8 so the emoji in our help text (💡, ✓, ✗) and
-    # status output render the same everywhere. Most consoles already are
-    # UTF-8; this only changes behavior where the default codec can't encode
-    # those code points (e.g. cp1252).
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-        except (AttributeError, OSError):
-            pass
+def build_parser() -> "WatchmenParser":
+    """Construct the full `watchmen` argument parser.
+
+    Extracted from main() so the CLI surface is importable and testable
+    without running a command — every subcommand and its handler is wired
+    here. Behavior is identical to the previous inline construction.
+    """
     parser = WatchmenParser(prog="watchmen", description=__doc__.split("\n")[0], add_help=False)
     # Override the argparse-generated help with our grouped renderer.
     parser.format_help = lambda: ""  # type: ignore[method-assign]
@@ -1783,6 +1780,20 @@ def main(argv: list[str] | None = None) -> int:
         help="render the watchmen CHANGELOG.md (the auto-announcement on version bumps is the inline summary; this is the full list)",
     ).set_defaults(func=cmd_changelog)
 
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Pin stdout/stderr to UTF-8 so the emoji in our help text (💡, ✓, ✗) and
+    # status output render the same everywhere. Most consoles already are
+    # UTF-8; this only changes behavior where the default codec can't encode
+    # those code points (e.g. cp1252).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+        except (AttributeError, OSError):
+            pass
+    parser = build_parser()
     args = parser.parse_args(argv)
     # Auto-apply any pending corpus.db schema migrations before dispatching
     # to a handler. Idempotent + cheap — a single PRAGMA when the schema
