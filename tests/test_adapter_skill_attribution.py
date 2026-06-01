@@ -179,6 +179,75 @@ def test_pi_adapter_extracts_skill_name_from_bash_command_string():
     assert tool_calls[0]["skill_name"] == "refactor"
 
 
+def test_codex_adapter_attributes_turn_cost_to_active_skill():
+    """Reading a SKILL.md opens a span; token_count cost in that turn and
+    later turns accrues to the skill row until the next genuine user prompt."""
+    from watchmen.adapters.codex import _codex_turn_cost
+    last = {"input_tokens": 1000, "output_tokens": 1000}
+    one = _codex_turn_cost("gpt-5", last)
+    assert one > 0
+    tc = lambda: {"type": "event_msg", "timestamp": "2026-05-19T12:00:09Z",
+                  "payload": {"type": "token_count", "info": {"last_token_usage": last}}}
+    lines = [
+        {"type": "session_meta", "timestamp": "2026-05-19T12:00:00Z", "payload": {"id": "s", "cwd": "/p"}},
+        {"type": "turn_context", "timestamp": "2026-05-19T12:00:01Z", "payload": {"model": "gpt-5"}},
+        {"type": "response_item", "timestamp": "2026-05-19T12:00:02Z",
+         "payload": {"type": "function_call", "name": "shell",
+                     "arguments": json.dumps({"cmd": "cat /Users/me/.codex/skills/refactor/SKILL.md"})}},
+        tc(),  # in-span turn -> accrues to refactor
+        {"type": "response_item", "timestamp": "2026-05-19T12:00:20Z",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "different task now"}]}},
+        tc(),  # post-span turn -> not attributed
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "rollout-x.jsonl"
+        p.write_text("\n".join(json.dumps(x) for x in lines))
+        _, _, tool_calls = codex.scan({"path": p, "project_dir": None,
+                                       "is_subagent": False, "parent_session_id": None})
+    skill_rows = [t for t in tool_calls if t.get("skill_name") == "refactor"]
+    assert len(skill_rows) == 1
+    assert skill_rows[0]["cost_usd"] == one  # only the in-span token_count
+
+
+def test_pi_adapter_attributes_turn_cost_to_active_skill():
+    """A pi read of SKILL.md opens a span; later assistant-message cost accrues
+    to the skill until the next genuine user prompt."""
+    from watchmen.metrics import turn_cost_usd
+    one = turn_cost_usd("claude-3-5-sonnet", 1000, 0, 0, 0, 1000)
+    assert one > 0
+    usage = {"input": 1000, "output": 1000}
+    lines = [
+        {"type": "session", "version": 3, "id": "s", "timestamp": "2026-05-19T12:00:00Z", "cwd": "/p"},
+        {"type": "message", "id": "u1", "parentId": "s", "timestamp": "2026-05-19T12:00:01Z",
+         "message": {"role": "user", "content": "go"}},
+        # assistant reads the skill (opens span; this msg's own cost not charged to it)
+        {"type": "message", "id": "a1", "parentId": "u1", "timestamp": "2026-05-19T12:00:02Z",
+         "message": {"role": "assistant", "model": "claude-3-5-sonnet", "usage": usage,
+                     "content": [{"type": "toolCall", "name": "read",
+                                  "arguments": {"path": "/Users/me/.pi/skills/deploy/SKILL.md"}}]}},
+        # in-span working turn -> accrues to deploy
+        {"type": "message", "id": "a2", "parentId": "a1", "timestamp": "2026-05-19T12:00:03Z",
+         "message": {"role": "assistant", "model": "claude-3-5-sonnet", "usage": usage,
+                     "content": [{"type": "text", "text": "working"}]}},
+        # genuine prompt ends span
+        {"type": "message", "id": "u2", "parentId": "a2", "timestamp": "2026-05-19T12:00:04Z",
+         "message": {"role": "user", "content": "now something else"}},
+        # post-span turn -> not attributed
+        {"type": "message", "id": "a3", "parentId": "u2", "timestamp": "2026-05-19T12:00:05Z",
+         "message": {"role": "assistant", "model": "claude-3-5-sonnet", "usage": usage,
+                     "content": [{"type": "text", "text": "done"}]}},
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "session.jsonl"
+        p.write_text("\n".join(json.dumps(x) for x in lines))
+        _, _, tool_calls = pi.scan({"path": p, "project_dir": None,
+                                    "is_subagent": False, "parent_session_id": None})
+    skill_rows = [t for t in tool_calls if t.get("skill_name") == "deploy"]
+    assert len(skill_rows) == 1
+    assert skill_rows[0]["cost_usd"] == one  # only the one in-span working turn
+
+
 # ─── opencode adapter smoke test ──────────────────────────────────────────
 
 
