@@ -468,6 +468,47 @@ def build_finder_agent(client, model, project_key, source_repo, log_path, record
     )
 
 
+def _scope_skill_path(
+    file_path: str, *, slug: str, expected_prefix: str
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve an agent-supplied write path to a bundle-scoped path, or reject it.
+
+    This is the security boundary that keeps a skill curator from writing into
+    a sibling skill, the `_pending` approval queue, an absolute path, or
+    escaping its bundle via `..`. Pure — no filesystem access — so the policy
+    can be exercised directly.
+
+    Returns a `(scoped_path, note, error)` triple, exactly one of which drives
+    the outcome:
+      - `(path, None, None)`  → path already in scope; write verbatim.
+      - `(path, note, None)`  → relative path auto-scoped to `path`; write and
+                                surface `note` so the agent learns to prefix.
+      - `(None, None, error)` → out of scope; reject, do not write.
+    """
+    # The agent sometimes prepends a redundant `<slug>/` — strip it first so
+    # `<slug>/SKILL.md` is treated the same as `SKILL.md`.
+    if file_path.startswith(slug + "/"):
+        file_path = file_path[len(slug) + 1 :]
+    if file_path.startswith(expected_prefix):
+        return file_path, None, None
+    # Block writes to another skill, the sibling output subdir, absolute paths,
+    # or any traversal attempt.
+    forbidden_prefixes = ("skills/", "_pending/", "/")
+    if any(file_path.startswith(p) for p in forbidden_prefixes) or ".." in file_path:
+        return None, None, (
+            f"ERROR: this skill curator can only write under '{expected_prefix}'. "
+            f"You tried '{file_path}'. Use relative paths like 'SKILL.md', 'scripts/foo.py'."
+        )
+    # Auto-scope a plain relative path under <out_subdir>/<slug>/.
+    clean = file_path.lstrip("./")
+    full = expected_prefix + clean
+    note = (
+        f"NOTE: path '{file_path}' auto-scoped to '{full}'. Always prefix paths with "
+        f"'{expected_prefix}' explicitly."
+    )
+    return full, note, None
+
+
 def build_skill_curator(client, model, project_key, source_repo, candidate, log_path, run_critic, recorder: ReadRecorder | None = None, out_subdir: str = "skills"):
     """Build the per-skill curator agent.
 
@@ -486,26 +527,13 @@ def build_skill_curator(client, model, project_key, source_repo, candidate, log_
     raw_writer = handlers["write_bundle_file"]
 
     def write_skill_scoped(file_path: str, content: str) -> str:
-        # If agent typed the slug as a prefix (the original path bug), strip it
-        if file_path.startswith(slug + "/"):
-            file_path = file_path[len(slug) + 1 :]
-        if file_path.startswith(expected_prefix):
-            return raw_writer(file_path=file_path, content=content)
-        # Block writes to another skill, the sibling output subdir, or absolute paths
-        forbidden_prefixes = ("skills/", "_pending/", "/")
-        if any(file_path.startswith(p) for p in forbidden_prefixes) or ".." in file_path:
-            return (
-                f"ERROR: this skill curator can only write under '{expected_prefix}'. "
-                f"You tried '{file_path}'. Use relative paths like 'SKILL.md', 'scripts/foo.py'."
-            )
-        # Auto-scope relative paths under <out_subdir>/<slug>/
-        clean = file_path.lstrip("./")
-        full = expected_prefix + clean
-        result = raw_writer(file_path=full, content=content)
-        return (
-            f"NOTE: path '{file_path}' auto-scoped to '{full}'. Always prefix paths with "
-            f"'{expected_prefix}' explicitly. {result}"
+        scoped, note, error = _scope_skill_path(
+            file_path, slug=slug, expected_prefix=expected_prefix
         )
+        if error is not None:
+            return error
+        result = raw_writer(file_path=scoped, content=content)
+        return f"{note} {result}" if note else result
 
     # Replace the write tool spec + handler with the scoped version
     specs = [s for s in specs if s["function"]["name"] != "write_bundle_file"]
