@@ -711,3 +711,164 @@ def test_uptake_both_channels_counts_suggestion_once(fresh_metrics):
     )
     n = fresh_metrics._count_uptake([_sugg("s1", "portless-dev-server", "2026-05-20T12:00:00")])
     assert n == 1
+
+
+# ─── skill_effectiveness ───────────────────────────────────────────────────
+#
+# Builds a corpus with a sessions table (the columns the metric reads) and a
+# tool_calls table carrying skill_name + cost_usd + timestamp — the #94
+# accrual surface. Dates are anchored to today so the lookback window matches.
+
+def _days_ago(n: int) -> str:
+    from datetime import date as _date
+    return f"{(_date.today() - timedelta(days=n)).isoformat()}T12:00:00"
+
+
+def _seed_corpus_skill_eff(corpus_path: Path, sessions: list[dict], tool_calls: list[dict]) -> None:
+    """sessions + a tool_calls table with skill_name/cost_usd/timestamp, the
+    exact surface skill_effectiveness joins over."""
+    schema = """
+    CREATE TABLE sessions (
+        session_id TEXT PRIMARY KEY,
+        project_dir TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        duration_seconds REAL,
+        tool_use_count INTEGER NOT NULL DEFAULT 0,
+        tool_error_count INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        is_subagent INTEGER NOT NULL DEFAULT 0,
+        agent TEXT NOT NULL DEFAULT 'claude_code'
+    );
+    CREATE TABLE tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT,
+        timestamp TEXT,
+        tool_name TEXT,
+        is_error INTEGER NOT NULL DEFAULT 0,
+        skill_name TEXT,
+        cost_usd REAL
+    );
+    """
+    s_cols = ("session_id, project_dir, started_at, duration_seconds, "
+              "tool_use_count, tool_error_count, cost_usd, is_subagent, agent")
+    with sqlite3.connect(str(corpus_path)) as conn:
+        conn.executescript(schema)
+        for s in sessions:
+            row = {"duration_seconds": None, "is_subagent": 0, "agent": "claude_code", **s}
+            ph = ", ".join(f":{c.strip()}" for c in s_cols.split(","))
+            conn.execute(f"INSERT INTO sessions ({s_cols}) VALUES ({ph})", row)
+        for t in tool_calls:
+            row = {"skill_name": None, "cost_usd": None, "is_error": 0, **t}
+            conn.execute(
+                "INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name, cost_usd) "
+                "VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name, :cost_usd)",
+                row,
+            )
+
+
+def test_skill_effectiveness_empty_when_no_corpus(fresh_metrics):
+    assert fresh_metrics.skill_effectiveness(days=90) == []
+
+
+def test_skill_effectiveness_usage_and_association(fresh_metrics):
+    """A skill that fires in low-error/low-cost sessions vs same-project
+    baseline: usage counts, decay split, #94 cost accrual, and an
+    association (not causal) outcome delta all surface."""
+    fired = ["f1", "f2", "f3"]
+    base = ["b1", "b2", "b3", "b4"]
+    sessions = []
+    for sid in fired:  # error_rate 1/10 = 0.1, cost 0.5, dur 100
+        sessions.append({"session_id": sid, "project_dir": "/pa",
+                         "started_at": _days_ago(5 if sid != "f3" else 60),
+                         "duration_seconds": 100.0, "tool_use_count": 10,
+                         "tool_error_count": 1, "cost_usd": 0.5})
+    for sid in base:  # error_rate 3/10 = 0.3, cost 1.0, dur 200
+        sessions.append({"session_id": sid, "project_dir": "/pa",
+                         "started_at": _days_ago(5), "duration_seconds": 200.0,
+                         "tool_use_count": 10, "tool_error_count": 3, "cost_usd": 1.0})
+    tool_calls = []
+    for sid in fired:  # one skill activation row per fired session
+        tool_calls.append({"session_id": sid, "timestamp": _days_ago(5 if sid != "f3" else 60),
+                           "tool_name": "Skill", "skill_name": "deploy", "cost_usd": 0.05})
+    # a non-skill tool row must be ignored by the per-skill rollup
+    tool_calls.append({"session_id": "b1", "timestamp": _days_ago(5), "tool_name": "Bash"})
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tool_calls)
+
+    rows = fresh_metrics.skill_effectiveness(days=90)
+    assert len(rows) == 1
+    r = rows[0]
+    # usage
+    assert r["skill_name"] == "deploy"
+    assert r["fires"] == 3
+    assert r["sessions_fired"] == 3
+    assert r["projects"] == 1
+    assert r["cost_usd"] == pytest.approx(0.15)
+    assert r["fires_recent"] == 2 and r["fires_prior"] == 1  # f1,f2 recent; f3 prior
+    assert r["last_fired"] is not None and r["first_fired"] is not None
+    # association
+    assert r["fired"]["sessions_n"] == 3
+    assert r["baseline"]["sessions_n"] == 4
+    assert r["fired"]["median_error_rate"] == pytest.approx(0.1)
+    assert r["baseline"]["median_error_rate"] == pytest.approx(0.3)
+    assert r["delta_error_rate"] == pytest.approx(-0.2)
+    assert r["delta_cost"] == pytest.approx(-0.5)
+    assert "lower tool-error rate" in r["verdict"]
+    assert "lower median cost" in r["verdict"]
+    assert "association only" in r["verdict"]
+    assert "n=3 fired vs 4 comparable" in r["verdict"]
+
+
+def test_skill_effectiveness_too_few_fired_has_no_delta(fresh_metrics):
+    """Under 3 fired sessions → no comparison, no causal-looking numbers."""
+    sessions = [
+        {"session_id": "f1", "project_dir": "/pa", "started_at": _days_ago(3),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.2},
+        {"session_id": "f2", "project_dir": "/pa", "started_at": _days_ago(3),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.2},
+        {"session_id": "b1", "project_dir": "/pa", "started_at": _days_ago(3),
+         "tool_use_count": 5, "tool_error_count": 2, "cost_usd": 0.9},
+    ]
+    tool_calls = [
+        {"session_id": "f1", "timestamp": _days_ago(3), "tool_name": "Skill", "skill_name": "deploy"},
+        {"session_id": "f2", "timestamp": _days_ago(3), "tool_name": "Skill", "skill_name": "deploy"},
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tool_calls)
+    r = fresh_metrics.skill_effectiveness(days=90)[0]
+    assert r["fires"] == 2
+    assert r["delta_error_rate"] is None and r["delta_cost"] is None
+    assert "Too few fired sessions" in r["verdict"]
+    # cost_usd accrual is None on these rows → coalesces to 0.0, never errors
+    assert r["cost_usd"] == pytest.approx(0.0)
+
+
+def test_skill_effectiveness_project_filter_scopes_baseline(fresh_metrics, monkeypatch, tmp_path):
+    """--project scopes both the skill set and its baseline to that project."""
+    state_db = tmp_path / "state.db"
+    with sqlite3.connect(str(state_db)) as conn:
+        conn.execute("CREATE TABLE projects (project_key TEXT PRIMARY KEY, source_repo TEXT NOT NULL)")
+        conn.execute("INSERT INTO projects VALUES ('pa', '/pa')")
+    monkeypatch.setattr(fresh_metrics, "STATE_DB", state_db)
+
+    sessions = []
+    # project /pa: deploy fires in 3, 3 baseline
+    for i in range(3):
+        sessions.append({"session_id": f"af{i}", "project_dir": "/pa", "started_at": _days_ago(4),
+                         "tool_use_count": 10, "tool_error_count": 1, "cost_usd": 0.5})
+    for i in range(3):
+        sessions.append({"session_id": f"ab{i}", "project_dir": "/pa", "started_at": _days_ago(4),
+                         "tool_use_count": 10, "tool_error_count": 4, "cost_usd": 1.0})
+    # project /pb: a different skill fires — must be excluded by the filter
+    for i in range(3):
+        sessions.append({"session_id": f"bf{i}", "project_dir": "/pb", "started_at": _days_ago(4),
+                         "tool_use_count": 10, "tool_error_count": 1, "cost_usd": 0.5})
+    tool_calls = [{"session_id": f"af{i}", "timestamp": _days_ago(4), "tool_name": "Skill",
+                   "skill_name": "deploy"} for i in range(3)]
+    tool_calls += [{"session_id": f"bf{i}", "timestamp": _days_ago(4), "tool_name": "Skill",
+                    "skill_name": "release"} for i in range(3)]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tool_calls)
+
+    rows = fresh_metrics.skill_effectiveness(days=90, project_key="pa")
+    assert [r["skill_name"] for r in rows] == ["deploy"]  # 'release' (in /pb) excluded
+    r = rows[0]
+    assert r["fired"]["sessions_n"] == 3 and r["baseline"]["sessions_n"] == 3
+    assert r["delta_error_rate"] == pytest.approx(0.1 - 0.4)

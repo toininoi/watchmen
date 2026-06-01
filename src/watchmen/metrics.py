@@ -787,6 +787,228 @@ def per_project_totals(days: int = 30) -> list[dict]:
     return out
 
 
+def _median(xs: list[float]) -> float:
+    """Plain median; 0.0 on empty input. Mirrors viewer.homepage._median so
+    the per-skill numbers line up with the project impact card's style."""
+    if not xs:
+        return 0.0
+    s = sorted(xs)
+    n = len(s)
+    return float(s[n // 2]) if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def _effectiveness_verdict(
+    *, n_fired: int, n_base: int, delta_error: float | None, delta_cost: float | None
+) -> str:
+    """Plain-language summary of a skill's fired-vs-comparison outcomes.
+
+    ASSOCIATION ONLY — never claims the skill *caused* the difference.
+    Sessions that invoke a skill self-select for harder or more procedural
+    work, which confounds any naive fired-vs-not comparison. Same no-causation
+    discipline as `viewer.homepage.project_impact`'s verdict."""
+    if n_fired < 3:
+        return f"Too few fired sessions to compare (n={n_fired}, need ≥3)."
+    if n_base < 3 or delta_error is None or delta_cost is None:
+        return "No comparable non-fired sessions in the same projects."
+    parts: list[str] = []
+    if delta_error < 0:
+        parts.append(f"{abs(delta_error) * 100:.1f}pp lower tool-error rate")
+    elif delta_error > 0:
+        parts.append(f"{delta_error * 100:.1f}pp higher tool-error rate")
+    else:
+        parts.append("the same tool-error rate")
+    if delta_cost < 0:
+        parts.append(f"${abs(delta_cost):.3f} lower median cost")
+    elif delta_cost > 0:
+        parts.append(f"${delta_cost:.3f} higher median cost")
+    else:
+        parts.append("the same median cost")
+    return (
+        f"Sessions using this skill showed {parts[0]} and {parts[1]} "
+        f"(association only; n={n_fired} fired vs {n_base} comparable)."
+    )
+
+
+def skill_effectiveness(days: int = 90, project_key: str | None = None) -> list[dict]:
+    """Per-skill usage + outcome association across captured sessions.
+
+    Answers two questions the maintainer cares about in equal measure:
+
+    USAGE — how is this skill actually being used?
+        fires            total Skill/skill tool invocations in the window
+        sessions_fired   distinct non-subagent sessions it fired in
+        projects         distinct project_dirs it fired in
+        first_fired      ISO local date of first / last invocation
+        last_fired
+        fires_recent     fires in the trailing half of the window vs the
+        fires_prior      leading half — a cheap decay/staleness signal
+        cost_usd         accrued per-skill cost (the #94 `tool_calls.cost_usd`
+                         accrual; 0.0 on adapters/rows that never populated it)
+
+    EFFECTIVENESS — among sessions in the SAME projects + window, compare
+    sessions where the skill fired against sessions where it did not:
+        fired / baseline   each {sessions_n, median_error_rate, median_cost,
+                           median_duration_seconds}
+        delta_error_rate   signed (fired − baseline); None if either side <3
+        delta_cost
+        verdict            plain-language, ASSOCIATION-ONLY (never causal)
+
+    The comparison is confounded by selection (skills fire on harder tasks) —
+    the field names and verdict say so. It is a descriptive signal to triage
+    skills, not a causal claim. Sorted by `fires` desc; missing corpus.db → [].
+    Never raises — the underlying data is best-effort."""
+    if not CORPUS_DB.exists():
+        return []
+
+    today = date.today()
+    cutoff = (today - timedelta(days=days - 1)).isoformat()
+    # Split point for the decay signal: midpoint of the window.
+    mid = (today - timedelta(days=(days - 1) // 2)).isoformat()
+
+    project_dir: str | None = None
+    if project_key is not None:
+        project_dir = _project_dir_for_key(project_key)
+        if project_dir is None:
+            return []
+    proj_filter = " AND s.project_dir = ?" if project_dir else ""
+    proj_param = [project_dir] if project_dir else []
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        # Q1 — per-skill usage. skill_name is set on the activation row;
+        # cost_usd carries the #94 per-skill accrual.
+        usage_rows = [
+            dict(r)
+            for r in conn.execute(
+                f"""
+                SELECT t.skill_name AS skill,
+                       COUNT(*) AS fires,
+                       COUNT(DISTINCT t.session_id) AS sessions_fired,
+                       COUNT(DISTINCT s.project_dir) AS projects,
+                       MIN(t.timestamp) AS first_fired,
+                       MAX(t.timestamp) AS last_fired,
+                       COALESCE(SUM(t.cost_usd), 0.0) AS cost_usd,
+                       SUM(CASE WHEN date(t.timestamp,'localtime') >= ?
+                                THEN 1 ELSE 0 END) AS fires_recent
+                  FROM tool_calls t
+                  JOIN sessions s ON t.session_id = s.session_id
+                 WHERE t.skill_name IS NOT NULL AND t.skill_name <> ''
+                   AND s.is_subagent = 0
+                   AND date(s.started_at,'localtime') >= ?
+                   {proj_filter}
+                 GROUP BY t.skill_name
+                 ORDER BY fires DESC
+                """,
+                [mid, cutoff] + proj_param,
+            ).fetchall()
+        ]
+        if not usage_rows:
+            return []
+
+        # Per-session outcomes for the window (one pass, pooled in memory — a
+        # personal corpus is small). error_rate normalizes errors by tool
+        # calls so a long session isn't penalized for sheer volume.
+        sessions: dict[str, dict] = {}
+        for r in conn.execute(
+            f"""SELECT s.session_id AS sid, s.project_dir AS pd,
+                       s.tool_error_count AS errs, s.tool_use_count AS tools,
+                       s.cost_usd AS cost, s.duration_seconds AS dur
+                  FROM sessions s
+                 WHERE s.is_subagent = 0
+                   AND date(s.started_at,'localtime') >= ?
+                   {proj_filter}""",
+            [cutoff] + proj_param,
+        ).fetchall():
+            sessions[r["sid"]] = {
+                "pd": r["pd"],
+                "error_rate": (r["errs"] / r["tools"]) if r["tools"] else 0.0,
+                "cost": float(r["cost"] or 0.0),
+                "dur": r["dur"],
+            }
+
+        # skill -> set of session_ids it fired in (window-scoped).
+        fired_by_skill: dict[str, set[str]] = {}
+        for r in conn.execute(
+            f"""SELECT DISTINCT t.skill_name AS skill, t.session_id AS sid
+                  FROM tool_calls t
+                  JOIN sessions s ON t.session_id = s.session_id
+                 WHERE t.skill_name IS NOT NULL AND t.skill_name <> ''
+                   AND s.is_subagent = 0
+                   AND date(s.started_at,'localtime') >= ?
+                   {proj_filter}""",
+            [cutoff] + proj_param,
+        ).fetchall():
+            fired_by_skill.setdefault(r["skill"], set()).add(r["sid"])
+
+    # Pre-bucket session ids by project so the baseline lookup is O(1).
+    sids_by_project: dict[str | None, set[str]] = {}
+    for sid, s in sessions.items():
+        sids_by_project.setdefault(s["pd"], set()).add(sid)
+
+    def _stats(group: set[str]) -> dict:
+        g = [sessions[sid] for sid in group if sid in sessions]
+        return {
+            "sessions_n": len(g),
+            "median_error_rate": round(_median([x["error_rate"] for x in g]), 4),
+            "median_cost": round(_median([x["cost"] for x in g]), 4),
+            "median_duration_seconds": round(
+                _median([x["dur"] for x in g if x["dur"] is not None]), 1
+            ),
+        }
+
+    out: list[dict] = []
+    for u in usage_rows:
+        skill = u["skill"]
+        fired = fired_by_skill.get(skill, set())
+        projects_of_skill = {sessions[sid]["pd"] for sid in fired if sid in sessions}
+        # Baseline = sessions in the SAME projects that did NOT fire this skill.
+        baseline: set[str] = set()
+        for pd in projects_of_skill:
+            baseline |= sids_by_project.get(pd, set())
+        baseline -= fired
+
+        fired_stats = _stats(fired)
+        base_stats = _stats(baseline)
+        have_both = fired_stats["sessions_n"] >= 3 and base_stats["sessions_n"] >= 3
+        delta_error = (
+            round(fired_stats["median_error_rate"] - base_stats["median_error_rate"], 4)
+            if have_both
+            else None
+        )
+        delta_cost = (
+            round(fired_stats["median_cost"] - base_stats["median_cost"], 4)
+            if have_both
+            else None
+        )
+        fires = u["fires"]
+        fires_recent = u["fires_recent"] or 0
+
+        out.append(
+            {
+                "skill_name": skill,
+                "fires": fires,
+                "sessions_fired": u["sessions_fired"],
+                "projects": u["projects"],
+                "first_fired": _local_date(u["first_fired"]),
+                "last_fired": _local_date(u["last_fired"]),
+                "fires_recent": fires_recent,
+                "fires_prior": fires - fires_recent,
+                "cost_usd": round(float(u["cost_usd"] or 0.0), 4),
+                "fired": fired_stats,
+                "baseline": base_stats,
+                "delta_error_rate": delta_error,
+                "delta_cost": delta_cost,
+                "verdict": _effectiveness_verdict(
+                    n_fired=fired_stats["sessions_n"],
+                    n_base=base_stats["sessions_n"],
+                    delta_error=delta_error,
+                    delta_cost=delta_cost,
+                ),
+            }
+        )
+    return out
+
+
 def activity_calendar(project_key: str, weeks: int = 26) -> list[tuple[str, int]]:
     """Per-day prompt counts for the last `weeks` weeks (Sunday-aligned).
     Returns [(date_iso, prompt_count)] in chronological order."""
