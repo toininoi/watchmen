@@ -28,8 +28,11 @@ We don't split cacheWrite into 5m/1h (pi doesn't surface the breakdown), so
 the full bucket is charged at the 5m rate — matching how the Claude adapter
 treats Anthropic transcripts that predate the granular fields.
 
-NB: spec only — no real-world rollout from this dev box. Real-data validation
-will happen the first time a teammate installs pi.
+Validated against a real pi v0.74.0 session (2026-06): header/usage/tree
+shapes confirmed. Note: pi marks tool errors at the message level
+(`message.isError`), and assistant `usage` carries a precomputed `cost`
+object (input/output/cacheRead/cacheWrite/total) that this adapter does
+not yet consume — see issue #94 (cost_source).
 """
 
 from __future__ import annotations
@@ -295,8 +298,13 @@ def scan(entry: dict):
                         })
 
         elif role == "toolResult":
-            # Tool result lives as its own message. Look for error flag.
-            if isinstance(content, list):
+            # Tool result lives as its own message. pi carries the error flag
+            # at the MESSAGE level (`message.isError`), not inside content
+            # blocks — scanning blocks never matched, so tool errors went
+            # uncounted. Read the message-level flag (with legacy fallbacks).
+            if msg.get("isError") or msg.get("is_error"):
+                session["tool_error_count"] += 1
+            elif isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and (block.get("isError") or block.get("is_error")):
                         session["tool_error_count"] += 1
