@@ -116,6 +116,44 @@ def test_scan_parses_minimal_user_assistant_pair():
         assert tool_calls == []
 
 
+def test_scan_charges_usage_once_per_split_message_id():
+    """Claude Code splits one logical assistant response (thinking/text/tool_use)
+    across multiple JSONL lines that share one `message.id` and REPEAT the same
+    `usage`. Usage must be charged ONCE per message.id while block-type tallies
+    still count per line. Summing per line inflated tokens/cost ~1.5-3.3x."""
+    usage = {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 200}
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "session-split.jsonl"
+        _write_transcript(p, [
+            {"timestamp": "2026-05-15T10:00:00Z", "type": "user",
+             "message": {"content": "do a thing"}},
+            # three lines, ONE logical message id, usage repeated identically
+            {"timestamp": "2026-05-15T10:00:10Z", "type": "assistant",
+             "message": {"id": "msg_split", "model": "claude-opus-4-7",
+                         "content": [{"type": "thinking", "thinking": "hmm"}], "usage": usage}},
+            {"timestamp": "2026-05-15T10:00:11Z", "type": "assistant",
+             "message": {"id": "msg_split", "model": "claude-opus-4-7",
+                         "content": [{"type": "text", "text": "here"}], "usage": usage}},
+            {"timestamp": "2026-05-15T10:00:12Z", "type": "assistant",
+             "message": {"id": "msg_split", "model": "claude-opus-4-7",
+                         "content": [{"type": "tool_use", "name": "Bash", "input": {}}], "usage": usage}},
+            # a genuinely distinct follow-up message must still be charged
+            {"timestamp": "2026-05-15T10:00:20Z", "type": "assistant",
+             "message": {"id": "msg_next", "model": "claude-opus-4-7",
+                         "content": [{"type": "text", "text": "done"}], "usage": usage}},
+        ])
+        session, _, _ = claude_code.scan(_entry(p))
+
+        # usage counted once per id → two charges (msg_split + msg_next)
+        assert session["input_tokens"] == 200, session["input_tokens"]
+        assert session["output_tokens"] == 100, session["output_tokens"]
+        assert session["cache_read_tokens"] == 400, session["cache_read_tokens"]
+        # block-type tallies still per line
+        assert session["assistant_thinking_count"] == 1
+        assert session["assistant_text_count"] == 2
+        assert session["tool_use_count"] == 1
+
+
 def test_scan_extracts_text_blocks_skips_tool_result_only_messages():
     """User messages can carry either a string OR a list of content blocks. A
     list with only tool_result blocks is NOT a real user prompt — it's the
