@@ -101,6 +101,7 @@ from watchmen.commands.pipeline import (
 )
 from watchmen.commands.lifecycle import cmd_down, cmd_up
 from watchmen.commands.subagents import cmd_subagents
+from watchmen.commands.skills import cmd_skills
 from watchmen.commands.goals import cmd_goals
 from watchmen.commands.distill import cmd_distill
 from watchmen.util import find_changelog as _find_changelog
@@ -1209,6 +1210,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("recent",     "git log of curator artifact changes (last N days)"),
         ("insights",   "cross-repo digest — sessions, skills, patterns, friction"),
         ("subagents",  "subagent usage and cost share per agent / project"),
+        ("skills",     "per-skill usage, decay, cost + fired-vs-baseline outcomes"),
         ("goals",      "codex goal usage and cost per project (codex 0.133.0+)"),
         ("changelog",  "render the watchmen CHANGELOG.md"),
         ("open",       "open the viewer in your browser"),
@@ -1543,6 +1545,24 @@ def main(argv: list[str] | None = None) -> int:
         help="show detail for one project key (default: global overview)",
     )
     p_subagents.set_defaults(func=cmd_subagents)
+
+    p_skills = sub.add_parser(
+        "skills",
+        help="per-skill usage, decay, cost and fired-vs-baseline session outcomes",
+    )
+    p_skills.add_argument(
+        "--project", default=None,
+        help="scope to one project key (default: all projects)",
+    )
+    p_skills.add_argument(
+        "--days", type=int, default=90,
+        help="lookback window in days (default: 90)",
+    )
+    p_skills.add_argument(
+        "--json", action="store_true",
+        help="emit raw rows as JSON instead of a table",
+    )
+    p_skills.set_defaults(func=cmd_skills)
 
     p_goals = sub.add_parser(
         "goals",
