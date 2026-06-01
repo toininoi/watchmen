@@ -76,7 +76,14 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     -- Claude Code transcript carries `input.skill = '<slug>'`. Used by
     -- the prune pipeline to count how often each curated skill actually
     -- fires in real sessions.
-    skill_name TEXT
+    skill_name TEXT,
+    -- `cost_usd` is populated only on skill-activation rows (skill_name set):
+    -- the USD cost of the turns the skill was active for (the activating
+    -- turn's span until the next skill or genuine user prompt). Per-turn
+    -- cost is computed in the adapter loop anyway; we accrue it into the
+    -- active skill instead of discarding it. NULL on non-skill rows.
+    -- Enables cost-ranked skill suggestions (#95) without a per-turn table.
+    cost_usd REAL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
@@ -161,6 +168,8 @@ def _migrate_tool_calls_columns(conn: sqlite3.Connection) -> None:
         per-skill usage signal can be extracted without a full rebuild.
         Existing rows get NULL — that's correct since pre-migration
         sessions weren't scanned for the input.skill payload.
+      - `cost_usd` added for per-skill cost attribution (#94). NULL on
+        existing rows until the next scan re-ingests them.
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_calls)").fetchall()}
     if "skill_name" not in cols:
@@ -168,6 +177,8 @@ def _migrate_tool_calls_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tool_calls_skill ON tool_calls(skill_name)"
         )
+    if "cost_usd" not in cols:
+        conn.execute("ALTER TABLE tool_calls ADD COLUMN cost_usd REAL")
 
 
 _ENSURE_GOALS_TABLE = """
@@ -316,9 +327,13 @@ def _replace_session(conn: sqlite3.Connection, session: dict, prompts: list, too
             prompts,
         )
     if tools:
+        # Only adapters that attribute per-skill cost set `cost_usd`; default
+        # the rest to NULL so the named-param insert doesn't trip on the key.
+        for t in tools:
+            t.setdefault("cost_usd", None)
         conn.executemany(
-            """INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name)
-               VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name)""",
+            """INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name, cost_usd)
+               VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name, :cost_usd)""",
             tools,
         )
 
