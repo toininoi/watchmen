@@ -1,248 +1,248 @@
-"""OpenCode agent session adapter.
+"""OpenCode agent session adapter — reads the SQLite store (opencode >= 1.x).
 
-Reads OpenCode sessions exported as JSON. OpenCode (anomalyco/opencode)
-stores sessions internally in a SQLite-backed store, but provides a clean
-`opencode export <id>` CLI that produces these files.
+OpenCode 1.x dropped the per-session JSON files this adapter used to read and
+moved to a Drizzle/SQLite store at ~/.local/share/opencode/opencode.db (path
+also reported by `opencode db path`). Layout:
 
-Format:
-    {
-      "id": "ses_...",
-      "cwd": "/path/to/project",
-      "model": "anthropic/claude-3-5-sonnet-20241022",
-      "messages": [
-        {
-          "info": {"role": "user", "timestamp": "ISO"},
-          "parts": [{"type": "text", "text": "..."}]
-        },
-        {
-          "info": {"role": "assistant", "model_id": "...", "tokens": {"input": 1, "output": 1}},
-          "parts": [
-            {"type": "reasoning", "text": "..."},
-            {"type": "tool", "tool": "bash", "status": "completed", "output": "..."}
-          ]
-        }
-      ]
-    }
+  - session: one row per session. Carries the AUTHORITATIVE rollups opencode
+    computes itself — `cost`, `tokens_input/output/reasoning/cache_read/
+    cache_write` — plus `parent_id` (subagent linkage), `agent`, `model`,
+    `directory`, `time_created/updated`.
+  - message: id, session_id, time_created, `data` (JSON = UserMessage |
+    AssistantMessage; AssistantMessage carries per-message `cost` + `tokens`).
+  - part: id, message_id, session_id, time_created, `data` (JSON Part —
+    text / reasoning / tool / step-* ...).
+
+Skills are a FIRST-CLASS `tool` part (`data.tool == "skill"`, slug in
+`state.input.skillId`), not a SKILL.md read, so the path heuristic used by
+the codex/pi adapters does not fire here — we key on the skill tool directly.
+
+Cost: opencode prices everything itself. We take the session total from the
+`session.cost` column and each AssistantMessage's `cost` (from message.data)
+to attribute per-skill cost (#94), rather than recomputing from a price table.
+
+NB: written against the opencode 1.15 SDK schema (@opencode-ai/sdk
+types.gen.d.ts) + the live DB schema, and tested with a synthetic fixture DB.
+Not yet validated against a real opencode session (none on the dev box;
+generating one needs provider auth). Real-data validation is a follow-up.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from watchmen.adapters._shared import extract_skill_from_args
-from watchmen.metrics import turn_cost_usd
-
 NAME = "opencode"
 
-# OpenCode doesn't have a single canonical on-disk session directory like
-# Claude Code or Codex. Users are expected to use `opencode export` or
-# point watchmen at their own export folder. We check the most likely
-# defaults.
-SESSIONS_DIRS = (
-    Path.home() / ".opencode" / "sessions",
-    Path.home() / ".local" / "share" / "opencode" / "sessions",
+DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+
+_SESSION_COLS = (
+    "id", "directory", "parent_id", "agent", "model", "cost",
+    "tokens_input", "tokens_output", "tokens_reasoning",
+    "tokens_cache_read", "tokens_cache_write", "time_created", "time_updated",
 )
 
 
-def _parse_iso(ts):
-    if ts is None:
+def _connect(db_path: Path) -> sqlite3.Connection:
+    """Open the store read-only so we never lock or mutate the live DB."""
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+
+def _epoch_to_iso(v) -> str | None:
+    """opencode timestamps are epoch integers (milliseconds). Tolerate seconds
+    too (heuristic: > 1e12 => ms) so a future unit change degrades gracefully."""
+    if not isinstance(v, (int, float)) or v <= 0:
         return None
-    if isinstance(ts, (int, float)):
-        try:
-            return datetime.fromtimestamp(ts, tz=timezone.utc)
-        except (OSError, ValueError):
-            return None
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    return None
+    seconds = v / 1000.0 if v > 1e12 else float(v)
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (OSError, ValueError, OverflowError):
+        return None
 
 
 def discover() -> Iterable[dict]:
-    for sessions_dir in SESSIONS_DIRS:
-        if not sessions_dir.exists():
-            continue
-        for f in sessions_dir.glob("*.json"):
-            yield {
-                "path": f,
-                "project_dir": None,  # extracted from JSON in scan()
-                "is_subagent": False,
-                "parent_session_id": None,
-            }
+    if not DB_PATH.exists():
+        return
+    try:
+        conn = _connect(DB_PATH)
+    except sqlite3.OperationalError:
+        return
+    try:
+        rows = conn.execute(f"SELECT {', '.join(_SESSION_COLS)} FROM session").fetchall()
+    except sqlite3.OperationalError:
+        # Pre-1.x DB without these columns, or no session table — nothing to do.
+        rows = []
+    finally:
+        conn.close()
+
+    for r in rows:
+        row = dict(zip(_SESSION_COLS, r))
+        yield {
+            # `path` must be a real, stat-able file: scan_all uses its mtime
+            # for incremental skips. All sessions share the DB file, so the
+            # skip granularity is whole-DB (re-scan every session when the DB
+            # changes) — fine for the handful of sessions opencode holds.
+            "path": DB_PATH,
+            "db_path": DB_PATH,
+            "session_id": row["id"],
+            "session_row": row,
+            "project_dir": row.get("directory") or "(unknown)",
+            "is_subagent": bool(row.get("parent_id")),
+            "parent_session_id": row.get("parent_id"),
+        }
+
+
+def _empty(session_id: str, project_dir: str | None):
+    return {
+        "session_id": session_id,
+        "project_dir": project_dir or "(unknown)",
+        "transcript_path": str(DB_PATH),
+        "started_at": None, "ended_at": None, "duration_seconds": None,
+        "is_subagent": 0, "parent_session_id": None,
+        "message_count": 0, "user_prompt_count": 0,
+        "assistant_text_count": 0, "assistant_thinking_count": 0,
+        "tool_use_count": 0, "tool_error_count": 0,
+        "models": "[]", "input_tokens": 0, "cache_creation_tokens": 0,
+        "cache_read_tokens": 0, "output_tokens": 0,
+        "model_dominant": None, "cost_usd": 0.0, "agent": NAME,
+    }, [], []
+
+
+def _skill_slug(state: dict) -> str | None:
+    """A skill tool part carries the slug in state.input.skillId (the server
+    also serializes it as skill_id in some paths — accept both)."""
+    inp = state.get("input") if isinstance(state, dict) else None
+    if isinstance(inp, dict):
+        slug = inp.get("skillId") or inp.get("skill_id")
+        if isinstance(slug, str) and slug.strip():
+            return slug.strip()
+    return None
 
 
 def scan(entry: dict):
-    path: Path = entry["path"]
-    with open(path, encoding="utf-8") as f:
+    db_path: Path = entry.get("db_path", DB_PATH)
+    sid: str = entry["session_id"]
+    row: dict = entry.get("session_row") or {}
+    project_dir = entry.get("project_dir") or row.get("directory") or "(unknown)"
+
+    session, prompts, tool_calls = _empty(sid, project_dir)
+    session["is_subagent"] = int(bool(entry.get("parent_session_id") or row.get("parent_id")))
+    session["parent_session_id"] = entry.get("parent_session_id") or row.get("parent_id")
+
+    # Session-level rollups come straight from opencode's own columns.
+    session["cost_usd"] = float(row.get("cost") or 0.0)
+    session["input_tokens"] = int(row.get("tokens_input") or 0)
+    session["output_tokens"] = int(row.get("tokens_output") or 0)
+    session["cache_read_tokens"] = int(row.get("tokens_cache_read") or 0)
+    session["cache_creation_tokens"] = int(row.get("tokens_cache_write") or 0)
+    session["started_at"] = _epoch_to_iso(row.get("time_created"))
+    session["ended_at"] = _epoch_to_iso(row.get("time_updated"))
+    a, b = session["started_at"], session["ended_at"]
+    if a and b:
+        session["duration_seconds"] = (datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds()
+
+    try:
+        conn = _connect(db_path)
+    except sqlite3.OperationalError:
+        return session, prompts, tool_calls
+    try:
+        msg_rows = conn.execute(
+            "SELECT id, time_created, data FROM message WHERE session_id = ? "
+            "ORDER BY time_created, id", (sid,),
+        ).fetchall()
+        part_rows = conn.execute(
+            "SELECT message_id, time_created, data FROM part WHERE session_id = ? "
+            "ORDER BY time_created, id", (sid,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return session, prompts, tool_calls
+    finally:
         try:
-            data = json.load(f)
-        except json.JSONDecodeError:
-            # Fall back to empty result if file is corrupt
-            return _empty_session(path)
+            conn.close()
+        except Exception:
+            pass
 
-    # Basic structural check
-    if not isinstance(data, dict) or "messages" not in data:
-        return _empty_session(path)
+    # Group parts under their message id.
+    parts_by_msg: dict[str, list] = {}
+    for mid, _p_ts, p_data in part_rows:
+        parts_by_msg.setdefault(mid, []).append(p_data)
 
-    session = {
-        "session_id": data.get("id") or path.stem,
-        "project_dir": data.get("cwd") or "(unknown)",
-        "transcript_path": str(path),
-        "started_at": None,
-        "ended_at": None,
-        "duration_seconds": None,
-        "is_subagent": 0,
-        "parent_session_id": None,
-        "message_count": 0,
-        "user_prompt_count": 0,
-        "assistant_text_count": 0,
-        "assistant_thinking_count": 0,
-        "tool_use_count": 0,
-        "tool_error_count": 0,
-        "models": "[]",
-        "input_tokens": 0,
-        "cache_creation_tokens": 0,
-        "cache_read_tokens": 0,
-        "output_tokens": 0,
-        "model_dominant": data.get("model"),
-        "cost_usd": 0.0,
-        "agent": NAME,
-    }
-
-    prompts = []
-    tool_calls = []
-    models = set()
-    if session["model_dominant"]:
-        models.add(session["model_dominant"])
-
+    models: set[str] = set()
+    if row.get("model"):
+        models.add(row["model"])
     is_first_user = True
-    messages = data.get("messages", [])
-    min_ts: datetime | None = None
-    max_ts: datetime | None = None
+    # Per-skill cost attribution (#94): a skill tool part opens a span;
+    # subsequent messages' cost accrues into that skill's row until the next
+    # skill or the next genuine user prompt. `active_skill` points at the row.
+    active_skill: dict | None = None
 
-    for msg in messages:
-        if not isinstance(msg, dict):
+    for mid, m_ts, m_data in msg_rows:
+        try:
+            msg = json.loads(m_data)
+        except (json.JSONDecodeError, TypeError):
             continue
-        info = msg.get("info") or {}
-        role = info.get("role")
-        ts = info.get("timestamp")
-        parts = msg.get("parts") or []
-
-        if ts:
-            parsed = _parse_iso(ts)
-            if parsed:
-                if not min_ts or parsed < min_ts:
-                    min_ts = parsed
-                    session["started_at"] = ts if isinstance(ts, str) else parsed.isoformat()
-                if not max_ts or parsed > max_ts:
-                    max_ts = parsed
-                    session["ended_at"] = ts if isinstance(ts, str) else parsed.isoformat()
-
         session["message_count"] += 1
+        role = msg.get("role")
+        ts_iso = _epoch_to_iso(m_ts) or _epoch_to_iso((msg.get("time") or {}).get("created"))
+        raw_parts = parts_by_msg.get(mid, [])
 
         if role == "user":
-            text_parts = [p.get("text") for p in parts if p.get("type") == "text" and p.get("text")]
-            text = "\n".join(t for t in text_parts if t)
+            text_parts = []
+            for p_data in raw_parts:
+                try:
+                    part = json.loads(p_data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if part.get("type") == "text" and not part.get("synthetic") and not part.get("ignored"):
+                    if part.get("text"):
+                        text_parts.append(part["text"])
+            text = "\n".join(text_parts)
             if text:
-                # Ensure timestamp is a comparable ISO string for the DB
-                p_ts = ts
-                if ts and not isinstance(ts, str):
-                    p_parsed = _parse_iso(ts)
-                    if p_parsed:
-                        p_ts = p_parsed.isoformat()
-
                 prompts.append({
-                    "session_id": session["session_id"],
-                    "timestamp": p_ts,
-                    "text": text,
-                    "word_count": len(text.split()),
-                    "char_count": len(text),
+                    "session_id": sid, "timestamp": ts_iso, "text": text,
+                    "word_count": len(text.split()), "char_count": len(text),
                     "is_first_in_session": int(is_first_user),
                 })
                 is_first_user = False
                 session["user_prompt_count"] += 1
+                active_skill = None  # genuine prompt ends any skill span
 
         elif role == "assistant":
-            model = info.get("model_id") or session["model_dominant"]
-            if model:
-                models.add(model)
-
-            tokens = info.get("tokens") or {}
-            in_t = int(tokens.get("input") or 0)
-            out_t = int(tokens.get("output") or 0)
-            cw_t = int(tokens.get("cache_write") or 0)
-            cr_t = int(tokens.get("cache_read") or 0)
-
-            session["input_tokens"] += in_t
-            session["output_tokens"] += out_t
-            session["cache_creation_tokens"] += cw_t
-            session["cache_read_tokens"] += cr_t
-
-            if model:
-                session["cost_usd"] += turn_cost_usd(model, in_t, cw_t, 0, cr_t, out_t)
-
-            for p in parts:
-                ptype = p.get("type")
+            if msg.get("modelID"):
+                models.add(msg["modelID"])
+            turn_cost = float(msg.get("cost") or 0.0)
+            if active_skill is not None:
+                active_skill["cost_usd"] = (active_skill["cost_usd"] or 0.0) + turn_cost
+            for p_data in raw_parts:
+                try:
+                    part = json.loads(p_data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                ptype = part.get("type")
                 if ptype == "text":
                     session["assistant_text_count"] += 1
                 elif ptype == "reasoning":
                     session["assistant_thinking_count"] += 1
                 elif ptype == "tool":
                     session["tool_use_count"] += 1
-                    
-                    # Ensure timestamp is a comparable ISO string for the DB
-                    tc_ts = ts
-                    if ts and not isinstance(ts, str):
-                        tc_parsed = _parse_iso(ts)
-                        if tc_parsed:
-                            tc_ts = tc_parsed.isoformat()
-
-                    tool_calls.append({
-                        "session_id": session["session_id"],
-                        "timestamp": tc_ts,
-                        "tool_name": p.get("tool") or "?",
-                        "is_error": 1 if p.get("status") == "error" else 0,
-                        "skill_name": extract_skill_from_args(p.get("args")),
-                    })
-                    if p.get("status") == "error":
+                    state = part.get("state") or {}
+                    is_error = 1 if state.get("status") == "error" else 0
+                    if is_error:
                         session["tool_error_count"] += 1
+                    skill_name = _skill_slug(state) if part.get("tool") == "skill" else None
+                    tc = {
+                        "session_id": sid, "timestamp": ts_iso,
+                        "tool_name": part.get("tool") or "?",
+                        "is_error": is_error, "skill_name": skill_name,
+                    }
+                    if skill_name:
+                        tc["cost_usd"] = 0.0
+                        active_skill = tc
+                    tool_calls.append(tc)
 
-    session["models"] = json.dumps(sorted(list(models)))
-    a = _parse_iso(session["started_at"])
-    b = _parse_iso(session["ended_at"])
-    if a and b:
-        session["duration_seconds"] = (b - a).total_seconds()
-
+    session["models"] = json.dumps(sorted(models))
+    session["model_dominant"] = row.get("model") or (sorted(models)[0] if models else None)
     return session, prompts, tool_calls
-
-
-def _empty_session(path: Path):
-    return {
-        "session_id": path.stem,
-        "project_dir": "(unknown)",
-        "transcript_path": str(path),
-        "started_at": None,
-        "ended_at": None,
-        "duration_seconds": None,
-        "is_subagent": 0,
-        "parent_session_id": None,
-        "message_count": 0,
-        "user_prompt_count": 0,
-        "assistant_text_count": 0,
-        "assistant_thinking_count": 0,
-        "tool_use_count": 0,
-        "tool_error_count": 0,
-        "models": "[]",
-        "input_tokens": 0,
-        "cache_creation_tokens": 0,
-        "cache_read_tokens": 0,
-        "output_tokens": 0,
-        "model_dominant": None,
-        "cost_usd": 0.0,
-        "agent": NAME,
-    }, [], []

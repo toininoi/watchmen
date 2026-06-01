@@ -27,7 +27,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from watchmen.adapters import codex, opencode, pi
+from watchmen.adapters import codex, pi
 from watchmen.adapters._shared import extract_skill_from_args, extract_skill_from_path
 
 
@@ -248,29 +248,8 @@ def test_pi_adapter_attributes_turn_cost_to_active_skill():
     assert skill_rows[0]["cost_usd"] == one  # only the one in-span working turn
 
 
-# ─── opencode adapter smoke test ──────────────────────────────────────────
-
-
-def test_opencode_adapter_extracts_skill_name_from_tool_part_args():
-    """An opencode tool part whose args reference a SKILL.md should set skill_name."""
-    data = {
-        "id": "ses_skill_test",
-        "cwd": "/proj",
-        "model": "anthropic/claude-3-5-sonnet",
-        "messages": [
-            {"info": {"role": "user", "timestamp": "2026-05-19T12:00:00.000Z"},
-             "parts": [{"type": "text", "text": "use the refactor skill"}]},
-            {"info": {"role": "assistant", "timestamp": "2026-05-19T12:00:05.000Z",
-                      "model_id": "claude-3-5-sonnet", "tokens": {"input": 10, "output": 20}},
-             "parts": [{"type": "tool", "tool": "read",
-                        "args": {"path": "/Users/me/.opencode/skills/refactor/SKILL.md"},
-                        "status": "completed", "output": "..."}]},
-        ],
-    }
-    with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "session.json"
-        p.write_text(json.dumps(data))
-        _, _, tool_calls = opencode.scan({"path": p})
-    assert len(tool_calls) == 1
-    assert tool_calls[0]["tool_name"] == "read"
-    assert tool_calls[0]["skill_name"] == "refactor"
+# ─── opencode adapter ─────────────────────────────────────────────────────
+# opencode 1.x has a FIRST-CLASS `skill` tool (data.tool == "skill",
+# state.input.skillId) and reads from a SQLite store, so the SKILL.md-path
+# heuristic above does not apply to it. Its skill detection + per-skill cost
+# accrual are covered in tests/test_adapter_opencode.py.
