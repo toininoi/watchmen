@@ -108,6 +108,13 @@ def scan(entry: dict):
     models: set[str] = set()
     model_output_tokens: dict[str, int] = {}
     is_first = True
+    # Claude Code splits one logical assistant response (thinking + text +
+    # tool_use blocks) across multiple JSONL lines that SHARE one
+    # `message.id` and REPEAT the same `usage`. Summing usage per line
+    # overcounts tokens/cost ~1.5-3.3x. We charge usage once per contiguous
+    # run of same-id assistant lines (runs are always contiguous in practice)
+    # while still counting content blocks per line below.
+    last_usage_msg_id: str | None = None
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -178,7 +185,13 @@ def scan(entry: dict):
                 if model:
                     models.add(model)
                 usage = msg.get("usage") or {}
-                if isinstance(usage, dict):
+                msg_id = msg.get("id")
+                # Skip usage for continuation lines of the same logical
+                # message (same id repeats identical usage). Block-type
+                # tallies below still run per line.
+                charge_usage = msg_id is None or msg_id != last_usage_msg_id
+                last_usage_msg_id = msg_id
+                if isinstance(usage, dict) and charge_usage:
                     in_t = int(usage.get("input_tokens") or 0)
                     cc_t = int(usage.get("cache_creation_input_tokens") or 0)
                     cr_t = int(usage.get("cache_read_input_tokens") or 0)
