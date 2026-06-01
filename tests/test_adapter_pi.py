@@ -24,6 +24,68 @@ def _entry(path: Path) -> dict:
     }
 
 
+def test_scan_uses_native_cost_total_over_price_table():
+    """pi's `usage.cost.total` is authoritative (e.g. OpenRouter/`:free` models
+    our price table doesn't know). The adapter must use it, not recompute. Uses
+    an unpriced model so a price-table recompute would be 0/wrong, and asserts
+    the native total surfaces as the session cost."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        _write(p, [
+            {"type": "session", "version": 3, "id": "s1",
+             "timestamp": "2026-05-15T10:00:00.000Z", "cwd": "/p"},
+            {"type": "message", "id": "u1", "parentId": "s1",
+             "timestamp": "2026-05-15T10:00:01.000Z",
+             "message": {"role": "user", "content": "go"}},
+            {"type": "message", "id": "a1", "parentId": "u1",
+             "timestamp": "2026-05-15T10:00:02.000Z",
+             "message": {"role": "assistant", "model": "tencent/hy3-preview:free",
+                         "content": [{"type": "text", "text": "ok"}],
+                         "usage": {"input": 1000, "output": 1000,
+                                   "cost": {"input": 0.1, "output": 0.3, "total": 0.42}}}},
+        ])
+        session, _, _ = pi.scan(_entry(p))
+        assert session["cost_usd"] == 0.42, session["cost_usd"]
+
+
+def test_scan_native_cost_zero_is_respected_not_recomputed():
+    """A native total of 0.0 (free models) is valid and must be used as-is,
+    not treated as 'missing' and recomputed."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        _write(p, [
+            {"type": "session", "version": 3, "id": "s1",
+             "timestamp": "2026-05-15T10:00:00.000Z", "cwd": "/p"},
+            {"type": "message", "id": "a1", "parentId": "s1",
+             "timestamp": "2026-05-15T10:00:02.000Z",
+             "message": {"role": "assistant", "model": "claude-3-5-sonnet",
+                         "content": [{"type": "text", "text": "ok"}],
+                         "usage": {"input": 1000, "output": 1000, "cost": {"total": 0.0}}}},
+        ])
+        session, _, _ = pi.scan(_entry(p))
+        assert session["cost_usd"] == 0.0, session["cost_usd"]
+
+
+def test_scan_falls_back_to_price_table_without_native_cost():
+    """When `usage` has no `cost` object, recompute via the price table."""
+    from watchmen.metrics import turn_cost_usd
+    expect = turn_cost_usd("claude-3-5-sonnet", 1000, 0, 0, 0, 1000)
+    assert expect > 0
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.jsonl"
+        _write(p, [
+            {"type": "session", "version": 3, "id": "s1",
+             "timestamp": "2026-05-15T10:00:00.000Z", "cwd": "/p"},
+            {"type": "message", "id": "a1", "parentId": "s1",
+             "timestamp": "2026-05-15T10:00:02.000Z",
+             "message": {"role": "assistant", "model": "claude-3-5-sonnet",
+                         "content": [{"type": "text", "text": "ok"}],
+                         "usage": {"input": 1000, "output": 1000}}},
+        ])
+        session, _, _ = pi.scan(_entry(p))
+        assert session["cost_usd"] == expect, session["cost_usd"]
+
+
 def test_scan_counts_toolresult_error_at_message_level():
     """pi marks a failed tool call with `message.isError: true` on the
     toolResult message itself — NOT via an `isError` block inside content.
