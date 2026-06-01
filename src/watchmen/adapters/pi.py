@@ -23,16 +23,17 @@ leaf (entry with no children in the file) with the latest timestamp. Works
 when there's one obvious tip; ambiguous mid-edit branching just picks the
 most recently-touched line, which matches user intent in practice.
 
-Cost: pi records per-message usage with input/output/cacheRead/cacheWrite.
-We don't split cacheWrite into 5m/1h (pi doesn't surface the breakdown), so
-the full bucket is charged at the 5m rate — matching how the Claude adapter
-treats Anthropic transcripts that predate the granular fields.
+Cost: pi's assistant `usage` carries a precomputed `cost` object
+(input/output/cacheRead/cacheWrite/total) computed by pi/the provider at
+request time. We use `usage.cost.total` directly — it's authoritative for
+OpenRouter / `:free` / multi-provider models our price table doesn't know.
+We only fall back to recomputing via the price table when no numeric total
+is present (older sessions / missing field); that fallback charges the full
+cacheWrite bucket at the 5m rate, since pi doesn't split 5m/1h.
 
 Validated against a real pi v0.74.0 session (2026-06): header/usage/tree
-shapes confirmed. Note: pi marks tool errors at the message level
-(`message.isError`), and assistant `usage` carries a precomputed `cost`
-object (input/output/cacheRead/cacheWrite/total) that this adapter does
-not yet consume — see issue #94 (cost_source).
+shapes confirmed. pi also marks tool errors at the message level
+(`message.isError`).
 """
 
 from __future__ import annotations
@@ -275,13 +276,22 @@ def scan(entry: dict):
                 out_t = int(usage.get("output") or 0)
                 cw_t = int(usage.get("cacheWrite") or 0)
                 cr_t = int(usage.get("cacheRead") or 0)
-                # pi doesn't split cache write into 5m/1h; treat as 5m (matches
-                # claude_code's fallback when granular fields are absent).
                 session["input_tokens"] += in_t
                 session["cache_creation_tokens"] += cw_t
                 session["cache_read_tokens"] += cr_t
                 session["output_tokens"] += out_t
-                turn_cost = turn_cost_usd(model, in_t, cw_t, 0, cr_t, out_t)
+                # Prefer pi's own precomputed cost (`usage.cost.total`). It's
+                # provider-authoritative — correct for OpenRouter / `:free` /
+                # multi-provider models our price table doesn't know. A native
+                # total of 0.0 is valid (free models), so only fall back to
+                # the price table when no numeric total is present.
+                cost_obj = usage.get("cost")
+                native = cost_obj.get("total") if isinstance(cost_obj, dict) else None
+                if isinstance(native, (int, float)):
+                    turn_cost = float(native)
+                else:
+                    # pi doesn't split cache write into 5m/1h; treat as 5m.
+                    turn_cost = turn_cost_usd(model, in_t, cw_t, 0, cr_t, out_t)
                 session["cost_usd"] += turn_cost
                 if active_skill is not None:
                     active_skill["cost_usd"] = (active_skill["cost_usd"] or 0.0) + turn_cost
