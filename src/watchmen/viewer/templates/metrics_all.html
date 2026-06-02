@@ -241,9 +241,68 @@
 </section>
 {% endif %}
 
+{% if work_matrix and work_matrix.rows %}
+<section class="wm-matrix mb-8">
+  <div class="wm-cmp__header">
+    <h2 class="wm-cmp__title">Where your work happens</h2>
+    <div class="wm-cmp__sub">
+      Repos × agents over the last {{ work_matrix.window_days }} days (since {{ work_matrix.since }}).
+      Cell shade tracks session volume; the % below each count is that cell's tool-error rate.
+      {% if work_matrix.repos_total > work_matrix.repos_shown %}
+        Showing the {{ work_matrix.repos_shown }} busiest of {{ work_matrix.repos_total }} repos.
+      {% endif %}
+    </div>
+  </div>
+  <div class="wm-matrix__scroll">
+    <table class="wm-matrix__table">
+      <thead>
+        <tr>
+          <th class="wm-matrix__corner">repo</th>
+          {% for ag in work_matrix.agents %}
+            <th>{{ work_matrix.agent_labels[ag] }}</th>
+          {% endfor %}
+          <th class="wm-matrix__total-h">sessions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in work_matrix.rows %}
+        <tr>
+          <td class="wm-matrix__repo" title="{{ row.repo }}">{{ row.label }}</td>
+          {% for ag in work_matrix.agents %}
+            {% set cell = row.cells.get(ag) %}
+            {% if cell %}
+              <td class="wm-matrix__cell" style="background: rgba(37,99,235,{{ (cell.intensity * 0.8)|round(3) }});">
+                <span class="wm-matrix__n">{{ cell.sessions }}</span>
+                <span class="wm-matrix__err{% if cell.error_rate >= 0.10 %} is-hot{% endif %}">{{ "{:.0%}".format(cell.error_rate) }}</span>
+              </td>
+            {% else %}
+              <td class="wm-matrix__cell wm-matrix__cell--empty">·</td>
+            {% endif %}
+          {% endfor %}
+          <td class="wm-matrix__total">{{ "{:,}".format(row.totals.sessions) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
 <style>
   /* `.stat-card` baseline lives in base.html now. Only daily-table styles
      stay local since they're unique to this page. */
+  .wm-matrix__scroll { overflow-x: auto; }
+  table.wm-matrix__table { border-collapse: collapse; font-size: 13px; width: 100%; }
+  .wm-matrix__table th { text-align: center; padding: 6px 12px; font-weight: 500; color: hsl(var(--muted-foreground)); border-bottom: 1px solid hsl(var(--border)); }
+  .wm-matrix__corner { text-align: left !important; }
+  .wm-matrix__table td { padding: 0; border-bottom: 1px solid hsl(var(--border)); }
+  .wm-matrix__repo { text-align: left; padding: 6px 12px !important; color: hsl(var(--foreground)); white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .wm-matrix__cell { text-align: center; min-width: 72px; padding: 6px 12px !important; font-variant-numeric: tabular-nums; }
+  .wm-matrix__cell--empty { color: hsl(var(--muted-foreground)); }
+  .wm-matrix__n { display: block; font-weight: 600; color: hsl(var(--foreground)); }
+  .wm-matrix__err { display: block; font-size: 11px; color: hsl(var(--muted-foreground)); }
+  .wm-matrix__err.is-hot { color: hsl(0, 84%, 60%); font-weight: 600; }
+  .wm-matrix__total, .wm-matrix__total-h { text-align: right !important; padding: 6px 12px !important; font-variant-numeric: tabular-nums; }
   table.daily { font-size: 13px; }
   table.daily th { text-align: right; padding: 6px 10px; font-weight: 500; color: hsl(var(--muted-foreground)); background: hsl(var(--muted)); border-bottom: 1px solid hsl(var(--border)); }
   table.daily td { text-align: right; padding: 6px 10px; border-bottom: 1px solid hsl(var(--border)); font-variant-numeric: tabular-nums; }

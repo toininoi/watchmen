@@ -1190,6 +1190,8 @@ def metrics_all(request: Request, tracked: int = 0):
         "cmp_facts": cmp_facts,
         "cmp_narrative_html": cmp_narrative_html,
         "cmp_narrative_meta": cmp_narrative_meta,
+        # Repo × agent grid: where work happens + where each agent struggles.
+        "work_matrix": _metrics.work_matrix(days=card_days, tracked_only=tracked_only),
     })
 
 
