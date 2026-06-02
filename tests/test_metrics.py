@@ -736,6 +736,10 @@ def _seed_corpus_skill_eff(corpus_path: Path, sessions: list[dict], tool_calls: 
         tool_use_count INTEGER NOT NULL DEFAULT 0,
         tool_error_count INTEGER NOT NULL DEFAULT 0,
         cost_usd REAL NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
         is_subagent INTEGER NOT NULL DEFAULT 0,
         agent TEXT NOT NULL DEFAULT 'claude_code'
     );
@@ -872,3 +876,107 @@ def test_skill_effectiveness_project_filter_scopes_baseline(fresh_metrics, monke
     r = rows[0]
     assert r["fired"]["sessions_n"] == 3 and r["baseline"]["sessions_n"] == 3
     assert r["delta_error_rate"] == pytest.approx(0.1 - 0.4)
+
+
+# ─── work_matrix ────────────────────────────────────────────────────────────
+
+
+def test_work_matrix_empty_when_no_corpus(fresh_metrics):
+    out = fresh_metrics.work_matrix(days=90)
+    assert out["rows"] == [] and out["agents"] == []
+
+
+def test_work_matrix_folds_repo_x_agent_with_intensity_and_error_rate(fresh_metrics):
+    rows = [
+        # kai: heavy in claude_code, light in codex
+        {"session_id": "k1", "project_dir": "/home/u/kai", "started_at": _days_ago(3),
+         "tool_use_count": 10, "tool_error_count": 1, "cost_usd": 1.0, "agent": "claude_code"},
+        {"session_id": "k2", "project_dir": "/home/u/kai", "started_at": _days_ago(3),
+         "tool_use_count": 10, "tool_error_count": 1, "cost_usd": 1.0, "agent": "claude_code"},
+        {"session_id": "k3", "project_dir": "/home/u/kai", "started_at": _days_ago(3),
+         "tool_use_count": 10, "tool_error_count": 0, "cost_usd": 1.0, "agent": "claude_code"},
+        {"session_id": "k4", "project_dir": "/home/u/kai", "started_at": _days_ago(3),
+         "tool_use_count": 5, "tool_error_count": 5, "cost_usd": 0.5, "agent": "codex"},
+        # watchmen: codex only
+        {"session_id": "w1", "project_dir": "/home/u/watchmen", "started_at": _days_ago(3),
+         "tool_use_count": 4, "tool_error_count": 0, "cost_usd": 0.2, "agent": "codex"},
+        # a subagent session must be excluded
+        {"session_id": "sub", "project_dir": "/home/u/kai", "started_at": _days_ago(3),
+         "tool_use_count": 99, "tool_error_count": 0, "cost_usd": 9.0, "agent": "claude_code",
+         "is_subagent": 1},
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
+    out = fresh_metrics.work_matrix(days=90)
+
+    # columns ordered by total sessions: claude_code (3) before codex (2)
+    assert out["agents"] == ["claude_code", "codex"]
+    # rows ordered by total sessions desc: kai (4) before watchmen (1)
+    labels = [r["label"] for r in out["rows"]]
+    assert labels == ["kai", "watchmen"]
+
+    kai = out["rows"][0]
+    assert kai["totals"]["sessions"] == 4  # subagent excluded
+    cc = kai["cells"]["claude_code"]
+    assert cc["sessions"] == 3 and cc["tool_errors"] == 2 and cc["tool_calls"] == 30
+    assert cc["error_rate"] == pytest.approx(2 / 30, abs=1e-4)
+    # busiest cell is kai/claude_code with 3 sessions → intensity 1.0
+    assert out["scale"]["sessions_max"] == 3
+    assert cc["intensity"] == pytest.approx(1.0)
+    # kai/claude_code: 2 errors / 30 tools ≈ 7% → shown, but not hot (<10%)
+    assert cc["secondary_label"] == "7%" and cc["secondary_hot"] is False
+    # codex cell in kai: 5/5 errors → error_rate 1.0, intensity 1/3, flagged hot
+    cx = kai["cells"]["codex"]
+    assert cx["error_rate"] == pytest.approx(1.0)
+    assert cx["intensity"] == pytest.approx(1 / 3, abs=1e-4)
+    assert cx["secondary_label"] == "100%" and cx["secondary_hot"] is True
+    # watchmen row: no claude_code cell; its codex cell is clean → blank secondary
+    wm = out["rows"][1]
+    assert wm["cells"].get("claude_code") is None
+    assert wm["cells"]["codex"]["error_rate"] == 0.0
+    assert wm["cells"]["codex"]["secondary_label"] == ""
+
+
+def test_work_matrix_truncates_to_top_repos_and_reports_total(fresh_metrics):
+    rows = []
+    for i in range(25):  # 25 repos, 1 session each
+        rows.append({"session_id": f"s{i}", "project_dir": f"/r/proj{i:02d}",
+                     "started_at": _days_ago(2), "tool_use_count": 1,
+                     "tool_error_count": 0, "cost_usd": 0.1, "agent": "claude_code"})
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
+    out = fresh_metrics.work_matrix(days=90, top_repos=20)
+    assert out["repos_total"] == 25
+    assert out["repos_shown"] == 20
+    assert len(out["rows"]) == 20
+
+
+def test_work_matrix_metric_cost_shades_and_ranks_by_cost(fresh_metrics):
+    """metric='cost' switches the colour ramp + headline + row order to cost.
+    cheaprepo has more sessions but billrepo has far more cost → billrepo
+    must outrank it and own the brightest cell."""
+    rows = [
+        {"session_id": "c1", "project_dir": "/r/cheaprepo", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.10, "agent": "claude_code"},
+        {"session_id": "c2", "project_dir": "/r/cheaprepo", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.10, "agent": "claude_code"},
+        {"session_id": "b1", "project_dir": "/r/billrepo", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 9.00, "agent": "codex"},
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
+    out = fresh_metrics.work_matrix(days=90, metric="cost")
+    assert out["metric"] == "cost"
+    assert [r["label"] for r in out["rows"]] == ["billrepo", "cheaprepo"]  # by cost, not sessions
+    bill = out["rows"][0]["cells"]["codex"]
+    assert bill["intensity"] == pytest.approx(1.0)          # priciest cell
+    assert bill["primary_label"] == "$9.00"
+    assert out["scale"]["value_max"] == pytest.approx(9.0)
+    cheap = out["rows"][1]["cells"]["claude_code"]  # two $0.10 sessions → $0.20
+    assert cheap["primary_label"] == "$0.20"
+    assert cheap["intensity"] == pytest.approx(0.20 / 9.0, abs=1e-4)
+
+
+def test_work_matrix_unknown_metric_falls_back_to_sessions(fresh_metrics):
+    rows = [{"session_id": "s1", "project_dir": "/r/a", "started_at": _days_ago(1),
+             "tool_use_count": 1, "tool_error_count": 0, "cost_usd": 0.1, "agent": "claude_code"}]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
+    out = fresh_metrics.work_matrix(days=90, metric="bogus")
+    assert out["metric"] == "sessions"

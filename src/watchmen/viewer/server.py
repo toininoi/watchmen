@@ -1038,7 +1038,7 @@ def insights_page(request: Request):
 
 
 @app.get("/metrics", response_class=HTMLResponse)
-def metrics_all(request: Request, tracked: int = 0):
+def metrics_all(request: Request, tracked: int = 0, matrix: str = "sessions"):
     from watchmen import metrics as _metrics
     tracked_only = bool(tracked)
     rows = _metrics.daily_metrics_all(days=30, tracked_only=tracked_only)
@@ -1190,6 +1190,11 @@ def metrics_all(request: Request, tracked: int = 0):
         "cmp_facts": cmp_facts,
         "cmp_narrative_html": cmp_narrative_html,
         "cmp_narrative_meta": cmp_narrative_meta,
+        # Repo × agent grid: where work happens + where each agent struggles.
+        # `matrix` query param picks the metric (sessions|cost|tokens|errors).
+        "work_matrix": _metrics.work_matrix(days=card_days, tracked_only=tracked_only, metric=matrix),
+        "matrix_metrics": _metrics.MATRIX_METRICS,
+        "matrix_tracked": 1 if tracked_only else 0,
     })
 
 
