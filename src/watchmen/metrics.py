@@ -518,33 +518,68 @@ def adapter_breakdown_all(days: int = 30, tracked_only: bool = False) -> list[di
     return out
 
 
-def work_matrix(days: int = 90, tracked_only: bool = False, top_repos: int = 20) -> dict:
+# Metrics the work matrix can shade/sort by. `cell_key` is the per-cell field
+# the colour ramp normalizes; `row_sort` is the per-repo total used to rank
+# rows (errors sorts by absolute count, not rate, so a 1-session 100%-error
+# repo doesn't float to the top on noise).
+MATRIX_METRICS = ("sessions", "cost", "tokens", "errors")
+_MATRIX_META = {
+    "sessions": {"label": "sessions", "cell_key": "sessions",   "row_sort": "sessions"},
+    "cost":     {"label": "cost",     "cell_key": "cost_usd",   "row_sort": "cost_usd"},
+    "tokens":   {"label": "tokens",   "cell_key": "tokens",     "row_sort": "tokens"},
+    "errors":   {"label": "error rate", "cell_key": "error_rate", "row_sort": "tool_errors"},
+}
+
+
+def _matrix_primary_label(metric: str, cell: dict) -> str:
+    if metric == "cost":
+        return f"${cell['cost_usd']:,.2f}"
+    if metric == "tokens":
+        return _format_kn(cell["tokens"])
+    if metric == "errors":
+        return f"{cell['error_rate']:.0%}"
+    return f"{cell['sessions']:,}"
+
+
+def work_matrix(
+    days: int = 90, tracked_only: bool = False, top_repos: int = 20, metric: str = "sessions"
+) -> dict:
     """Repo × agent grid: where the user's work actually happens and where
-    each agent struggles. Rows are repos (most-active first), columns are the
-    agents that have sessions in the window, cells carry sessions / cost /
-    error-rate so the viewer can shade by volume and surface the trouble spots.
+    each agent struggles. Rows are repos, columns are the agents that have
+    sessions in the window. Each cell carries sessions / cost / tokens /
+    error-rate; `metric` picks which one drives the colour ramp, the headline
+    number, and the row ranking. Columns stay ordered by session volume.
+
+    `metric` ∈ MATRIX_METRICS ("sessions", "cost", "tokens", "errors");
+    anything else falls back to "sessions".
 
     Shape (JSON-able, ready for a server-rendered table):
         {
           "window_days": 90, "since": "2026-03-04",
-          "agents": ["claude_code", "codex", ...],     # columns present
+          "metric": "cost", "metric_label": "cost",
+          "agents": ["claude_code", ...], "agent_labels": {...},  # columns
           "rows": [
-            {"repo": "/abs/path", "label": "kai",
-             "totals": {"sessions": 180, "cost_usd": 5.4},
-             "cells": {"claude_code": {sessions, cost_usd, tool_errors,
-                                       tool_calls, error_rate, intensity},
-                       "codex": None, ...}}],          # None = no sessions
-          "scale": {"sessions_max": 142},              # for the colour ramp
-          "repos_total": 27, "repos_shown": 20,        # truncation, surfaced not hidden
+            {"repo": "/abs/path", "label": "kai", "total_label": "$5.40",
+             "cells": {"claude_code": {sessions, cost_usd, tokens, tool_errors,
+                       tool_calls, error_rate, intensity, primary_label,
+                       secondary_label, secondary_hot}, "codex": None, ...}}],
+          "scale": {"sessions_max": 142, "value_max": <max of active metric>},
+          "repos_total": 27, "repos_shown": 20,        # truncation, surfaced
         }
 
-    `intensity` is sessions/sessions_max in [0,1] — the template multiplies it
-    into a cell background so the eye lands on the busy squares. error_rate is
-    tool_errors/tool_calls (0.0 when a cell ran no tools). Never raises; missing
-    corpus.db → an empty grid the template renders as a polite empty state."""
+    `intensity` is the active metric's cell value / its max, in [0,1] — the
+    template multiplies it into a cell background. `secondary_label` is the
+    error rate (or session count, when the metric *is* errors); `secondary_hot`
+    flags an error rate ≥10%. Never raises; missing corpus.db → empty grid."""
+    if metric not in _MATRIX_META:
+        metric = "sessions"
+    meta = _MATRIX_META[metric]
+    cell_key, row_sort = meta["cell_key"], meta["row_sort"]
+
     out: dict = {
-        "window_days": days, "since": None, "agents": [], "agent_labels": {},
-        "rows": [], "scale": {"sessions_max": 0}, "repos_total": 0, "repos_shown": 0,
+        "window_days": days, "since": None, "metric": metric, "metric_label": meta["label"],
+        "agents": [], "agent_labels": {}, "rows": [],
+        "scale": {"sessions_max": 0, "value_max": 0}, "repos_total": 0, "repos_shown": 0,
     }
     if not CORPUS_DB.exists():
         return out
@@ -566,7 +601,9 @@ def work_matrix(days: int = 90, tracked_only: bool = False, top_repos: int = 20)
                COUNT(*) AS sessions,
                COALESCE(SUM(cost_usd), 0.0) AS cost_usd,
                COALESCE(SUM(tool_error_count), 0) AS tool_errors,
-               COALESCE(SUM(tool_use_count), 0) AS tool_calls
+               COALESCE(SUM(tool_use_count), 0) AS tool_calls,
+               COALESCE(SUM(input_tokens + cache_creation_tokens
+                            + cache_read_tokens + output_tokens), 0) AS tokens
           FROM sessions
          WHERE is_subagent = 0
            AND project_dir IS NOT NULL AND project_dir <> ''
@@ -580,39 +617,56 @@ def work_matrix(days: int = 90, tracked_only: bool = False, top_repos: int = 20)
     if not raw:
         return out
 
-    # Fold (repo, agent) rows into per-repo buckets + tally column order by
-    # total sessions so the busiest agent leads.
+    # Fold (repo, agent) rows into per-repo buckets; column order is by total
+    # sessions (volume) regardless of the active metric.
     repos: dict[str, dict] = {}
     agent_totals: dict[str, int] = {}
     sessions_max = 0
+    value_max = 0.0
     for r in raw:
-        repo = r["repo"]
-        agent = r["agent"]
+        repo, agent = r["repo"], r["agent"]
         tools = r["tool_calls"] or 0
         cell = {
             "sessions": r["sessions"],
             "cost_usd": round(float(r["cost_usd"] or 0.0), 4),
+            "tokens": r["tokens"] or 0,
             "tool_errors": r["tool_errors"] or 0,
             "tool_calls": tools,
             "error_rate": round((r["tool_errors"] / tools), 4) if tools > 0 else 0.0,
         }
         bucket = repos.setdefault(
             repo, {"repo": repo, "label": _repo_label(repo),
-                   "totals": {"sessions": 0, "cost_usd": 0.0}, "cells": {}}
+                   "totals": {"sessions": 0, "cost_usd": 0.0, "tokens": 0, "tool_errors": 0},
+                   "cells": {}}
         )
         bucket["cells"][agent] = cell
-        bucket["totals"]["sessions"] += cell["sessions"]
-        bucket["totals"]["cost_usd"] = round(bucket["totals"]["cost_usd"] + cell["cost_usd"], 4)
+        t = bucket["totals"]
+        t["sessions"] += cell["sessions"]
+        t["cost_usd"] = round(t["cost_usd"] + cell["cost_usd"], 4)
+        t["tokens"] += cell["tokens"]
+        t["tool_errors"] += cell["tool_errors"]
         agent_totals[agent] = agent_totals.get(agent, 0) + cell["sessions"]
         sessions_max = max(sessions_max, cell["sessions"])
+        value_max = max(value_max, float(cell[cell_key]))
 
     agents = [a for a, _ in sorted(agent_totals.items(), key=lambda kv: (-kv[1], kv[0]))]
-    rows = sorted(repos.values(), key=lambda b: b["totals"]["sessions"], reverse=True)
+    rows = sorted(repos.values(), key=lambda b: b["totals"][row_sort], reverse=True)
 
-    # Per-cell colour intensity, normalized to the busiest single cell.
     for b in rows:
         for cell in b["cells"].values():
-            cell["intensity"] = round(cell["sessions"] / sessions_max, 4) if sessions_max else 0.0
+            cell["intensity"] = round(float(cell[cell_key]) / value_max, 4) if value_max else 0.0
+            cell["primary_label"] = _matrix_primary_label(metric, cell)
+            if metric == "errors":
+                cell["secondary_label"] = f"{cell['sessions']:,} sess"
+                cell["secondary_hot"] = False
+            else:
+                # Only surface the error rate when there's something to flag —
+                # a clean cell shouldn't carry a "0%" that reads as an alert
+                # next to its (volume-driven) shading.
+                cell["secondary_label"] = f"{cell['error_rate']:.0%}" if cell["error_rate"] > 0 else ""
+                cell["secondary_hot"] = cell["error_rate"] >= 0.10
+        b["total_label"] = _matrix_primary_label(metric, b["totals"]) if metric != "errors" \
+            else f"{b['totals']['tool_errors']:,}"
 
     out["agents"] = agents
     out["agent_labels"] = {a: adapter_label(a) for a in agents}
@@ -620,6 +674,7 @@ def work_matrix(days: int = 90, tracked_only: bool = False, top_repos: int = 20)
     out["rows"] = rows[:top_repos]
     out["repos_shown"] = len(out["rows"])
     out["scale"]["sessions_max"] = sessions_max
+    out["scale"]["value_max"] = round(value_max, 4)
     return out
 
 

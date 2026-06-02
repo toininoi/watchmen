@@ -247,10 +247,21 @@
     <h2 class="wm-cmp__title">Where your work happens</h2>
     <div class="wm-cmp__sub">
       Repos × agents over the last {{ work_matrix.window_days }} days (since {{ work_matrix.since }}).
-      Cell shade tracks session volume; the % below each count is that cell's tool-error rate.
+      Cell shade tracks <strong>{{ work_matrix.metric_label }}</strong>;
+      {% if work_matrix.metric == 'errors' %}
+        the count below each cell is its session count.
+      {% else %}
+        a % appears below a cell only when it has tool errors (red ≥10%).
+      {% endif %}
       {% if work_matrix.repos_total > work_matrix.repos_shown %}
         Showing the {{ work_matrix.repos_shown }} busiest of {{ work_matrix.repos_total }} repos.
       {% endif %}
+    </div>
+    <div class="wm-matrix__tabs">
+      {% for m in matrix_metrics %}
+        <a class="wm-matrix__tab{% if m == work_matrix.metric %} is-active{% endif %}"
+           href="?matrix={{ m }}&tracked={{ matrix_tracked }}">{{ m }}</a>
+      {% endfor %}
     </div>
   </div>
   <div class="wm-matrix__scroll">
@@ -261,7 +272,7 @@
           {% for ag in work_matrix.agents %}
             <th>{{ work_matrix.agent_labels[ag] }}</th>
           {% endfor %}
-          <th class="wm-matrix__total-h">sessions</th>
+          <th class="wm-matrix__total-h">{{ work_matrix.metric_label }}</th>
         </tr>
       </thead>
       <tbody>
@@ -272,14 +283,14 @@
             {% set cell = row.cells.get(ag) %}
             {% if cell %}
               <td class="wm-matrix__cell" style="background: rgba(37,99,235,{{ (cell.intensity * 0.8)|round(3) }});">
-                <span class="wm-matrix__n">{{ cell.sessions }}</span>
-                <span class="wm-matrix__err{% if cell.error_rate >= 0.10 %} is-hot{% endif %}">{{ "{:.0%}".format(cell.error_rate) }}</span>
+                <span class="wm-matrix__n">{{ cell.primary_label }}</span>
+                {% if cell.secondary_label %}<span class="wm-matrix__err{% if cell.secondary_hot %} is-hot{% endif %}">{{ cell.secondary_label }}</span>{% endif %}
               </td>
             {% else %}
               <td class="wm-matrix__cell wm-matrix__cell--empty">·</td>
             {% endif %}
           {% endfor %}
-          <td class="wm-matrix__total">{{ "{:,}".format(row.totals.sessions) }}</td>
+          <td class="wm-matrix__total">{{ row.total_label }}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -291,6 +302,10 @@
 <style>
   /* `.stat-card` baseline lives in base.html now. Only daily-table styles
      stay local since they're unique to this page. */
+  .wm-matrix__tabs { display: flex; gap: 4px; margin-top: 10px; }
+  .wm-matrix__tab { font-size: 12px; padding: 3px 10px; border-radius: 6px; border: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); text-decoration: none; text-transform: capitalize; }
+  .wm-matrix__tab:hover { background: hsl(var(--muted)); }
+  .wm-matrix__tab.is-active { background: hsl(var(--foreground)); color: hsl(var(--background)); border-color: hsl(var(--foreground)); }
   .wm-matrix__scroll { overflow-x: auto; }
   table.wm-matrix__table { border-collapse: collapse; font-size: 13px; width: 100%; }
   .wm-matrix__table th { text-align: center; padding: 6px 12px; font-weight: 500; color: hsl(var(--muted-foreground)); border-bottom: 1px solid hsl(var(--border)); }

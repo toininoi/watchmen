@@ -56,12 +56,15 @@ words" for grouping.
 
 > *Where does my work happen, and where does each agent struggle?*
 
-`metrics.work_matrix(days, tracked_only, top_repos)` → repos (rows, busiest
-first) × agents (columns, busiest first). Each cell: sessions, cost, tool
-errors/calls, `error_rate`, and `intensity` (sessions / busiest-cell). Rendered
-as a server HTML table: cell background shades by `intensity`, the tool-error
-rate prints below each count and goes red ≥10%. Truncates to `top_repos` and
-*surfaces* the truncation ("showing the 20 busiest of 27"). No JS.
+`metrics.work_matrix(days, tracked_only, top_repos, metric)` → repos (rows) ×
+agents (columns, ordered by session volume). Each cell carries sessions / cost
+/ tokens / tool errors / `error_rate`. `metric` ∈ {sessions, cost, tokens,
+errors} picks which one drives the colour ramp, the headline number, and the
+row ranking; the viewer exposes it as `?matrix=` tab links (server re-renders,
+no JS). The error rate prints below each cell **only when non-zero** (red
+≥10%) so a clean, high-volume cell doesn't carry a misleading "0%" next to its
+shading. Truncates to `top_repos` and *surfaces* it ("showing 20 busiest of
+27").
 
 ```
                   Claude Code        Codex            pi.dev
