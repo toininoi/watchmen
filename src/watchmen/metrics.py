@@ -47,6 +47,16 @@ def _repo_label(project_dir: str) -> str:
         return "(unknown)"
     return project_dir.rstrip("/").rsplit("/", 1)[-1] or project_dir
 
+
+# Per-agent colours, matching agent_donut_svg's blue/cyan/teal trio so the
+# swimlane lanes read consistently with the rest of the page.
+AGENT_COLORS = {"claude_code": "#3b82f6", "codex": "#06b6d4", "pi": "#14b8a6"}
+_AGENT_FALLBACK = ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
+
+
+def _agent_color(slug: str, idx: int = 0) -> str:
+    return AGENT_COLORS.get(slug) or _AGENT_FALLBACK[idx % len(_AGENT_FALLBACK)]
+
 # Default price used when model is unknown (matches sonnet-4.6 hardcoded fallback)
 DEFAULT_PRICE = (3.00, 3.75, 6.00, 0.30, 15.00)
 
@@ -676,6 +686,237 @@ def work_matrix(
     out["scale"]["sessions_max"] = sessions_max
     out["scale"]["value_max"] = round(value_max, 4)
     return out
+
+
+def _treatment_day(project_key: str, source_repo: str | None) -> str | None:
+    """First curator-run day for this project (the "skills landed here" marker),
+    as a local ISO date. Reads state.runs; None when there's no recorded run.
+    Mirrors viewer.homepage._treatment_date_for_project but kept local so this
+    module doesn't depend on the viewer."""
+    if not STATE_DB.exists():
+        return None
+    try:
+        with sqlite3.connect(str(STATE_DB)) as conn:
+            row = conn.execute(
+                "SELECT MIN(started_at) FROM runs "
+                "WHERE project_key = ? AND kind LIKE 'curator%' AND status = 'ok'",
+                (project_key,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return _local_date(row[0]) if row and row[0] else None
+
+
+def repo_swimlane(project_key: str, weeks: int = 16, source_repo: str | None = None) -> dict:
+    """One repo's story over time: a daily lane per agent, so you can see when
+    work happened, which agent carried it, and where it handed off — with the
+    "skills landed here" marker overlaid for the before/after read.
+
+    Returns (JSON-able; the SVG is built separately by `repo_swimlane_svg`):
+        {
+          "project_key", "project_dir", "weeks": 16,
+          "start": "2026-02-09", "end": "2026-06-02",
+          "agents": ["claude_code", ...],   # lanes, busiest first
+          "agent_labels": {...},
+          "days": ["2026-02-09", ...],       # every day in the window, ordered
+          "lanes": {agent: {day: {sessions, cost, errors}}},  # sparse
+          "max_day": 7,                      # busiest single (agent, day) cell
+          "landing": "2026-04-18" | None,    # first curator run, if in window
+          "total_sessions": 142,
+        }
+
+    Never raises; missing corpus.db / untracked project → empty (total 0)."""
+    out: dict = {
+        "project_key": project_key, "project_dir": source_repo, "weeks": weeks,
+        "start": None, "end": None, "agents": [], "agent_labels": {}, "days": [],
+        "lanes": {}, "max_day": 0, "landing": None, "total_sessions": 0,
+        "total_skill_fires": 0,
+    }
+    project_dir = source_repo or _project_dir_for_key(project_key)
+    out["project_dir"] = project_dir
+    if not project_dir or not CORPUS_DB.exists():
+        return out
+
+    end = date.today()
+    start = end - timedelta(days=weeks * 7 - 1)
+    out["start"], out["end"] = start.isoformat(), end.isoformat()
+    out["days"] = [(start + timedelta(days=i)).isoformat() for i in range(weeks * 7)]
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT date(started_at, 'localtime') AS d, agent AS agent,
+                      COUNT(*) AS sessions,
+                      COALESCE(SUM(cost_usd), 0.0) AS cost,
+                      COALESCE(SUM(tool_error_count), 0) AS errors
+                 FROM sessions
+                WHERE is_subagent = 0 AND project_dir = ?
+                  AND date(started_at, 'localtime') >= ?
+                GROUP BY d, agent""",
+            (project_dir, start.isoformat()),
+        ).fetchall()
+        # Skill-fire overlay: how many curated skills actually fired per
+        # (agent, day) — watchmen's output being *used*, not just shipped.
+        # Keyed by the session's start day so it aligns with the lane cells.
+        fire_rows = conn.execute(
+            """SELECT date(s.started_at, 'localtime') AS d, s.agent AS agent,
+                      COUNT(*) AS fires
+                 FROM tool_calls t JOIN sessions s ON t.session_id = s.session_id
+                WHERE t.skill_name IS NOT NULL AND t.skill_name <> ''
+                  AND s.is_subagent = 0 AND s.project_dir = ?
+                  AND date(s.started_at, 'localtime') >= ?
+                GROUP BY d, agent""",
+            (project_dir, start.isoformat()),
+        ).fetchall()
+
+    lanes: dict[str, dict] = {}
+    agent_totals: dict[str, int] = {}
+    max_day = 0
+    total = 0
+    for r in rows:
+        n = r["sessions"]
+        lanes.setdefault(r["agent"], {})[r["d"]] = {
+            "sessions": n, "cost": round(float(r["cost"] or 0.0), 4),
+            "errors": r["errors"] or 0, "skill_fires": 0,
+        }
+        agent_totals[r["agent"]] = agent_totals.get(r["agent"], 0) + n
+        max_day = max(max_day, n)
+        total += n
+
+    total_skill_fires = 0
+    for r in fire_rows:
+        cell = lanes.get(r["agent"], {}).get(r["d"])
+        if cell is not None:
+            cell["skill_fires"] = r["fires"]
+            total_skill_fires += r["fires"]
+
+    agents = [a for a, _ in sorted(agent_totals.items(), key=lambda kv: (-kv[1], kv[0]))]
+    landing = _treatment_day(project_key, project_dir)
+    out.update({
+        "agents": agents,
+        "agent_labels": {a: adapter_label(a) for a in agents},
+        "lanes": lanes,
+        "max_day": max_day,
+        "landing": landing if (landing and start.isoformat() <= landing <= end.isoformat()) else None,
+        "total_sessions": total,
+        "total_skill_fires": total_skill_fires,
+    })
+    return out
+
+
+_MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def repo_swimlane_svg(data: dict, width: int = 900) -> str:
+    """Render `repo_swimlane` data as a server-side SVG: one horizontal lane
+    per agent, each day a cell shaded by that day's session count, a month
+    axis along the top, and a dashed 'skills landed' marker. Returns '' when
+    there's nothing to draw (the template shows an empty state)."""
+    agents = data.get("agents") or []
+    days = data.get("days") or []
+    max_day = data.get("max_day") or 0
+    if not agents or not days or max_day <= 0:
+        return ""
+
+    gutter, top, lane_h, gap, pad_r = 100, 24, 24, 6, 8
+    plot_w = width - gutter - pad_r
+    n = len(days)
+    cw = plot_w / n
+    height = top + len(agents) * (lane_h + gap) + 10
+    fg = "hsl(var(--muted-foreground))"
+    parts = [
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+        f'font-family="ui-sans-serif, system-ui, sans-serif" role="img" '
+        f'aria-label="Per-agent session activity over time">'
+    ]
+
+    # Month axis along the top.
+    prev = None
+    for i, d in enumerate(days):
+        ym = d[:7]
+        if ym != prev:
+            x = gutter + i * cw
+            label = f"{_MONTHS[int(d[5:7])]}"
+            parts.append(
+                f'<line x1="{x:.1f}" y1="{top - 4}" x2="{x:.1f}" y2="{height - 6}" '
+                f'stroke="{fg}" stroke-opacity="0.12" stroke-width="1"/>'
+            )
+            parts.append(
+                f'<text x="{x + 2:.1f}" y="{top - 8}" font-size="10" fill="{fg}">{label}</text>'
+            )
+            prev = ym
+
+    # Lanes.
+    for li, agent in enumerate(agents):
+        y = top + li * (lane_h + gap)
+        color = _agent_color(agent, li)
+        label = _xml_escape(data["agent_labels"].get(agent, agent))
+        parts.append(
+            f'<rect x="{gutter - 12:.1f}" y="{y + lane_h / 2 - 4:.1f}" width="8" height="8" '
+            f'rx="2" fill="{color}"/>'
+        )
+        parts.append(
+            f'<text x="{gutter - 18:.1f}" y="{y + lane_h / 2 + 4:.1f}" font-size="11" '
+            f'fill="hsl(var(--foreground))" text-anchor="end">{label}</text>'
+        )
+        # Lane baseline so empty lanes still read as a track.
+        parts.append(
+            f'<rect x="{gutter:.1f}" y="{y:.1f}" width="{plot_w:.1f}" height="{lane_h}" '
+            f'fill="{fg}" fill-opacity="0.04" rx="3"/>'
+        )
+        lane = data["lanes"].get(agent, {})
+        for i, d in enumerate(days):
+            cell = lane.get(d)
+            if not cell:
+                continue
+            inten = cell["sessions"] / max_day
+            x = gutter + i * cw
+            opacity = round(0.2 + 0.8 * inten, 3)
+            tip = f'{label} · {d} · {cell["sessions"]} session(s)'
+            if cell["errors"]:
+                tip += f' · {cell["errors"]} tool errors'
+            fires = cell.get("skill_fires", 0)
+            if fires:
+                tip += f' · {fires} skill fire(s)'
+            parts.append(
+                f'<rect x="{x:.2f}" y="{y:.1f}" width="{max(cw - 0.5, 1):.2f}" height="{lane_h}" '
+                f'fill="{color}" fill-opacity="{opacity}"><title>{_xml_escape(tip)}</title></rect>'
+            )
+            # Skill-fire overlay: an amber dot on days a curated skill ran —
+            # watchmen's output actually being used in this lane.
+            if fires:
+                r = min(max(cw / 2 - 0.6, 1.4), 2.6)
+                cx = x + max(cw - 0.5, 1) / 2
+                parts.append(
+                    f'<circle cx="{cx:.2f}" cy="{y + 3.5:.1f}" r="{r:.1f}" fill="#f59e0b" '
+                    f'stroke="#fff" stroke-width="0.5"/>'
+                )
+
+    # "Skills landed here" marker.
+    landing = data.get("landing")
+    if landing and landing in days:
+        idx = days.index(landing)
+        x = gutter + idx * cw
+        parts.append(
+            f'<line x1="{x:.1f}" y1="{top - 4}" x2="{x:.1f}" y2="{height - 6}" '
+            f'stroke="#ef4444" stroke-width="1.5" stroke-dasharray="3 3"/>'
+        )
+        parts.append(
+            f'<text x="{x + 3:.1f}" y="{height - 1}" font-size="9" fill="#ef4444">skills landed</text>'
+        )
+
+    # Legend for the skill-fire dot (only when there's at least one),
+    # top-right so it can't collide with the "skills landed" label.
+    if data.get("total_skill_fires"):
+        ly = top - 8
+        parts.append(f'<circle cx="{width - 150:.1f}" cy="{ly - 3:.1f}" r="2.4" fill="#f59e0b" stroke="#fff" stroke-width="0.5"/>')
+        parts.append(
+            f'<text x="{width - 143:.1f}" y="{ly:.1f}" font-size="9" fill="{fg}">= a curated skill fired</text>'
+        )
+
+    parts.append("</svg>")
+    return "".join(parts)
 
 
 def agent_comparison_facts(days: int = 90, tracked_only: bool = False) -> dict:

@@ -347,9 +347,11 @@ def dashboard(request: Request):
 
 @app.get("/p/{project_key}", response_class=HTMLResponse)
 def project_page(request: Request, project_key: str):
+    from watchmen import metrics as _metrics
     proj = get_project_meta(project_key)
     if not proj:
         raise HTTPException(404, f"project {project_key} not tracked")
+    swimlane = _metrics.repo_swimlane(project_key, weeks=16, source_repo=proj["source_repo"])
     claude_md_path = BUNDLES / project_key / "CLAUDE.md"
     claude_md_html = render_md(claude_md_path.read_text(encoding="utf-8")) if claude_md_path.exists() else None
     skills = list_skills(project_key)
@@ -368,6 +370,10 @@ def project_page(request: Request, project_key: str):
         # empty state when treatment_date is None or pre/post N < 3, so
         # the section is always safe to include.
         "impact": wm_homepage.project_impact(project_key, weeks=16),
+        # Per-agent activity swimlane over 16 weeks (sessions/day per agent,
+        # with the "skills landed" marker). svg is "" when there's no data.
+        "swimlane": swimlane,
+        "swimlane_svg": _metrics.repo_swimlane_svg(swimlane),
         # Subagent share + top "delegation candidate" main sessions.  Helps
         # surface the (often very large) gap between sessions that delegate
         # heavily to subagents and the monolithic ones that don't.

@@ -980,3 +980,81 @@ def test_work_matrix_unknown_metric_falls_back_to_sessions(fresh_metrics):
     _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
     out = fresh_metrics.work_matrix(days=90, metric="bogus")
     assert out["metric"] == "sessions"
+
+
+# ─── repo_swimlane ──────────────────────────────────────────────────────────
+
+
+def test_repo_swimlane_empty_when_no_corpus(fresh_metrics):
+    out = fresh_metrics.repo_swimlane("proj", weeks=4, source_repo="/r/proj")
+    assert out["total_sessions"] == 0 and out["agents"] == []
+    assert fresh_metrics.repo_swimlane_svg(out) == ""
+
+
+def test_repo_swimlane_buckets_by_day_and_agent(fresh_metrics):
+    rows = [
+        {"session_id": "a1", "project_dir": "/r/kai", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.5, "agent": "claude_code"},
+        {"session_id": "a2", "project_dir": "/r/kai", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 1, "cost_usd": 0.5, "agent": "claude_code"},
+        {"session_id": "c1", "project_dir": "/r/kai", "started_at": _days_ago(1),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.3, "agent": "codex"},
+        # other repo must be excluded; subagent must be excluded
+        {"session_id": "x1", "project_dir": "/r/other", "started_at": _days_ago(1),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.3, "agent": "codex"},
+        {"session_id": "sub", "project_dir": "/r/kai", "started_at": _days_ago(1),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 9.0, "agent": "claude_code",
+         "is_subagent": 1},
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
+    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo="/r/kai")
+
+    assert out["total_sessions"] == 3          # subagent + other repo excluded
+    assert out["agents"] == ["claude_code", "codex"]  # busiest lane first
+    assert out["max_day"] == 2                 # two claude_code sessions same day
+    assert len(out["days"]) == 28              # 4 weeks
+    d2 = _days_ago(2)[:10]
+    assert out["lanes"]["claude_code"][d2]["sessions"] == 2
+    assert out["lanes"]["claude_code"][d2]["errors"] == 1
+    # svg renders one <title> tooltip per populated (agent, day) cell (2 here)
+    svg = fresh_metrics.repo_swimlane_svg(out)
+    assert svg.startswith("<svg") and svg.count("<title>") == 2
+
+
+def test_repo_swimlane_skill_fire_overlay(fresh_metrics):
+    """Days a curated skill fired get a per-(agent, day) count + an amber dot
+    overlay, keyed by the session's start day so it aligns with the lane."""
+    rows = [
+        {"session_id": "a1", "project_dir": "/r/kai", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.5, "agent": "claude_code"},
+        {"session_id": "a2", "project_dir": "/r/kai", "started_at": _days_ago(1),
+         "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.5, "agent": "claude_code"},
+    ]
+    tool_calls = [
+        # a1 fired a skill twice; a2 fired none
+        {"session_id": "a1", "timestamp": _days_ago(2), "tool_name": "Skill", "skill_name": "deploy"},
+        {"session_id": "a1", "timestamp": _days_ago(2), "tool_name": "Skill", "skill_name": "deploy"},
+        {"session_id": "a2", "timestamp": _days_ago(1), "tool_name": "Bash"},  # not a skill
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, tool_calls)
+    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo="/r/kai")
+    assert out["total_skill_fires"] == 2
+    assert out["lanes"]["claude_code"][_days_ago(2)[:10]]["skill_fires"] == 2
+    assert out["lanes"]["claude_code"][_days_ago(1)[:10]]["skill_fires"] == 0
+    svg = fresh_metrics.repo_swimlane_svg(out)
+    assert "#f59e0b" in svg and "curated skill fired" in svg  # dot + legend
+
+
+def test_repo_swimlane_landing_marker_only_within_window(fresh_metrics, monkeypatch, tmp_path):
+    state_db = tmp_path / "state.db"
+    with sqlite3.connect(str(state_db)) as conn:
+        conn.execute("CREATE TABLE runs (project_key TEXT, kind TEXT, status TEXT, started_at TEXT)")
+        # a curator run 1 day ago → inside a 4-week window
+        conn.execute("INSERT INTO runs VALUES ('kai','curator','ok',?)", (_days_ago(1),))
+    monkeypatch.setattr(fresh_metrics, "STATE_DB", state_db)
+    rows = [{"session_id": "a1", "project_dir": "/r/kai", "started_at": _days_ago(2),
+             "tool_use_count": 1, "tool_error_count": 0, "cost_usd": 0.1, "agent": "claude_code"}]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
+    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo="/r/kai")
+    assert out["landing"] == _days_ago(1)[:10]
+    assert "skills landed" in fresh_metrics.repo_swimlane_svg(out)

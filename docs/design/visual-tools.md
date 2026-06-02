@@ -73,20 +73,27 @@ shading. Truncates to `top_repos` and *surfaces* it ("showing 20 busiest of
    dria-sdk       ▂  23   2.1%      ▇ 96   3.3%       ▃ 30   5.0%
 ```
 
-### 2. Project swimlane (next)
+### 2. Project swimlane (shipped)
 
-> *The story of one repo over time, with the skill-landing causal marker.*
+> *The story of one repo over time, with the skill-landing marker and a
+> watchmen-usage overlay.*
 
-`metrics.repo_swimlane(project_key, weeks)` → ordered sessions
-(`started_at, agent, duration, cost, tool_error_count`) + skill-landing dates
-(reuse `homepage._treatment_date_for_project`). Server SVG on `/p/{key}`: a
-horizontal track, bar height = cost, colour = agent, `✗` tick = errored session,
-`│` = skill landing. Doubles as the cross-agent **handoff** view (you see
-`cc → cx` adjacency on one repo).
+`metrics.repo_swimlane(project_key, weeks, source_repo)` → one **daily lane per
+agent** (busiest first) over a 16-week window; each `(agent, day)` cell carries
+sessions / cost / tool errors / skill-fires. `repo_swimlane_svg()` renders it
+server-side on `/p/{key}`: lane cells shade by session count in the agent's
+colour, a red dashed `│` marks the first curator run (the same treatment date
+as the Impact card, via a local `_treatment_day`), and an **amber dot** marks
+each day a curated skill actually *fired* (`tool_calls.skill_name`) — so you
+watch watchmen's output go from *landed* → *used*. Switches between lanes are
+cross-agent **handoffs**. The before/after *outcome* numbers stay in the Impact
+card above (no duplication).
 
 ```
-  kai  ┃ cc▇  cc▅   cx▃     cc▇▇   │skill:deploy      cc▂  cc▁   cx▅
-       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━▶
+  Claude Code  ▇▅ ·  ●▃        │            ▂●  ▁
+  Codex        ·  ▃  ·   ▇▇    │skills          ▅
+               Mar      Apr   landed      May
+  cell shade = sessions · ● = a curated skill fired · │ = skills landed
 ```
 
 ### 3. Friction ledger (Tier 1)

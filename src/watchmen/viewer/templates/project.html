@@ -137,6 +137,26 @@
   {% endif %}
 </section>
 
+{% if swimlane and swimlane.total_sessions > 0 %}
+<section class="bg-white rounded-lg border border-gray-200 mb-8 p-5">
+  <div class="flex items-baseline justify-between mb-1">
+    <h2 class="text-lg font-semibold">Activity over time</h2>
+    <span class="text-xs text-gray-500">
+      {{ "{:,}".format(swimlane.total_sessions) }} sessions · last {{ swimlane.weeks }} weeks
+    </span>
+  </div>
+  <p class="text-xs text-gray-500 mb-3">
+    One lane per agent; each day shades darker the more sessions ran. Switches between lanes
+    are cross-agent handoffs.{% if swimlane.landing %} The dashed line marks when skills first landed{% endif %}{% if swimlane.total_skill_fires %}
+    {% if swimlane.landing %}, and an{% else %} An{% endif %} amber dot marks a day a curated skill actually fired
+    ({{ "{:,}".format(swimlane.total_skill_fires) }} total){% endif %}.
+  </p>
+  <div class="wm-swimlane" style="overflow-x:auto;">
+    {{ swimlane_svg|safe }}
+  </div>
+</section>
+{% endif %}
+
 {% if subagent_metrics and subagent_metrics.has_data %}
 <section class="bg-white rounded-lg border border-gray-200 mb-8 p-5">
   <div class="flex items-baseline justify-between mb-3">
